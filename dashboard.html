@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Seattle Rain Tracker</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#f5f2ec;--paper:#faf8f4;--ink:#1a1814;--muted:#8a8070;--border:#ddd8ce;
+  --rain:#2e5fa3;--rain-lt:#e8eef7;
+  --yes:#1a6b3c;--yes-lt:#e6f4ec;--yes-border:#a8d4b8;
+  --no:#8b2020;--no-lt:#f9eaea;--no-border:#e8b4b4;
+  --gap:#7a4010;--gap-lt:#fef3e8;--gap-border:#e8c49a;
+  --wu-hr:#2d7a4a;--wu-hr-lt:#e8f5ee;
+  --warn:#6b5a1a;--warn-lt:#faf5e6;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{background:var(--bg);color:var(--ink);font-family:'DM Mono',monospace;min-height:100vh;}
+body{max-width:900px;margin:0 auto;}
+.tabs{display:flex;border-bottom:2px solid var(--ink);background:var(--paper);position:sticky;top:0;z-index:100;}
+.tab{flex:1;padding:11px 6px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;text-align:center;color:var(--muted);cursor:pointer;border-bottom:3px solid transparent;margin-bottom:-2px;max-width:160px;}
+.tab.active{color:var(--rain);border-bottom-color:var(--rain);font-weight:500;}
+.header{padding:14px 20px 10px;border-bottom:1px solid var(--border);background:var(--paper);display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:6px;}
+.header h1{font-family:'Instrument Serif',serif;font-size:22px;font-weight:400;}
+.header h1 em{color:var(--rain);}
+.header-meta{display:flex;gap:5px;align-items:center;flex-wrap:wrap;}
+.pill{font-size:10px;padding:2px 7px;border-radius:3px;letter-spacing:1px;}
+.pill-ok{background:var(--yes-lt);color:var(--yes);}
+.pill-err{background:var(--no-lt);color:var(--no);}
+.updated{font-size:10px;color:var(--muted);}
+.banner{padding:8px 20px;font-size:11px;line-height:1.5;}
+.banner-wait{background:#f1efe8;border-left:3px solid var(--muted);color:var(--muted);}
+.banner-live{background:var(--yes-lt);border-left:3px solid var(--yes);color:var(--yes);}
+.main{padding:14px 20px;}
+.mtd-card{border:1px solid var(--border);border-radius:6px;background:var(--paper);overflow:hidden;margin-bottom:14px;}
+.mtd-hdr{display:flex;justify-content:space-between;align-items:center;padding:8px 14px;border-bottom:1px solid var(--border);}
+.mtd-lbl{font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);}
+.gap-badge{font-size:10px;padding:2px 8px;border-radius:3px;cursor:pointer;background:var(--gap-lt);color:var(--gap);}
+.mtd-cols{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;border-bottom:1px solid var(--border);}
+@media(max-width:600px){.mtd-cols{grid-template-columns:1fr 1fr;}}
+.mtd-col{padding:11px 13px;border-right:1px solid var(--border);}
+.mtd-col:last-child{border-right:none;}
+.col-lbl{font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:4px;}
+.col-src{display:flex;align-items:center;gap:6px;margin-bottom:3px;}
+.dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;}
+.dot-nws{background:var(--rain);}.dot-iem{background:var(--gap);}.dot-wuhr{background:var(--wu-hr);}.dot-tot{background:var(--yes);}
+.col-name{font-size:9px;color:var(--muted);}
+.col-val{font-size:26px;font-style:italic;line-height:1;margin-bottom:2px;}
+.col-unit{font-size:10px;font-style:normal;color:var(--muted);}
+.c-blue{color:var(--rain);}.c-gap{color:var(--gap);}.c-wuhr{color:var(--wu-hr);}.c-yes{color:var(--yes);}.c-muted{color:var(--muted);}
+.col-sub{font-size:9px;color:var(--muted);line-height:1.4;}
+.expand-toggle{font-size:9px;cursor:pointer;text-decoration:underline;margin-top:3px;display:inline-block;}
+.tog-gap{color:var(--gap);}.tog-wu{color:var(--wu-hr);}
+.expand-panel{display:none;padding:8px 14px;}
+.expand-panel.open{display:block;}
+.ep-gap{background:var(--gap-lt);border-top:1px solid var(--gap-border);}
+.ep-wu{background:var(--wu-hr-lt);border-top:1px solid #9ecfb0;}
+.ep-title{font-size:9px;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px;}
+.ep-title-gap{color:var(--gap);}.ep-title-wu{color:var(--wu-hr);}
+.hr-row{display:flex;align-items:center;gap:7px;margin-bottom:3px;}
+.hr-time{font-size:9px;min-width:55px;}
+.hr-bar-w{flex:1;height:5px;border-radius:2px;overflow:hidden;}
+.bg-gap{background:rgba(122,64,16,.12);}.bg-wu{background:rgba(45,122,74,.12);}
+.hr-bar{height:100%;border-radius:2px;}
+.bar-gap{background:var(--gap);}.bar-wu{background:var(--wu-hr);}
+.hr-val{font-size:9px;font-weight:500;min-width:28px;text-align:right;}
+.kpi-row{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--border);border:1px solid var(--border);border-radius:6px;overflow:hidden;margin-bottom:14px;}
+@media(max-width:600px){.kpi-row{grid-template-columns:1fr 1fr;}}
+.kpi{background:var(--paper);padding:12px 14px;}
+.kpi-muted{background:#f1efe8;}
+.kpi-lbl{font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:5px;line-height:1.3;}
+.kpi-val{font-size:26px;font-style:italic;line-height:1;}
+.kpi-unit{font-size:10px;font-style:normal;color:var(--muted);}
+.kpi-sub{font-size:9px;color:var(--muted);margin-top:4px;line-height:1.5;}
+.kpi-sub b{color:var(--ink);}
+.sect{background:var(--paper);border:1px solid var(--border);border-radius:6px;margin-bottom:14px;overflow:hidden;}
+.sect-hdr{display:flex;justify-content:space-between;align-items:baseline;padding:9px 14px;border-bottom:1px solid var(--border);}
+.sect-title{font-size:13px;font-weight:500;color:var(--ink);}
+.sect-meta{font-size:9px;color:var(--muted);}
+.chart-bars{display:flex;gap:3px;align-items:flex-end;height:80px;padding:8px 14px 0;}
+.bar-col{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;height:100%;justify-content:flex-end;}
+.bar-rect{width:100%;border-radius:2px 2px 0 0;min-height:2px;}
+.bar-today{background:var(--wu-hr);opacity:.85;}
+.bar-fc{background:var(--rain);opacity:.75;}
+.bar-zero{background:var(--border);}
+.bar-dim{background:var(--border);opacity:.3;}
+.bar-lv{font-size:8px;color:var(--ink);font-weight:500;}
+.bar-ld{font-size:8px;color:var(--muted);}
+.chart-legend{display:flex;gap:14px;padding:4px 14px 5px;font-size:9px;color:var(--muted);flex-wrap:wrap;}
+.leg-sw{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:3px;vertical-align:middle;}
+.chart-foot{display:flex;justify-content:space-between;padding:5px 14px 9px;font-size:9px;color:var(--muted);border-top:1px solid var(--border);margin-top:5px;flex-wrap:wrap;gap:4px;}
+.chart-foot b{color:var(--ink);}
+.mkts-hdr{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;}
+.mkts-title{font-size:13px;font-weight:500;}
+.mkts-proj{font-size:10px;color:var(--muted);}
+.mkts-proj b{color:var(--ink);}
+.markets-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;margin-bottom:14px;}
+.mcard{background:var(--paper);border:1px solid var(--border);border-radius:6px;overflow:hidden;}
+.mcard-hdr{padding:9px 12px 7px;border-bottom:1px solid var(--border);}
+.mcard-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;}
+.mcard-strike{font-size:14px;font-weight:500;}
+.edge-badge{font-size:9px;font-weight:500;padding:2px 9px;border-radius:3px;}
+.edge-strong-yes{background:#e6f4ec;color:#0f4d2a;}
+.edge-lean-yes{background:var(--yes-lt);color:var(--yes);}
+.edge-strong-no{background:#f9eaea;color:#6b1010;}
+.edge-lean-no{background:var(--no-lt);color:var(--no);}
+.edge-hold{background:#f1efe8;color:var(--muted);}
+.proj-bar-wrap{height:6px;background:var(--border);border-radius:3px;position:relative;margin:4px 0 2px;}
+.proj-bar-fill{height:100%;border-radius:3px;}
+.proj-marker-strike{position:absolute;top:-4px;width:2px;height:14px;background:var(--muted);border-radius:1px;}
+.proj-marker-our{position:absolute;top:-4px;width:2px;height:14px;background:var(--ink);border-radius:1px;}
+.proj-bar-labels{display:flex;justify-content:space-between;font-size:8px;color:var(--muted);margin-bottom:2px;}
+.proj-bar-labels b{color:var(--ink);}
+.proj-detail{font-size:9px;color:var(--muted);margin-top:2px;}
+.odds-row{display:flex;padding:8px 12px;gap:6px;align-items:stretch;}
+.odds-side{flex:1;text-align:center;padding:7px 3px;border-radius:4px;}
+.odds-yes{background:var(--yes-lt);}.odds-no{background:var(--no-lt);}
+.odds-lbl{font-size:8px;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:2px;}
+.odds-yes .odds-lbl{color:var(--yes);}.odds-no .odds-lbl{color:var(--no);}
+.odds-price{font-size:20px;font-weight:500;}
+.odds-yes .odds-price{color:var(--yes);}.odds-no .odds-price{color:var(--no);}
+.odds-mid{flex:1;text-align:center;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;}
+.odds-mid-detail{font-size:9px;color:var(--muted);line-height:1.4;}
+.odds-mid-detail b{color:var(--ink);}
+.bet-area{padding:7px 12px 10px;border-top:1px solid var(--border);}
+.bet-cols{display:flex;gap:8px;margin-bottom:4px;}
+.bet-col{flex:1;}
+.bet-col-lbl{font-size:8px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:3px;}
+.bet-btns{display:flex;gap:2px;}
+.bet-btn{flex:1;padding:5px 2px;font-size:9px;cursor:pointer;border-radius:3px;border:1px solid var(--border);background:var(--bg);color:var(--ink);font-family:inherit;}
+.bet-btn-yes{border-color:var(--yes);color:var(--yes);background:var(--yes-lt);}
+.bet-btn-no{border-color:var(--no);color:var(--no);background:var(--no-lt);}
+.bet-slip-row{display:none;justify-content:space-between;font-size:9px;color:var(--muted);padding-top:3px;}
+.bet-slip-val{color:var(--ink);font-weight:500;}
+.bet-slip-clr{cursor:pointer;padding:1px 4px;border:1px solid var(--border);border-radius:2px;font-size:8px;}
+.place-bar{padding:0 0 16px;}
+.place-btn{width:100%;padding:13px;background:var(--ink);color:var(--paper);border:none;border-radius:6px;font-size:11px;letter-spacing:1px;cursor:pointer;font-family:inherit;}
+.place-btn:disabled{background:var(--muted);cursor:not-allowed;}
+.place-btn.active{background:var(--rain);}
+.locked-msg{text-align:center;padding:24px;color:var(--muted);font-size:11px;border:1px dashed var(--border);border-radius:6px;margin-bottom:14px;line-height:1.7;}
+.locked-msg strong{display:block;font-size:15px;color:var(--ink);margin-bottom:5px;font-weight:500;}
+.bal-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px;}
+@media(max-width:600px){.bal-row{grid-template-columns:1fr 1fr;}}
+.bal-card{background:var(--paper);border:1px solid var(--border);border-radius:6px;padding:12px 14px;}
+.bal-lbl{font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:4px;}
+.bal-val{font-size:22px;font-style:italic;line-height:1;}
+.bal-sub{font-size:9px;color:var(--muted);margin-top:3px;}
+.pos-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px;}
+@media(max-width:600px){.pos-grid{grid-template-columns:1fr;}}
+.pos-card{background:var(--paper);border:1px solid var(--border);border-radius:6px;overflow:hidden;}
+.pos-hdr{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border);}
+.pos-strike{font-size:13px;font-weight:500;}
+.pos-badge{font-size:10px;font-weight:500;padding:2px 7px;border-radius:3px;}
+.pos-badge-yes{background:var(--yes-lt);color:var(--yes);}
+.pos-badge-no{background:var(--no-lt);color:var(--no);}
+.pos-body{padding:12px 14px;}
+.pos-stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:10px;}
+.pos-stat{text-align:center;}
+.pos-stat-lbl{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:2px;}
+.pos-stat-val{font-size:13px;font-weight:500;}
+.c-profit{color:var(--yes);}.c-loss{color:var(--no);}
+.thesis-box{background:var(--bg);border-radius:4px;padding:8px 10px;margin-bottom:8px;font-size:10px;color:var(--muted);line-height:1.5;}
+.thesis-box strong{color:var(--ink);font-weight:500;}
+.drift-row{display:flex;align-items:center;gap:8px;margin-bottom:4px;}
+.drift-lbl{font-size:9px;color:var(--muted);min-width:100px;}
+.drift-bar-w{flex:1;height:5px;background:var(--bg);border-radius:3px;overflow:hidden;}
+.drift-bar{height:100%;border-radius:3px;}
+.drift-good{background:var(--yes);}.drift-warn{background:#EF9F27;}.drift-bad{background:var(--no);}
+.drift-val{font-size:9px;font-weight:500;min-width:36px;text-align:right;}
+.drift-note{font-size:9px;color:var(--muted);margin-bottom:8px;}
+.targets{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px;}
+.target-box{border:1px solid var(--border);border-radius:4px;padding:7px 10px;}
+.target-lbl{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:3px;}
+.target-val{font-size:15px;font-weight:500;}
+.target-profit .target-val{color:var(--yes);}.target-stop .target-val{color:var(--no);}
+.target-sub{font-size:9px;color:var(--muted);margin-top:2px;}
+.signal-pill{display:inline-block;font-size:10px;padding:3px 10px;border-radius:3px;margin-bottom:8px;}
+.sig-exit{background:var(--yes-lt);color:var(--yes);}
+.sig-watch{background:var(--warn-lt);color:var(--warn);}
+.sig-hold{background:#f1efe8;color:var(--muted);}
+.pos-btns{display:flex;gap:6px;}
+.pos-btn{flex:1;padding:7px;font-size:9px;letter-spacing:1px;cursor:pointer;border-radius:3px;border:1px solid var(--border);background:var(--bg);color:var(--ink);font-family:inherit;}
+.pos-btn-sell-yes{border-color:var(--yes);color:var(--yes);background:var(--yes-lt);}
+.pos-btn-sell-no{border-color:var(--no);color:var(--no);background:var(--no-lt);}
+.section-lbl{font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--border);}
+.rules-list{display:grid;gap:10px;margin-bottom:14px;}
+.rule-card{background:var(--paper);border:1px solid var(--border);border-radius:6px;overflow:hidden;}
+.rule-card.rule-active{border-color:var(--yes-border);}
+.rule-hdr{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:1px solid var(--border);}
+.rule-card.rule-active .rule-hdr{background:var(--yes-lt);}
+.rule-name{font-size:13px;font-weight:500;}
+.rule-toggle-wrap{display:flex;align-items:center;gap:8px;font-size:10px;color:var(--muted);}
+.rule-toggle{width:32px;height:18px;border-radius:9px;border:none;cursor:pointer;position:relative;background:var(--border);}
+.rule-toggle.on{background:var(--yes);}
+.rule-thumb{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;transition:left .15s;}
+.rule-toggle.on .rule-thumb{left:16px;}
+.rule-body{padding:12px 14px;}
+.rule-conds{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:8px;}
+.rule-cond{background:var(--bg);border-radius:4px;padding:7px 9px;}
+.rule-cond-lbl{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:2px;}
+.rule-cond-val{font-size:12px;font-weight:500;}
+.rule-desc{font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:8px;}
+.rule-log{font-size:10px;color:var(--muted);padding:6px 8px;background:var(--bg);border-radius:4px;line-height:1.7;}
+.rule-log .log-yes{color:var(--yes);font-weight:500;}
+.rule-log .log-warn{color:#BA7517;font-weight:500;}
+.rule-log .log-info{color:var(--rain);font-weight:500;}
+.add-rule-btn{width:100%;padding:12px;font-size:11px;letter-spacing:1px;text-transform:uppercase;cursor:pointer;border-radius:6px;border:1px dashed var(--border);background:transparent;color:var(--muted);font-family:inherit;}
+.expansion-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:16px;}
+@media(max-width:600px){.expansion-grid{grid-template-columns:1fr;}}
+.exp-card{background:var(--paper);border:1px solid var(--border);border-radius:6px;padding:12px 14px;}
+.exp-city{font-size:13px;font-weight:500;margin-bottom:2px;}
+.exp-market{font-size:10px;color:var(--muted);margin-bottom:6px;}
+.exp-badge{display:inline-block;font-size:9px;padding:2px 7px;border-radius:3px;}
+.exp-soon{background:var(--warn-lt);color:var(--warn);}
+.exp-research{background:#f1efe8;color:var(--muted);border:1px solid var(--border);}
+.exp-note{font-size:10px;color:var(--muted);margin-top:6px;line-height:1.5;}
+.hist-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px;}
+@media(max-width:600px){.hist-summary{grid-template-columns:1fr 1fr;}}
+.hist-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border);font-size:11px;}
+.hist-row:last-child{border-bottom:none;}
+.hist-strike{font-weight:500;}
+.hist-meta{font-size:9px;color:var(--muted);margin-top:2px;}
+.hist-pnl{font-weight:500;}
+.hist-stat{font-size:9px;color:var(--muted);text-align:right;}
+.hist-win{color:var(--yes);}.hist-loss{color:var(--no);}.hist-open{color:var(--rain);}
+.month-label{font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);padding:8px 0 4px;border-bottom:1px solid var(--border);margin-bottom:4px;}
+.footer{font-size:9px;color:var(--muted);padding:10px 0 20px;line-height:1.8;border-top:1px solid var(--border);margin-top:6px;}
+.err-msg{background:var(--no-lt);border:1px solid var(--no-border);border-radius:6px;padding:12px 14px;font-size:11px;color:var(--no);margin-bottom:14px;line-height:1.6;}
+</style>
+</head>
+<body>
+<div class="tabs">
+  <div class="tab active" id="t-dash" onclick="sw('dash')">Dashboard</div>
+  <div class="tab" id="t-pos" onclick="sw('pos')">Positions</div>
+  <div class="tab" id="t-rules" onclick="sw('rules')">Rules</div>
+  <div class="tab" id="t-hist" onclick="sw('hist')">History</div>
+</div>
+
+<!-- DASHBOARD -->
+<div id="p-dash">
+  <div class="header">
+    <h1>Seattle <em>Rain</em> Tracker</h1>
+    <div class="header-meta" id="status-pills"><span class="pill pill-err">Loading...</span></div>
+  </div>
+  <div class="banner banner-wait" id="banner">Fetching data...</div>
+  <div class="main">
+    <div id="mtd-card-wrap"></div>
+    <div id="kpi-row-wrap"></div>
+    <div id="chart-wrap"></div>
+    <div id="markets-wrap"></div>
+    <div class="place-bar">
+      <button class="place-btn" id="place-btn" disabled>No bets in slip</button>
+    </div>
+    <div class="footer">
+      Sources: NWS CLISEA (settlement) · Weather Underground KSEA daily + hourly · IEM KSEA ASOS (gap fill) · Kalshi KXRAINSEAM<br>
+      RAINM rules: Feb 4 2026 · Trace = 0.00" · First complete DCR governs settlement
+    </div>
+  </div>
+</div>
+
+<!-- POSITIONS -->
+<div id="p-pos" style="display:none">
+  <div class="main">
+    <div class="bal-row">
+      <div class="bal-card"><div class="bal-lbl">Account balance</div><div class="bal-val c-blue">$342.18</div><div class="bal-sub">Available to trade</div></div>
+      <div class="bal-card"><div class="bal-lbl">Invested</div><div class="bal-val">$161.58</div><div class="bal-sub">2 open positions</div></div>
+      <div class="bal-card"><div class="bal-lbl">Unrealized P&L</div><div class="bal-val c-profit">+$23.40</div><div class="bal-sub">+14.5% on cost</div></div>
+      <div class="bal-card"><div class="bal-lbl">Exit signals</div><div class="bal-val c-profit">1 ready</div><div class="bal-sub">Above 6" at target</div></div>
+    </div>
+    <div class="section-lbl">Open positions (2)</div>
+    <div class="pos-grid">
+      <div class="pos-card">
+        <div class="pos-hdr"><div class="pos-strike">Above 6 inches · Mar 2026</div><span class="pos-badge pos-badge-yes">YES</span></div>
+        <div class="pos-body">
+          <div class="pos-stats">
+            <div class="pos-stat"><div class="pos-stat-lbl">Contracts</div><div class="pos-stat-val">142</div></div>
+            <div class="pos-stat"><div class="pos-stat-lbl">Avg cost</div><div class="pos-stat-val">71¢</div></div>
+            <div class="pos-stat"><div class="pos-stat-lbl">Current</div><div class="pos-stat-val">88¢</div></div>
+          </div>
+          <div class="pos-stats">
+            <div class="pos-stat"><div class="pos-stat-lbl">Invested</div><div class="pos-stat-val">$100.82</div></div>
+            <div class="pos-stat"><div class="pos-stat-lbl">Value</div><div class="pos-stat-val">$124.96</div></div>
+            <div class="pos-stat"><div class="pos-stat-lbl">P&L</div><div class="pos-stat-val c-profit">+$24.14</div></div>
+          </div>
+          <div class="thesis-box"><strong>Entry Mar 13 · 71¢ · proj 6.44":</strong> WU showing sustained wet pattern, 6" strike well within range. Market underpricing at 71¢.</div>
+          <div class="drift-row">
+            <div class="drift-lbl">Projection drift</div>
+            <div class="drift-bar-w"><div class="drift-bar drift-good" style="width:85%"></div></div>
+            <div class="drift-val c-profit">+0.45"</div>
+          </div>
+          <div class="drift-note">Entry proj 6.44" → current 6.89" · thesis strengthening</div>
+          <div class="targets">
+            <div class="target-box target-profit"><div class="target-lbl">Profit target</div><div class="target-val">88¢</div><div class="target-sub">AT TARGET</div></div>
+            <div class="target-box target-stop"><div class="target-lbl">Stop loss</div><div class="target-val">58¢</div><div class="target-sub">-13¢ from entry</div></div>
+          </div>
+          <div class="signal-pill sig-exit">Target reached — consider exiting</div>
+          <div class="pos-btns">
+            <button class="pos-btn pos-btn-sell-yes">Sell at market ↗</button>
+            <button class="pos-btn">Edit targets</button>
+          </div>
+        </div>
+      </div>
+      <div class="pos-card">
+        <div class="pos-hdr"><div class="pos-strike">Above 7 inches · Mar 2026</div><span class="pos-badge pos-badge-no">NO</span></div>
+        <div class="pos-body">
+          <div class="pos-stats">
+            <div class="pos-stat"><div class="pos-stat-lbl">Contracts</div><div class="pos-stat-val">98</div></div>
+            <div class="pos-stat"><div class="pos-stat-lbl">Avg cost</div><div class="pos-stat-val">62¢</div></div>
+            <div class="pos-stat"><div class="pos-stat-lbl">Current</div><div class="pos-stat-val">55¢</div></div>
+          </div>
+          <div class="pos-stats">
+            <div class="pos-stat"><div class="pos-stat-lbl">Invested</div><div class="pos-stat-val">$60.76</div></div>
+            <div class="pos-stat"><div class="pos-stat-lbl">Value</div><div class="pos-stat-val">$53.90</div></div>
+            <div class="pos-stat"><div class="pos-stat-lbl">P&L</div><div class="pos-stat-val c-loss">-$6.86</div></div>
+          </div>
+          <div class="thesis-box"><strong>Entry Mar 15 · 62¢ · proj 6.12":</strong> Projection 0.88" below 7" strike. NO at 38¢ implied looked cheap. WU dry pattern developing.</div>
+          <div class="drift-row">
+            <div class="drift-lbl">Projection drift</div>
+            <div class="drift-bar-w"><div class="drift-bar drift-warn" style="width:45%"></div></div>
+            <div class="drift-val" style="color:#BA7517">+0.77"</div>
+          </div>
+          <div class="drift-note" style="color:#BA7517">Entry proj 6.12" → current 6.89" · margin narrowing, watch closely</div>
+          <div class="targets">
+            <div class="target-box target-profit"><div class="target-lbl">Profit target</div><div class="target-val">75¢</div><div class="target-sub">+13¢ from entry</div></div>
+            <div class="target-box target-stop"><div class="target-lbl">Proj stop</div><div class="target-val">6.80"</div><div class="target-sub">thesis break level</div></div>
+          </div>
+          <div class="signal-pill sig-watch">Projection drifting — review thesis</div>
+          <div class="pos-btns">
+            <button class="pos-btn pos-btn-sell-no">Sell at market ↗</button>
+            <button class="pos-btn">Edit targets</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="footer">* Live positions via Kalshi API · Order execution coming soon</div>
+  </div>
+</div>
+
+<!-- RULES -->
+<div id="p-rules" style="display:none">
+  <div class="main">
+    <div class="section-lbl">Auto-trade rules — Seattle · KXRAINSEAM</div>
+    <div class="rules-list">
+      <div class="rule-card rule-active">
+        <div class="rule-hdr">
+          <div class="rule-name">Strong YES entry</div>
+          <div class="rule-toggle-wrap"><span>Active</span><div class="rule-toggle on" onclick="toggleRule(this)"><div class="rule-thumb"></div></div></div>
+        </div>
+        <div class="rule-body">
+          <div class="rule-conds">
+            <div class="rule-cond"><div class="rule-cond-lbl">Weighted edge</div><div class="rule-cond-val">&gt;= +0.40</div></div>
+            <div class="rule-cond"><div class="rule-cond-lbl">Days remaining</div><div class="rule-cond-val">3 – 7</div></div>
+            <div class="rule-cond"><div class="rule-cond-lbl">Max bet</div><div class="rule-cond-val">$150</div></div>
+            <div class="rule-cond"><div class="rule-cond-lbl">Profit target</div><div class="rule-cond-val">+15¢</div></div>
+            <div class="rule-cond"><div class="rule-cond-lbl">Stop loss</div><div class="rule-cond-val">-10¢</div></div>
+            <div class="rule-cond"><div class="rule-cond-lbl">Proj stop</div><div class="rule-cond-val">-0.50"</div></div>
+          </div>
+          <div class="rule-desc">Enter YES when weighted edge &gt;= 0.40 and 3–7 days remain. Exit at +15¢ profit, -10¢ stop, or if projection drops &gt;0.50" from entry. Force exit at 1 day remaining.</div>
+          <div class="rule-log">Last triggered: <span class="log-yes">Mar 13 · Above 6" YES at 71¢</span> · +$24.14 unrealized · <span class="log-info">target hit, pending confirm</span></div>
+        </div>
+      </div>
+      <div class="rule-card rule-active">
+        <div class="rule-hdr">
+          <div class="rule-name">Strong NO entry</div>
+          <div class="rule-toggle-wrap"><span>Active</span><div class="rule-toggle on" onclick="toggleRule(this)"><div class="rule-thumb"></div></div></div>
+        </div>
+        <div class="rule-body">
+          <div class="rule-conds">
+            <div class="rule-cond"><div class="rule-cond-lbl">Weighted edge</div><div class="rule-cond-val">&lt;= -0.40</div></div>
+            <div class="rule-cond"><div class="rule-cond-lbl">Days remaining</div><div class="rule-cond-val">3 – 7</div></div>
+            <div class="rule-cond"><div class="rule-cond-lbl">Max bet</div><div class="rule-cond-val">$100</div></div>
+            <div class="rule-cond"><div class="rule-cond-lbl">Profit target</div><div class="rule-cond-val">+15¢</div></div>
+            <div class="rule-cond"><div class="rule-cond-lbl">Stop loss</div><div class="rule-cond-val">-10¢</div></div>
+            <div class="rule-cond"><div class="rule-cond-lbl">Proj stop</div><div class="rule-cond-val">+0.50"</div></div>
+          </div>
+          <div class="rule-desc">Enter NO when weighted edge &lt;= -0.40 and 3–7 days remain. Exit if projection rises &gt;0.50" from entry — thesis broken.</div>
+          <div class="rule-log">Last triggered: <span class="log-warn">Mar 15 · Above 7" NO at 62¢</span> · projection drifting · <span class="log-warn">approaching proj stop</span></div>
+        </div>
+      </div>
+      <div class="rule-card">
+        <div class="rule-hdr">
+          <div class="rule-name">Lean entry — longer window</div>
+          <div class="rule-toggle-wrap"><span style="color:var(--muted)">Paused</span><div class="rule-toggle" onclick="toggleRule(this)"><div class="rule-thumb"></div></div></div>
+        </div>
+        <div class="rule-body">
+          <div class="rule-conds">
+            <div class="rule-cond"><div class="rule-cond-lbl">Weighted edge</div><div class="rule-cond-val">&gt;= +0.20</div></div>
+            <div class="rule-cond"><div class="rule-cond-lbl">Days remaining</div><div class="rule-cond-val">7 – 10</div></div>
+            <div class="rule-cond"><div class="rule-cond-lbl">Max bet</div><div class="rule-cond-val">$75</div></div>
+          </div>
+          <div class="rule-desc">Looser entry when edge is moderate and WU is less reliable. Smaller size, wider stops to account for forecast noise at this horizon.</div>
+          <div class="rule-log">Last triggered: <span class="log-info">never · paused pending backtest</span></div>
+        </div>
+      </div>
+    </div>
+    <button class="add-rule-btn">+ New rule</button>
+    <div class="section-lbl" style="margin-top:20px;">Expansion markets</div>
+    <div class="expansion-grid">
+      <div class="exp-card"><div class="exp-city">Portland, OR</div><div class="exp-market">KXRAINPDXM</div><span class="exp-badge exp-soon">Up next</span><div class="exp-note">Same climate pattern. NWS CLIPDX + IEM KPDX. High data confidence.</div></div>
+      <div class="exp-card"><div class="exp-city">Chicago, IL</div><div class="exp-market">KXRAINORDM</div><span class="exp-badge exp-research">Researching</span><div class="exp-note">Different forecast pattern. Need to validate WU accuracy vs NWS settlement.</div></div>
+      <div class="exp-card"><div class="exp-city">New York, NY</div><div class="exp-market">KXRAINJFKM</div><span class="exp-badge exp-research">Researching</span><div class="exp-note">High volume market. WU KJFK endpoint unconfirmed. Settlement station TBD.</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- HISTORY -->
+<div id="p-hist" style="display:none">
+  <div class="main">
+    <div class="hist-summary">
+      <div class="bal-card"><div class="bal-lbl">Total P&L</div><div class="bal-val c-profit">+$87.42</div></div>
+      <div class="bal-card"><div class="bal-lbl">Win rate</div><div class="bal-val">71%</div></div>
+      <div class="bal-card"><div class="bal-lbl">Trades</div><div class="bal-val">14</div></div>
+      <div class="bal-card"><div class="bal-lbl">Avg win</div><div class="bal-val c-profit">+$49</div></div>
+    </div>
+    <div class="month-label">March 2026</div>
+    <div class="hist-row"><div><div class="hist-strike">Above 5 inches YES</div><div class="hist-meta">Mar 13 · 142 contracts @ 91¢ · $129.22</div></div><div style="text-align:right"><div class="hist-pnl hist-win">+$12.78</div><div class="hist-stat">Settled ✓</div></div></div>
+    <div class="hist-row"><div><div class="hist-strike">Above 6 inches YES</div><div class="hist-meta">Mar 13 · 142 contracts @ 71¢ · $100.82</div></div><div style="text-align:right"><div class="hist-pnl hist-open">Open</div><div class="hist-stat">+$24.14 unrealized</div></div></div>
+    <div class="hist-row"><div><div class="hist-strike">Above 7 inches NO</div><div class="hist-meta">Mar 15 · 98 contracts @ 62¢ · $60.76</div></div><div style="text-align:right"><div class="hist-pnl hist-open">Open</div><div class="hist-stat">-$6.86 unrealized</div></div></div>
+    <div class="month-label" style="margin-top:12px">February 2026</div>
+    <div class="hist-row"><div><div class="hist-strike">Above 4 inches YES</div><div class="hist-meta">Feb 19 · 200 contracts @ 49¢ · $98.00</div></div><div style="text-align:right"><div class="hist-pnl hist-win">+$102.00</div><div class="hist-stat">Settled ✓</div></div></div>
+    <div class="hist-row"><div><div class="hist-strike">Above 6 inches NO</div><div class="hist-meta">Feb 19 · 83 contracts @ 60¢ · $49.80</div></div><div style="text-align:right"><div class="hist-pnl hist-win">+$33.20</div><div class="hist-stat">Settled ✓</div></div></div>
+    <div class="hist-row"><div><div class="hist-strike">Above 7 inches YES</div><div class="hist-meta">Feb 22 · 200 contracts @ 24¢ · $48.00</div></div><div style="text-align:right"><div class="hist-pnl hist-loss">-$48.00</div><div class="hist-stat">Settled ✗</div></div></div>
+    <div class="footer" style="margin-top:12px">* Live history via Kalshi API · Integration coming in next release</div>
+  </div>
+</div>
+
+<script>
+const SERVER='';
+const betSlip={};
+
+function sw(t){
+  ['dash','pos','rules','hist'].forEach(x=>{
+    document.getElementById('p-'+x).style.display=x===t?'block':'none';
+    document.getElementById('t-'+x).className='tab'+(x===t?' active':'');
+  });
+}
+
+function toggleRule(tog){
+  const on=tog.classList.contains('on');
+  tog.classList.toggle('on',!on);
+  const lbl=tog.previousElementSibling;
+  lbl.textContent=on?'Paused':'Active';
+  lbl.style.color=on?'var(--muted)':'';
+  tog.closest('.rule-card').classList.toggle('rule-active',!on);
+}
+
+async function loadData(){
+  try{
+    const res=await fetch(SERVER+'/data');
+    if(!res.ok)throw new Error('Server returned '+res.status);
+    const d=await res.json();
+    renderDashboard(d);
+  }catch(e){
+    document.getElementById('status-pills').innerHTML='<span class="pill pill-err">Server offline</span>';
+    document.getElementById('banner').innerHTML='Cannot reach server. Make sure server.py is running.';
+    document.getElementById('mtd-card-wrap').innerHTML='<div class="err-msg">Error: '+e.message+'<br>Run <code>python3 server.py</code> and refresh.</div>';
+  }
+}
+
+function renderDashboard(d){
+  const{nws,wu,wu_hourly,iem,kalshi,true_mtd,gap_total,today_eod,today_remaining,projected,wu_covers_eom,days_remaining,confidence,month}=d;
+  const pills=[nws.ok?'NWS ✓':'NWS ✗',wu.ok?'WU ✓':'WU ✗',iem.ok?'IEM ✓':'IEM ✗',kalshi.ok?'KALSHI ✓':'KALSHI ✗'];
+  const oks=[nws.ok,wu.ok,iem.ok,kalshi.ok];
+  document.getElementById('status-pills').innerHTML=
+    pills.map((p,i)=>`<span class="pill ${oks[i]?'pill-ok':'pill-err'}">${p}</span>`).join('')+
+    `<span class="updated">Updated ${new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}</span>`;
+  const banner=document.getElementById('banner');
+  if(days_remaining>10){
+    banner.className='banner banner-wait';
+    banner.innerHTML=`<strong>${days_remaining} days remaining in ${month}.</strong> Check back when ${days_remaining-10} fewer days remain — WU 10-day will then cover month-end.`;
+  }else{
+    banner.className='banner banner-live';
+    banner.innerHTML=`<strong>${days_remaining} days remaining — trading window active.</strong> WU forecast covers full month remainder. Signals live.`;
+  }
+  renderMTD(d);
+  renderKPIs(d);
+  renderChart(d);
+  renderMarkets(d);
+}
+
+function renderMTD(d){
+  const{nws,iem,wu_hourly,gap_total,today_eod,today_remaining}=d;
+  const nws_mtd=nws.mtd||0;
+  const nws_time=nws.issued||'—';
+  const iem_hours=iem.hours||[];
+  const wu_hours=(wu_hourly&&wu_hourly.hours||[]).filter(h=>h.qpf>0);
+  const iemMax=Math.max(...iem_hours.map(h=>h.qpf),0.01);
+  const wuMax=Math.max(...wu_hours.map(h=>h.qpf),0.01);
+  const iemRows=iem_hours.map(h=>`<div class="hr-row"><div class="hr-time" style="color:var(--gap)">${h.time||'—'}</div><div class="hr-bar-w bg-gap"><div class="hr-bar bar-gap" style="width:${Math.round(h.qpf/iemMax*100)}%"></div></div><div class="hr-val" style="color:var(--gap)">${(h.qpf||0).toFixed(2)}"</div></div>`).join('')||'<div style="font-size:10px;color:var(--muted)">No gap — NWS report is current</div>';
+  const wuRows=wu_hours.map(h=>`<div class="hr-row"><div class="hr-time" style="color:var(--wu-hr)">${h.time||'—'}</div><div class="hr-bar-w bg-wu"><div class="hr-bar bar-wu" style="width:${Math.round(h.qpf/wuMax*100)}%"></div></div><div class="hr-val" style="color:var(--wu-hr)">${(h.qpf||0).toFixed(2)}"</div></div>`).join('')||'<div style="font-size:10px;color:var(--muted)">No WU hourly data</div>';
+  document.getElementById('mtd-card-wrap').innerHTML=`
+    <div class="mtd-card">
+      <div class="mtd-hdr">
+        <div class="mtd-lbl">MTD Rainfall — Live Picture</div>
+        ${gap_total>0?`<span class="gap-badge" onclick="toggleExpand('det-iem')">▲ +${gap_total.toFixed(2)}" gap · expand ↓</span>`:''}
+      </div>
+      <div class="mtd-cols">
+        <div class="mtd-col">
+          <div class="col-lbl">NWS CLISEA Official</div>
+          <div class="col-src"><div class="dot dot-nws"></div><div class="col-name">Settlement source · ${nws_time}</div></div>
+          <div class="col-val c-blue">${nws_mtd.toFixed(2)}<span class="col-unit">in</span></div>
+          <div class="col-sub">Official MTD as of last DCR</div>
+        </div>
+        <div class="mtd-col">
+          <div class="col-lbl">IEM KSEA Gap Fill</div>
+          <div class="col-src"><div class="dot dot-iem"></div><div class="col-name">ASOS actual · since last DCR</div></div>
+          <div class="col-val c-gap">+${gap_total.toFixed(2)}<span class="col-unit">in</span></div>
+          <div class="col-sub">0.01" precision actuals</div>
+          <span class="expand-toggle tog-gap" onclick="toggleExpand('det-iem')">↓ Show hourly</span>
+        </div>
+        <div class="mtd-col">
+          <div class="col-lbl">WU Hourly Tonight</div>
+          <div class="col-src"><div class="dot dot-wuhr"></div><div class="col-name">WU forecast · now → midnight</div></div>
+          <div class="col-val c-wuhr">+${(today_remaining||0).toFixed(2)}<span class="col-unit">in</span></div>
+          <div class="col-sub">Remainder of today</div>
+          <span class="expand-toggle tog-wu" onclick="toggleExpand('det-wu')">↓ Show hourly</span>
+        </div>
+        <div class="mtd-col">
+          <div class="col-lbl">Projected EOD Total</div>
+          <div class="col-src"><div class="dot dot-tot"></div><div class="col-name">End of today</div></div>
+          <div class="col-val c-yes">${(today_eod||0).toFixed(2)}<span class="col-unit">in</span></div>
+          <div class="col-sub">NWS + IEM gap + WU tonight</div>
+        </div>
+      </div>
+      <div class="expand-panel ep-gap" id="det-iem"><div class="ep-title ep-title-gap">IEM KSEA actuals — since last DCR</div>${iemRows}</div>
+      <div class="expand-panel ep-wu" id="det-wu"><div class="ep-title ep-title-wu">WU hourly forecast — now → midnight</div>${wuRows}</div>
+    </div>`;
+}
+
+function toggleExpand(id){const el=document.getElementById(id);if(el)el.classList.toggle('open');}
+
+function renderKPIs(d){
+  const{wu,today_eod,today_remaining,projected,wu_covers_eom,days_remaining}=d;
+  const wuDays=wu.days||[];
+  const usable=wuDays.slice(0,Math.min(days_remaining,10));
+  const wuSum=Math.round(usable.reduce((s,x)=>s+(x.qpf||0),0)*100)/100;
+  const wuRain=usable.filter(x=>(x.qpf||0)>0).length;
+  const wuLbl=days_remaining<=10?`WU Forecast — Next ${days_remaining} Days`:'WU 10-Day Forecast';
+  const thirdKPI=wu_covers_eom&&projected
+    ?`<div class="kpi"><div class="kpi-lbl">Projected Mar 31 Total</div><div class="kpi-val c-yes">${projected.toFixed(2)}<span class="kpi-unit">in</span></div><div class="kpi-sub">EOD ${(today_eod||0).toFixed(2)}" + WU next <b>${usable.length} days</b> (${wuSum.toFixed(2)}")</div></div>`
+    :`<div class="kpi kpi-muted"><div class="kpi-lbl" style="color:var(--muted)">Month-End Projection</div><div class="kpi-val c-muted">—</div><div class="kpi-sub" style="color:var(--muted)"><b>${days_remaining} days remaining.</b> Check back when WU 10-day covers Mar 31.</div></div>`;
+  document.getElementById('kpi-row-wrap').innerHTML=`
+    <div class="kpi-row">
+      <div class="kpi"><div class="kpi-lbl">${wuLbl}</div><div class="kpi-val c-blue">${wuSum.toFixed(2)}<span class="kpi-unit">in</span></div><div class="kpi-sub"><b>${wuRain} rain days</b> in forecast · ${days_remaining<=10?'through Mar 31':'through 3/28'}</div></div>
+      <div class="kpi"><div class="kpi-lbl">Projected EOD Tonight</div><div class="kpi-val c-wuhr">${(today_eod||0).toFixed(2)}<span class="kpi-unit">in</span></div><div class="kpi-sub">True MTD ${(d.true_mtd||0).toFixed(2)}" + WU tonight ${(today_remaining||0).toFixed(2)}"</div></div>
+      ${thirdKPI}
+    </div>`;
+}
+
+function renderChart(d){
+  const{wu,today_eod,days_remaining}=d;
+  const wuDays=wu.days||[];
+  const allDays=[{d:'Today',q:today_eod||0,today:true},...wuDays.map(x=>({d:x.date||'',q:x.qpf||0,today:false}))];
+  const maxQ=Math.max(...allDays.map(x=>x.q),0.01);
+  const bars=allDays.map((day,i)=>{
+    const inWindow=i===0||i<=days_remaining;
+    const cls=i===0?'bar-today':!inWindow?'bar-dim':day.q===0?'bar-zero':'bar-fc';
+    return `<div class="bar-col"><div class="bar-lv" style="${!inWindow?'color:var(--border)':''}">${day.q>0?day.q.toFixed(2):'—'}</div><div style="width:100%;flex:1;display:flex;align-items:flex-end;"><div class="bar-rect ${cls}" style="height:${Math.max(day.q/maxQ*100,3)}%"></div></div><div class="bar-ld" style="${!inWindow?'color:var(--border)':''}">${day.d}</div></div>`;
+  }).join('');
+  const usable=wuDays.slice(0,Math.min(days_remaining,10));
+  const wuSum=Math.round(usable.reduce((s,x)=>s+(x.qpf||0),0)*100)/100;
+  document.getElementById('chart-wrap').innerHTML=`
+    <div class="sect">
+      <div class="sect-hdr"><div class="sect-title">Rainfall — today's actuals + WU forecast</div><div class="sect-meta">IEM + WU · KSEA</div></div>
+      <div class="chart-bars">${bars}</div>
+      <div class="chart-legend">
+        <span><span class="leg-sw" style="background:var(--wu-hr)"></span>Today (IEM actual + WU hourly)</span>
+        <span><span class="leg-sw" style="background:var(--rain);opacity:.75"></span>WU forecast (used)</span>
+        <span><span class="leg-sw" style="background:var(--border)"></span>Beyond days remaining (ignored)</span>
+      </div>
+      <div class="chart-foot">
+        <span>Today EOD: <b>${(today_eod||0).toFixed(2)}"</b></span>
+        <span>WU used (${Math.min(days_remaining,10)} days): <b>${wuSum.toFixed(2)}"</b></span>
+        <span>Days remaining: <b>${days_remaining}</b></span>
+      </div>
+    </div>`;
+}
+
+function renderMarkets(d){
+  const{kalshi,projected,wu_covers_eom,days_remaining,today_eod}=d;
+  const wrap=document.getElementById('markets-wrap');
+  if(!wu_covers_eom){
+    wrap.innerHTML=`<div class="locked-msg"><strong>${days_remaining} days remaining — check back when 10 days left</strong>Market signals and bet buttons activate when the WU 10-day window covers through March 31.</div>`;
+    return;
+  }
+  if(!kalshi.ok||!kalshi.markets||kalshi.markets.length===0){
+    wrap.innerHTML=`<div class="locked-msg"><strong>No open Kalshi markets found</strong></div>`;
+    return;
+  }
+  const proj=projected||today_eod;
+  const edgeMap={STRONG_YES:['edge-strong-yes','▲▲ Strong YES'],LEAN_YES:['edge-lean-yes','▲ Lean YES'],STRONG_NO:['edge-strong-no','▼▼ Strong NO'],LEAN_NO:['edge-lean-no','▼ Lean NO'],HOLD:['edge-hold','— Hold']};
+  let html=`<div class="mkts-hdr"><div class="mkts-title">March 2026 Markets</div><div class="mkts-proj">Our projection: <b>${proj.toFixed(2)}"</b> · ${days_remaining}d remaining · <b>${Math.round((d.confidence||0)*100)}% conf</b></div></div><div class="markets-grid">`;
+  for(const m of kalshi.markets){
+    const strike=m.inches||0;
+    const yes_ask=m.yes_ask||0;
+    const no_ask=m.no_ask||0;
+    const edge=m.edge||'HOLD';
+    const margin=m.margin||0;
+    const wEdge=m.weighted_edge||0;
+    const edgeDetail=m.edge_detail||'';
+    const aboveStrike=proj>=strike;
+    const[badgeCls,badgeTxt]=edgeMap[edge]||['edge-hold','— Hold'];
+    const strikePct=Math.min(100,Math.round(strike/10*100));
+    const projPct=Math.min(100,Math.max(0,Math.round(proj/10*100)));
+    const fillColor=aboveStrike?'var(--yes)':'var(--no)';
+    const ticker=m.ticker||('T'+strike);
+    html+=`<div class="mcard">
+      <div class="mcard-hdr">
+        <div class="mcard-top"><div class="mcard-strike">${m.label||('Above '+strike+' inches')}</div><span class="edge-badge ${badgeCls}">${badgeTxt}</span></div>
+        <div class="proj-bar-labels"><span>0"</span><span><b>Strike: ${strike}"</b></span><span>10"</span></div>
+        <div class="proj-bar-wrap">
+          <div class="proj-bar-fill" style="width:${Math.min(projPct,100)}%;background:${fillColor};opacity:.65"></div>
+          <div class="proj-marker-strike" style="left:calc(${strikePct}% - 1px)"></div>
+          <div class="proj-marker-our" style="left:calc(${projPct}% - 1px)"></div>
+        </div>
+        <div class="proj-detail">${edgeDetail}</div>
+      </div>
+      <div class="odds-row">
+        <div class="odds-side odds-yes"><div class="odds-lbl">YES</div><div class="odds-price">${Math.round(yes_ask*100)}¢</div></div>
+        <div class="odds-mid"><div style="font-size:14px;color:var(--muted)">↔</div><div class="odds-mid-detail">proj <b>${margin>=0?'+':''}${margin.toFixed(2)}"</b><br>vs strike<br>edge <b>${wEdge>=0?'+':''}${wEdge.toFixed(3)}</b></div></div>
+        <div class="odds-side odds-no"><div class="odds-lbl">NO</div><div class="odds-price">${Math.round(no_ask*100)}¢</div></div>
+      </div>
+      <div class="bet-area">
+        <div class="bet-cols">
+          <div class="bet-col"><div class="bet-col-lbl">Bet YES</div><div class="bet-btns">
+            <button class="bet-btn bet-btn-yes" onclick="addBet('${ticker}','YES',50)">+$50</button>
+            <button class="bet-btn bet-btn-yes" onclick="addBet('${ticker}','YES',100)">+$100</button>
+            <button class="bet-btn bet-btn-yes" onclick="addBet('${ticker}','YES',200)">+$200</button>
+          </div></div>
+          <div class="bet-col"><div class="bet-col-lbl">Bet NO</div><div class="bet-btns">
+            <button class="bet-btn bet-btn-no" onclick="addBet('${ticker}','NO',50)">+$50</button>
+            <button class="bet-btn bet-btn-no" onclick="addBet('${ticker}','NO',100)">+$100</button>
+            <button class="bet-btn bet-btn-no" onclick="addBet('${ticker}','NO',200)">+$200</button>
+          </div></div>
+        </div>
+        <div class="bet-slip-row" id="slip-${ticker}-YES"></div>
+        <div class="bet-slip-row" id="slip-${ticker}-NO"></div>
+      </div>
+    </div>`;
+  }
+  html+='</div>';
+  wrap.innerHTML=html;
+}
+
+function addBet(ticker,side,amt){
+  const k=ticker+'-'+side;
+  betSlip[k]=(betSlip[k]||0)+amt;
+  const el=document.getElementById('slip-'+k);
+  if(el){el.style.display='flex';el.innerHTML=`<span class="bet-slip-val">$${betSlip[k]} — ${side}</span><span class="bet-slip-clr" onclick="removeBet('${ticker}','${side}')">✕</span>`;}
+  updatePlaceBtn();
+}
+
+function removeBet(ticker,side){
+  delete betSlip[ticker+'-'+side];
+  const el=document.getElementById('slip-'+ticker+'-'+side);
+  if(el)el.style.display='none';
+  updatePlaceBtn();
+}
+
+function updatePlaceBtn(){
+  const total=Object.values(betSlip).reduce((s,v)=>s+v,0);
+  const count=Object.keys(betSlip).length;
+  const btn=document.getElementById('place-btn');
+  btn.disabled=total===0;
+  btn.className='place-btn'+(total>0?' active':'');
+  btn.textContent=total>0?`Place ${count} bet${count>1?'s':''} · $${total} total ↗`:'No bets in slip';
+}
+
+loadData();
+</script>
+</body>
+</html>
