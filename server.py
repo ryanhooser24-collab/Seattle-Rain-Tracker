@@ -291,6 +291,8 @@ def fetch_nws_mtd(city_cfg=None):
         today = float(today_match.group(1)) if today_match and today_match.group(1) != "T" else 0.0
         date  = date_match.group(1).strip() if date_match else "Unknown"
 
+        issuedby = cfg.get("nws_issuedby", "SEA")
+        label    = cfg.get("label", "Seattle, WA")
         return {
             "ok":          True,
             "mtd":         mtd,
@@ -298,8 +300,7 @@ def fetch_nws_mtd(city_cfg=None):
             "date":        date,
             "issued":      issued_time,
             "valid_as_of": valid_time,
-            "source":      f"NWS CLI{cfg["nws_issuedby"]} ({cfg["label"]})"
-        
+            "source":      "NWS CLI" + issuedby + " (" + label + ")",
         }
 
     except Exception as e:

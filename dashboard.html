@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>Seattle Rain Tracker</title>
+<title>Rain Tracker</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
 <style>
 :root{
@@ -297,7 +297,7 @@ body{max-width:900px;margin:0 auto;}
 <!-- DASHBOARD -->
 <div id="p-dash">
   <div class="header">
-    <h1 id="page-title">Seattle <em>Rain</em> Tracker</h1>
+    <h1 id="page-title"><em>Rain</em> Tracker</h1>
     <div class="header-meta" id="status-pills"><span class="pill pill-err">Loading...</span></div>
   </div>
   <div style="display:flex;gap:0;border-bottom:0.5px solid var(--border);background:var(--paper);overflow-x:auto;">
@@ -313,7 +313,7 @@ body{max-width:900px;margin:0 auto;}
     <div id="markets-wrap"></div>
     <button class="place-btn" id="place-btn" disabled>No bets in slip</button>
     <div class="footer">
-      NWS CLISEA (settlement) · Weather Underground KSEA daily + hourly (forecast) · IEM KSEA ASOS (gap fill) · Kalshi KXRAINSEAM<br>
+      NWS CLI daily report (settlement) · Weather Underground daily + hourly (forecast) · IEM ASOS gap fill · Kalshi prediction markets<br>
       RAINM Feb 4 2026 · Trace = 0.00" · First complete DCR governs settlement
     </div>
   </div>
@@ -400,7 +400,7 @@ body{max-width:900px;margin:0 auto;}
 <!-- RULES -->
 <div id="p-rules" style="display:none">
   <div class="main">
-    <div class="section-lbl">Auto-trade rules — Seattle · KXRAINSEAM</div>
+    <div class="section-lbl">Auto-trade rules</div>
     <div class="rules-list" style="margin-bottom:12px;">
       <div class="rule-card rule-on">
         <div class="rule-hdr">
@@ -552,7 +552,7 @@ function render(d){
 
   // Update page title with city
   const titleEl=document.getElementById('page-title');
-  if(titleEl)titleEl.innerHTML=`${city_label||'Seattle'} <em>Rain</em> Tracker`;
+  if(titleEl)titleEl.innerHTML=`${city_label||'Rain'} <em>Rain</em> Tracker`;
 
   // Pills
   const src=[['NWS',nws.ok],['WU',wu.ok],['IEM',iem.ok],['Kalshi',kalshi.ok]];
@@ -636,7 +636,7 @@ function renderRainfall(d){
       </div>
       <div class="rf-row">
         <div class="rf-left"><div class="rdot d-nws"></div><div class="rf-meta">
-          <div class="rf-lbl"><span>NWS official</span><div class="tip"><b>NWS CLISEA</b>Official Seattle-Tacoma Daily Climate Report. Settlement source for all Kalshi KXRAINSEAM contracts. Published once daily.</div></div>
+          <div class="rf-lbl"><span>NWS official</span><div class="tip"><b>NWS CLI report</b>Official NWS Daily Climate Report for this city. Settlement source for all Kalshi rain contracts. Published once daily.</div></div>
           <div class="rf-sub">Through ${nws_time} · settlement source</div>
         </div></div>
         <div class="rf-right"><div class="rf-val v-nws">${nws_mtd.toFixed(2)}<span class="rf-unit"> in</span></div></div>
