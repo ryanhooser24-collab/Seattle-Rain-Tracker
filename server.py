@@ -152,13 +152,14 @@ def validate_wu_data(data, days, total):
     return True, None
 
 
-def fetch_wu_forecast():
+def fetch_wu_forecast(city_cfg=None):
     """Fetch 7-day QPF forecast from Weather Underground internal API."""
+    cfg = city_cfg or CITY_CFG
     try:
         url = (
             f"https://api.weather.com/v3/wx/forecast/daily/10day"
             f"?apiKey={WU_API_KEY}"
-            f"&icaoCode={WU_ICAO_CODE}"
+            f"&icaoCode={cfg['icao_code']}"
             f"&language=en-US&units=e&format=json"
         )
         headers = {
@@ -234,11 +235,16 @@ def fetch_wu_forecast():
         return {"ok": False, "error": f"WU fetch failed: {str(e)}", "days": [], "total_forecast": 0, "source": "Weather Underground", "needs_manual": True}
 
 
-def fetch_nws_mtd():
-    """Scrape NWS CLISEA Daily Climate Report for MTD precipitation."""
+def fetch_nws_mtd(city_cfg=None):
+    """Scrape NWS Daily Climate Report for MTD precipitation."""
+    cfg = city_cfg or CITY_CFG
+    nws_url = (f"https://forecast.weather.gov/product.php"
+               f"?site={cfg['nws_site']}"
+               f"&issuedby={cfg['nws_issuedby']}"
+               f"&product=CLI&format=txt")
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(NWS_URL, headers=headers, timeout=10)
+        r = requests.get(nws_url, headers=headers, timeout=10)
         r.raise_for_status()
         text = r.text
 
@@ -297,17 +303,18 @@ def fetch_nws_mtd():
         return {"ok": False, "error": str(e), "mtd": 0.0, "today": 0.0, "date": "", "source": "NWS CLISEA"}
 
 
-def fetch_wu_hourly():
+def fetch_wu_hourly(city_cfg=None):
     """
     Fetch WU hourly forecast for today from current hour through midnight.
     Used to complete today's projected EOD total alongside IEM actuals.
     Returns hourly QPF list and today's remaining total.
     """
+    cfg = city_cfg or CITY_CFG
     try:
         url = (
             f"https://api.weather.com/v3/wx/forecast/hourly/2day"
             f"?apiKey={WU_API_KEY}"
-            f"&icaoCode={WU_ICAO_CODE}"
+            f"&icaoCode={cfg['icao_code']}"
             f"&language=en-US&units=e&format=json"
         )
         headers = {
@@ -359,15 +366,17 @@ def fetch_wu_hourly():
         return {"ok": False, "error": str(e), "hours": [], "today_remaining": 0}
 
 
-def fetch_iem_gap(nws_issued_str):
+def fetch_iem_gap(nws_issued_str, city_cfg=None):
     """
-    Fetch IEM KSEA precipitation since the NWS report time.
-    Uses Iowa Environmental Mesonet ASOS data — same KSEA instrument,
+    Fetch IEM ASOS precipitation since the NWS report time.
+    Uses Iowa Environmental Mesonet ASOS data — same instrument as NWS,
     0.01" precision, no rounding issues.
 
     nws_issued_str: e.g. "618 PM PDT TUE MAR 17 2026"
     Returns gap total in inches and list of hourly readings.
     """
+    cfg = city_cfg or CITY_CFG
+    iem_station = cfg["nws_station"][1:]  # strip leading K: KSEA -> SEA, KPDX -> PDX
     try:
         from datetime import datetime, timezone, timedelta
         import csv
@@ -409,15 +418,16 @@ def fetch_iem_gap(nws_issued_str):
 
         # Build IEM request — get today's precip data from gap start to now
         # p01i = precipitation in last 1 minute interval, in inches
+        tz = cfg.get("tz", "America/Los_Angeles")
         url = (
             f"https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
-            f"?station=SEA"
+            f"?station={iem_station}"
             f"&data=p01i"
             f"&year1={now_local.year}&month1={now_local.month:02d}&day1={now_local.day:02d}"
             f"&hour1={gap_start_hour}&min1=0"
             f"&year2={now_local.year}&month2={now_local.month:02d}&day2={now_local.day:02d}"
             f"&hour2={now_local.hour}&min2={now_local.minute}"
-            f"&tz=America/Los_Angeles"
+            f"&tz={tz}"
             f"&format=comma&latlon=no&direct=no&report_type=1"
         )
 
@@ -481,14 +491,15 @@ def fetch_iem_gap(nws_issued_str):
         }
 
 
-def fetch_kalshi_markets():
-    """Fetch open Seattle rain markets from Kalshi API."""
+def fetch_kalshi_markets(city_cfg=None):
+    """Fetch open rain markets from Kalshi API for given city."""
+    cfg = city_cfg or CITY_CFG
     try:
         if not KALSHI_API_KEY:
             return {"ok": False, "error": "Kalshi API key not set", "markets": []}
 
         url = f"{KALSHI_BASE}/markets"
-        params = {"series_ticker": KALSHI_SERIES, "status": "open", "limit": 100}
+        params = {"series_ticker": cfg["kalshi_series"], "status": "open", "limit": 100}
         headers = {
             "Authorization": f"Bearer {KALSHI_API_KEY}",
             "Content-Type": "application/json"
@@ -873,15 +884,21 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
 
         if path == "/data":
-            print("\n📡 Fetching all data sources...")
+            # Parse city from query string — ?city=portland, defaults to seattle
+            from urllib.parse import parse_qs
+            qs       = parse_qs(urlparse(self.path).query)
+            city_key = qs.get("city", [ACTIVE_CITY])[0].lower()
+            city_cfg = CITIES.get(city_key, CITIES[ACTIVE_CITY])
 
-            wu         = fetch_wu_forecast()
-            wu_hourly  = fetch_wu_hourly()
-            nws        = fetch_nws_mtd()
-            kalshi     = fetch_kalshi_markets()
+            print(f"\n📡 Fetching data for {city_cfg['label']}...")
+
+            wu         = fetch_wu_forecast(city_cfg)
+            wu_hourly  = fetch_wu_hourly(city_cfg)
+            nws        = fetch_nws_mtd(city_cfg)
+            kalshi     = fetch_kalshi_markets(city_cfg)
 
             # Fetch IEM gap fill — from NWS report time to now
-            iem = fetch_iem_gap(nws.get("issued"))
+            iem = fetch_iem_gap(nws.get("issued"), city_cfg)
 
             # True MTD = NWS MTD + IEM gap
             mtd           = nws.get("mtd", 0)
@@ -921,7 +938,7 @@ class Handler(BaseHTTPRequestHandler):
             # Write daily snapshot (once per days_remaining value, idempotent)
             if wu_covers_eom and projected is not None:
                 maybe_write_snapshot(
-                    month       = month_key,
+                    month       = f"{city_key}-{month_key}",
                     days_remaining = days_remaining,
                     true_mtd    = true_mtd,
                     wu_remaining = wu_remaining,
@@ -932,6 +949,9 @@ class Handler(BaseHTTPRequestHandler):
 
             result = {
                 "timestamp":        datetime.now().isoformat(),
+                "city":             city_key,
+                "city_label":       city_cfg["label"],
+                "city_regime":      city_cfg["regime"],
                 "wu":               wu,
                 "wu_hourly":        wu_hourly,
                 "nws":              nws,

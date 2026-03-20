@@ -275,6 +275,10 @@ body{max-width:900px;margin:0 auto;}
 .hist-open{color:var(--rain);}
 .month-lbl{font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);padding:8px 0 4px;border-bottom:0.5px solid var(--border);margin-bottom:4px;}
 
+.city-btn{padding:8px 16px;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);cursor:pointer;border:none;background:transparent;font-family:'DM Mono',monospace;border-bottom:2px solid transparent;white-space:nowrap;}
+.city-btn.active{color:var(--rain);border-bottom-color:var(--rain);font-weight:500;background:var(--paper);}
+.city-btn:hover{color:var(--ink);}
+
 /* SHARED */
 .section-lbl{font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:10px;padding-bottom:6px;border-bottom:0.5px solid var(--border);}
 .footer{font-size:9px;color:var(--muted);padding:10px 0 20px;line-height:1.8;border-top:0.5px solid var(--border);}
@@ -293,8 +297,14 @@ body{max-width:900px;margin:0 auto;}
 <!-- DASHBOARD -->
 <div id="p-dash">
   <div class="header">
-    <h1>Seattle <em>Rain</em> Tracker</h1>
+    <h1 id="page-title">Seattle <em>Rain</em> Tracker</h1>
     <div class="header-meta" id="status-pills"><span class="pill pill-err">Loading...</span></div>
+  </div>
+  <div style="display:flex;gap:0;border-bottom:0.5px solid var(--border);background:var(--paper);overflow-x:auto;">
+    <button class="city-btn active" id="city-seattle" onclick="switchCity('seattle')">Seattle</button>
+    <button class="city-btn" id="city-portland" onclick="switchCity('portland')">Portland</button>
+    <button class="city-btn" id="city-los_angeles" onclick="switchCity('los_angeles')">Los Angeles</button>
+    <button class="city-btn" id="city-san_francisco" onclick="switchCity('san_francisco')">San Francisco</button>
   </div>
   <div class="notice" id="notice">Fetching data...</div>
   <div class="main">
@@ -478,6 +488,32 @@ body{max-width:900px;margin:0 auto;}
 <script>
 const SERVER='';
 const betSlip={};
+let currentCity='seattle';
+const cityCache={};
+
+const CITY_LABELS={
+  seattle:'Seattle',portland:'Portland',
+  los_angeles:'Los Angeles',san_francisco:'San Francisco'
+};
+
+function switchCity(city){
+  if(city===currentCity)return;
+  currentCity=city;
+  document.querySelectorAll('.city-btn').forEach(b=>b.classList.remove('active'));
+  const btn=document.getElementById('city-'+city);
+  if(btn)btn.classList.add('active');
+  // Show cached data instantly if available, then refresh
+  if(cityCache[city]){
+    render(cityCache[city]);
+  } else {
+    document.getElementById('status-pills').innerHTML='<span class="pill pill-warn">Loading...</span>';
+    document.getElementById('notice').textContent='Fetching data...';
+    document.getElementById('rf-wrap').innerHTML='';
+    document.getElementById('chart-wrap').innerHTML='';
+    document.getElementById('markets-wrap').innerHTML='';
+  }
+  loadData();
+}
 
 function sw(t){
   ['dash','pos','rules','hist'].forEach(x=>{
@@ -498,10 +534,11 @@ function togRule(tog){
 // ── LOAD DATA ─────────────────────────────────────────────────────────────────
 async function loadData(){
   try{
-    const res=await fetch(SERVER+'/data');
+    const res=await fetch(SERVER+'/data?city='+currentCity);
     if(!res.ok)throw new Error('Server returned '+res.status);
     const d=await res.json();
-    render(d);
+    cityCache[currentCity]=d;
+    if(d.city===currentCity)render(d);
   }catch(e){
     document.getElementById('status-pills').innerHTML='<span class="pill pill-err">Server offline</span>';
     document.getElementById('notice').textContent='Cannot reach server — make sure server.py is running.';
@@ -511,7 +548,11 @@ async function loadData(){
 
 function render(d){
   const{nws,wu,wu_hourly,iem,kalshi,true_mtd,gap_total,today_eod,today_remaining,
-        projected,wu_covers_eom,days_remaining,confidence,month}=d;
+        projected,wu_covers_eom,days_remaining,confidence,month,city_label}=d;
+
+  // Update page title with city
+  const titleEl=document.getElementById('page-title');
+  if(titleEl)titleEl.innerHTML=`${city_label||'Seattle'} <em>Rain</em> Tracker`;
 
   // Pills
   const src=[['NWS',nws.ok],['WU',wu.ok],['IEM',iem.ok],['Kalshi',kalshi.ok]];
@@ -537,7 +578,7 @@ function render(d){
 // ── RAINFALL VERTICAL TIMELINE ────────────────────────────────────────────────
 function renderRainfall(d){
   const{nws,iem,wu_hourly,wu,true_mtd,gap_total,today_eod,today_remaining,
-        projected,wu_covers_eom,days_remaining}=d;
+        projected,wu_covers_eom,days_remaining,month}=d;
   const nws_mtd=nws.mtd||0;
   const nws_time=nws.issued||'—';
   const iem_hours=(iem.hours||[]);
@@ -546,6 +587,12 @@ function renderRainfall(d){
   const usable=wuDays.slice(0,Math.min(days_remaining,10));
   const wuSum=Math.round(usable.reduce((s,x)=>s+(x.qpf||0),0)*100)/100;
   const wuRain=usable.filter(x=>(x.qpf||0)>0).length;
+
+  // Dynamic month-end label e.g. "Mar 31" or "Apr 30"
+  const now=new Date();
+  const lastDay=new Date(now.getFullYear(),now.getMonth()+1,0).getDate();
+  const monthShort=now.toLocaleString('en-US',{month:'short'});
+  const eomLabel=`${monthShort} ${lastDay}`;
 
   const iemMax=Math.max(...iem_hours.map(h=>h.qpf),0.01);
   const wuMax=Math.max(...wu_hours.map(h=>h.qpf),0.01);
@@ -564,27 +611,27 @@ function renderRainfall(d){
   const eomRow=eomInside
     ?`<div class="rf-row row-eom">
         <div class="rf-left"><div class="rdot d-eom"></div><div class="rf-meta">
-          <div class="rf-lbl"><span>Mar 31 total</span><div class="tip"><b>Projected month-end</b>EOD + WU ${Math.min(days_remaining,10)}-day remainder. Used to evaluate Kalshi strikes. Confidence: ${Math.round(conf*100)}%.</div></div>
+          <div class="rf-lbl"><span>${eomLabel} total</span><div class="tip"><b>Projected month-end</b>EOD + WU ${Math.min(days_remaining,10)}-day remainder. Used to evaluate Kalshi strikes. Confidence: ${Math.round(conf*100)}%.</div></div>
           <div class="rf-sub">${days_remaining} days remaining · ${Math.round(conf*100)}% confidence</div>
         </div></div>
         <div class="rf-right"><div class="rf-val v-eom">= ${projected.toFixed(2)}<span class="rf-unit"> in</span></div></div>
       </div>`
     :`<div class="rf-row row-eom-muted">
         <div class="rf-left"><div class="rdot d-muted"></div><div class="rf-meta">
-          <div class="rf-lbl"><span>Mar 31 total</span><div class="tip"><b>Projected month-end</b>Available when WU 10-day window covers through month-end.</div></div>
+          <div class="rf-lbl"><span>${eomLabel} total</span><div class="tip"><b>Projected month-end</b>Available when WU 10-day window covers through month-end.</div></div>
           <div class="rf-sub">${days_remaining} days remaining · check back when ≤10 days left</div>
         </div></div>
         <div class="rf-right"><div class="rf-val v-muted">—</div></div>
       </div>`;
 
   const hdrVal=eomInside
-    ?`${projected.toFixed(2)}" projected Mar 31 <span>· ${nws_mtd.toFixed(2)}" NWS official</span>`
+    ?`${projected.toFixed(2)}" projected ${eomLabel} <span>· ${nws_mtd.toFixed(2)}" NWS official</span>`
     :`${today_eod.toFixed(2)}" projected EOD <span>· ${nws_mtd.toFixed(2)}" NWS official</span>`;
 
   document.getElementById('rf-wrap').innerHTML=`
     <div class="rf-card">
       <div class="rf-hdr">
-        <div class="rf-hdr-lbl">March 2026 rainfall</div>
+        <div class="rf-hdr-lbl">${month} rainfall</div>
         <div class="rf-hdr-val">${hdrVal}</div>
       </div>
       <div class="rf-row">
@@ -628,7 +675,7 @@ function renderRainfall(d){
       <div class="rf-row">
         <div class="rf-left"><div class="rdot d-wu10"></div><div class="rf-meta">
           <div class="rf-lbl"><span>WU ${Math.min(days_remaining,10)}-day forecast</span><div class="tip"><b>WU ${Math.min(days_remaining,10)}-day forecast</b>Daily QPF for the month remainder. Only days within the remaining calendar are used — further days are ignored.</div></div>
-          <div class="rf-sub">${wuRain} rain days · ${days_remaining<=10?'through Mar 31':'through 3/28'}</div>
+          <div class="rf-sub">${wuRain} rain days · ${days_remaining<=10?`through ${eomLabel}`:'partial coverage'}</div>
         </div></div>
         <div class="rf-right"><div class="rf-val v-wu10">+${wuSum.toFixed(2)}<span class="rf-unit"> in</span></div></div>
       </div>
@@ -648,7 +695,9 @@ function togPanel(){
 
 // ── CHART ─────────────────────────────────────────────────────────────────────
 function renderChart(d){
-  const{wu,today_eod,days_remaining}=d;
+  const{wu,today_eod,days_remaining,city}=d;
+  const cfg={seattle:'KSEA',portland:'KPDX',los_angeles:'KLAX',san_francisco:'KSFO'};
+  const icao=cfg[city]||'KSEA';
   const wuDays=wu.days||[];
   const allDays=[{d:'Today',q:today_eod||0,today:true},...wuDays.map(x=>({d:x.date||'',q:x.qpf||0,today:false}))];
   const maxQ=Math.max(...allDays.map(x=>x.q),0.01);
@@ -671,7 +720,7 @@ function renderChart(d){
     <div class="chart-card">
       <div class="chart-hdr">
         <div class="chart-title">QPF — today + ${Math.min(days_remaining,10)}-day forecast</div>
-        <div class="chart-meta">WU · KSEA</div>
+        <div class="chart-meta">WU · ${icao}</div>
       </div>
       <div class="bars">${bars}</div>
       <div class="chart-leg">
@@ -689,13 +738,17 @@ function renderChart(d){
 
 // ── MARKETS ───────────────────────────────────────────────────────────────────
 function renderMarkets(d){
-  const{kalshi,projected,wu_covers_eom,days_remaining,today_eod}=d;
+  const{kalshi,projected,wu_covers_eom,days_remaining,today_eod,month}=d;
   const wrap=document.getElementById('markets-wrap');
+  const now=new Date();
+  const lastDay=new Date(now.getFullYear(),now.getMonth()+1,0).getDate();
+  const monthShort=now.toLocaleString('en-US',{month:'short'});
+  const eomLabel=`${monthShort} ${lastDay}`;
 
   if(!wu_covers_eom){
     wrap.innerHTML=`<div class="locked">
       <div class="locked-title">${days_remaining} days remaining — markets locked</div>
-      <div class="locked-sub">Signals and bet buttons activate when the WU 10-day window covers through March 31.</div>
+      <div class="locked-sub">Signals and bet buttons activate when the WU 10-day window covers through ${eomLabel}.</div>
     </div>`;
     return;
   }
