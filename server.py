@@ -102,11 +102,12 @@ NWS_URL      = (f"https://forecast.weather.gov/product.php"
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def validate_wu_data(data, days, total):
+def validate_wu_data(data, days, total, city_cfg=None):
     """
     Run sanity checks on WU forecast data.
     Returns (is_valid, warning_message)
     """
+    cfg = city_cfg or CITY_CFG
     warnings = []
     today = datetime.now()
     month = today.month
@@ -127,13 +128,14 @@ def validate_wu_data(data, days, total):
             except:
                 pass
 
-    # 3. Zero-rain sanity check for Seattle wet season (Oct–May)
-    # If total QPF is 0.00" during wet season, likely bad data
-    wet_season = month in [10, 11, 12, 1, 2, 3, 4, 5]
-    if wet_season and total == 0.0:
-        return False, "WU returned 0.00\" total for all 7 days during Seattle wet season — likely bad data, use manual entry"
+    # 3. Zero-rain sanity check during expected wet season for this city
+    # Only flag if city has a defined wet season and we're in it
+    wet_months = cfg.get("tradeable_months", [])
+    if wet_months and month in wet_months and total == 0.0:
+        label = cfg.get("label", "this city")
+        return False, f"WU returned 0.00\" total during {label} wet season — likely bad data"
 
-    # 4. Unreasonably high values (>15" in 7 days would be record-breaking)
+    # 4. Unreasonably high values (>15" in 7 days would be record-breaking for any US city)
     if total > 15.0:
         return False, f"WU returned {total}\" over 7 days — unrealistically high, likely bad data"
 
@@ -208,7 +210,7 @@ def fetch_wu_forecast(city_cfg=None):
         total = round(sum(d["qpf"] for d in days), 2)
 
         # Run validation
-        is_valid, warning = validate_wu_data(data, days, total)
+        is_valid, warning = validate_wu_data(data, days, total, cfg)
         if not is_valid:
             return {
                 "ok": False,
@@ -296,11 +298,12 @@ def fetch_nws_mtd(city_cfg=None):
             "date":        date,
             "issued":      issued_time,
             "valid_as_of": valid_time,
-            "source":      "NWS CLISEA (Seattle-Tacoma)"
+            "source":      f"NWS CLI{cfg["nws_issuedby"]} ({cfg["label"]})"
+        
         }
 
     except Exception as e:
-        return {"ok": False, "error": str(e), "mtd": 0.0, "today": 0.0, "date": "", "source": "NWS CLISEA"}
+        return {"ok": False, "error": str(e), "mtd": 0.0, "today": 0.0, "date": "", "source": "NWS CLI"}
 
 
 def fetch_wu_hourly(city_cfg=None):
