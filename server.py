@@ -32,18 +32,73 @@ KALSHI_API_KEY = os.environ.get("KALSHI_API_KEY", "")
 PORT           = int(os.environ.get("PORT", 8765))
 DATABASE_URL   = os.environ.get("DATABASE_URL", "")   # Railway Postgres
 
-# WU internal endpoint (embedded key from wunderground.com)
-# Using icaoCode=KSEA to pin exactly to Seattle-Tacoma Intl Airport
-# — the same station Kalshi uses for RAINM settlement (CLISEA)
-WU_API_KEY   = "e1f10a1e78da46f5b10a1e78da96f525"
-WU_ICAO_CODE = "KSEA"
+# WU internal API key
+WU_API_KEY = "e1f10a1e78da46f5b10a1e78da96f525"
 
-# Kalshi Seattle rain series
-KALSHI_SERIES = "KXRAINSEAM"
-KALSHI_BASE   = "https://api.elections.kalshi.com/trade-api/v2"
+# ── MULTI-CITY CONFIG ─────────────────────────────────────────────────────────
+# Each city needs:
+#   icao_code     — ICAO airport code for WU (pinned to same station as Kalshi)
+#   nws_site      — NWS office code for CLI report
+#   nws_issuedby  — NWS station for CLI report
+#   kalshi_series — Kalshi series ticker
+#   lat/lon       — for Open-Meteo backtest queries
+#   regime        — "frontal" | "frontal_seasonal" | "mediterranean" | "mixed"
+#   tradeable_months — months where WU forecast is reliable enough to trade
+#   days_in_month — callable returning days in month (31 for march etc)
+CITIES = {
+    "seattle": {
+        "icao_code":     "KSEA",
+        "nws_site":      "SEW",
+        "nws_issuedby":  "SEA",
+        "kalshi_series": "KXRAINSEAM",
+        "lat": 47.441, "lon": -122.3,
+        "regime":        "frontal",
+        "tradeable_months": list(range(1, 13)),
+        "label":         "Seattle, WA",
+    },
+    "portland": {
+        "icao_code":     "KPDX",
+        "nws_site":      "PQR",
+        "nws_issuedby":  "PDX",
+        "kalshi_series": "KXRAINPDXM",
+        "lat": 45.589, "lon": -122.6,
+        "regime":        "frontal",
+        "tradeable_months": list(range(1, 13)),
+        "label":         "Portland, OR",
+    },
+    "san_francisco": {
+        "icao_code":     "KSFO",
+        "nws_site":      "MTR",
+        "nws_issuedby":  "SFO",
+        "kalshi_series": "KXRAINSFO",   # confirm — may not exist yet
+        "lat": 37.619, "lon": -122.375,
+        "regime":        "frontal_seasonal",
+        "tradeable_months": [11, 12, 1, 2, 3, 4],
+        "label":         "San Francisco, CA",
+    },
+    "los_angeles": {
+        "icao_code":     "KLAX",
+        "nws_site":      "LOX",
+        "nws_issuedby":  "LAX",
+        "kalshi_series": "KXRAINLAXM",
+        "lat": 33.938, "lon": -118.408,
+        "regime":        "mediterranean",
+        "tradeable_months": [11, 12, 1, 2, 3, 4],
+        "label":         "Los Angeles, CA",
+    },
+}
 
-# NWS CLISEA page
-NWS_URL = "https://forecast.weather.gov/product.php?site=SEW&issuedby=SEA&product=CLI&format=txt"
+# Active city for this deployment — change via CITY env var on Railway
+# e.g. set CITY=portland on your Portland deployment
+ACTIVE_CITY  = os.environ.get("CITY", "seattle")
+CITY_CFG     = CITIES.get(ACTIVE_CITY, CITIES["seattle"])
+WU_ICAO_CODE = CITY_CFG["icao_code"]
+KALSHI_SERIES = CITY_CFG["kalshi_series"]
+KALSHI_BASE  = "https://api.elections.kalshi.com/trade-api/v2"
+NWS_URL      = (f"https://forecast.weather.gov/product.php"
+                f"?site={CITY_CFG['nws_site']}"
+                f"&issuedby={CITY_CFG['nws_issuedby']}"
+                f"&product=CLI&format=txt")
 # ─────────────────────────────────────────────────────────────────────────────
 
 
