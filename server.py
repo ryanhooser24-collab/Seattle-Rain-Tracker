@@ -380,7 +380,7 @@ def fetch_iem_gap(nws_issued_str, city_cfg=None):
     Returns gap total in inches and list of hourly readings.
     """
     cfg = city_cfg or CITY_CFG
-    iem_station = cfg["nws_station"][1:]  # strip leading K: KSEA -> SEA, KPDX -> PDX
+    iem_station = cfg["icao_code"][1:]  # strip leading K: KSEA -> SEA, KPDX -> PDX
     try:
         from datetime import datetime, timezone, timedelta
         import csv
