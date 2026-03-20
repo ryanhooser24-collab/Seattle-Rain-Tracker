@@ -15,7 +15,7 @@ import os
 import re
 import traceback
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, date
@@ -603,7 +603,7 @@ def confidence_weight(days_remaining):
         return 0.0
     # Nonlinear curve — steeper confidence gain inside 7 days
     if days_remaining <= 7:
-        return round(1.0 - (days_remaining / 7) ** 0.7, 3)
+        return round(1.0 - (days_remaining / 8) ** 0.7, 3)
     else:
         # 8-10 days: very low, linear falloff
         return round(0.05 * (10 - days_remaining) / 2, 3)
@@ -889,7 +889,6 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/data":
             # Parse city from query string — ?city=portland, defaults to seattle
-            from urllib.parse import parse_qs
             qs       = parse_qs(urlparse(self.path).query)
             city_key = qs.get("city", [ACTIVE_CITY])[0].lower()
             city_cfg = CITIES.get(city_key, CITIES[ACTIVE_CITY])
@@ -980,7 +979,6 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/snapshots":
             # Return forecast snapshots for current or specified month
-            from urllib.parse import parse_qs
             qs = parse_qs(urlparse(self.path).query)
             month = qs.get("month", [None])[0]
             rows = fetch_snapshots(month)
