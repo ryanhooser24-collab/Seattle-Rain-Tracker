@@ -279,6 +279,54 @@ body{max-width:900px;margin:0 auto;}
 .city-btn.active{color:var(--rain);border-bottom-color:var(--rain);font-weight:500;background:var(--paper);}
 .city-btn:hover{color:var(--ink);}
 
+
+/* SCANNER */
+.scan-hdr{padding:12px 16px;border-bottom:0.5px solid var(--border);background:var(--paper);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;}
+.scan-title{font-size:11px;font-weight:500;color:var(--ink);}
+.scan-meta{font-size:10px;color:var(--muted);}
+.scan-filters{display:flex;gap:6px;padding:8px 16px;border-bottom:0.5px solid var(--border);background:var(--paper);flex-wrap:wrap;}
+.sf{font-size:10px;padding:4px 10px;border-radius:3px;border:0.5px solid var(--border);background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;}
+.sf.on{background:var(--ink);color:var(--paper);border-color:var(--ink);}
+.opp-list{padding:12px 16px;display:flex;flex-direction:column;gap:8px;}
+.opp{background:var(--paper);border:0.5px solid var(--border);border-radius:8px;overflow:hidden;display:grid;grid-template-columns:auto 1fr auto;align-items:stretch;}
+.opp.settled{border-color:var(--yes-border);}
+.opp.near-certain{border-color:#a8d4b8;}
+.opp.probabilistic{border-color:#e8c49a;}
+.opp.thin{border-color:var(--border);opacity:.6;}
+.opp-rank{display:flex;align-items:center;justify-content:center;width:36px;font-size:16px;font-weight:500;color:var(--muted);border-right:0.5px solid var(--border);background:var(--bg);}
+.opp.settled .opp-rank{background:var(--yes-lt);color:var(--yes);}
+.opp.near-certain .opp-rank{background:var(--yes-lt);color:var(--yes);}
+.opp.probabilistic .opp-rank{background:#fef3e8;color:#854F0B;}
+.opp-body{padding:10px 14px;min-width:0;}
+.opp-top{display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap;}
+.opp-city{font-size:12px;font-weight:500;color:var(--ink);}
+.opp-strike{font-size:12px;color:var(--muted);}
+.opp-mode-pill{font-size:9px;padding:1px 7px;border-radius:3px;letter-spacing:.5px;}
+.mp-settled{background:var(--yes-lt);color:var(--yes);}
+.mp-near{background:var(--yes-lt);color:var(--yes);}
+.mp-prob{background:#fef3e8;color:#854F0B;}
+.opp-nums{display:flex;gap:16px;font-size:11px;flex-wrap:wrap;}
+.opp-num{display:flex;flex-direction:column;gap:1px;}
+.on-lbl{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;}
+.on-val{font-weight:500;color:var(--ink);}
+.on-val.pos{color:var(--yes);}
+.on-val.warn{color:#854F0B;}
+.opp-thesis{font-size:10px;color:var(--muted);margin-top:5px;line-height:1.5;}
+.opp-thesis b{color:var(--ink);}
+.opp-right{display:flex;flex-direction:column;align-items:flex-end;justify-content:space-between;padding:10px 12px;gap:8px;min-width:100px;border-left:0.5px solid var(--border);}
+.opp-gap{text-align:right;}
+.opp-gap-val{font-size:20px;font-weight:500;}
+.opp-gap-val.pos{color:var(--yes);}
+.opp-gap-val.warn{color:#854F0B;}
+.opp-gap-lbl{font-size:9px;color:var(--muted);}
+.opp-bet-btn{font-size:10px;padding:6px 12px;border-radius:4px;cursor:pointer;font-family:inherit;white-space:nowrap;border:0.5px solid var(--yes-border);background:var(--yes-lt);color:var(--yes);}
+.opp-bet-btn.prob{border-color:#e8c49a;background:#fef3e8;color:#854F0B;}
+.opp-bet-btn.dis{border-color:var(--border);background:var(--bg);color:var(--muted);cursor:not-allowed;}
+.scan-empty{text-align:center;padding:40px 16px;color:var(--muted);font-size:12px;}
+.scan-loading{text-align:center;padding:30px;color:var(--muted);font-size:11px;}
+.conf-bar-wrap{height:3px;background:var(--border);border-radius:2px;width:60px;overflow:hidden;margin-top:3px;}
+.conf-bar-fill{height:100%;border-radius:2px;background:var(--yes);}
+
 /* SHARED */
 .section-lbl{font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:10px;padding-bottom:6px;border-bottom:0.5px solid var(--border);}
 .footer{font-size:9px;color:var(--muted);padding:10px 0 20px;line-height:1.8;border-top:0.5px solid var(--border);}
@@ -288,10 +336,31 @@ body{max-width:900px;margin:0 auto;}
 <body>
 
 <div class="tabs">
-  <div class="tab active" id="t-dash" onclick="sw('dash')">Dashboard</div>
+  <div class="tab active" id="t-scan" onclick="sw('scan')">Scanner</div>
+  <div class="tab" id="t-dash" onclick="sw('dash')">City Detail</div>
   <div class="tab" id="t-pos" onclick="sw('pos')">Positions</div>
   <div class="tab" id="t-rules" onclick="sw('rules')">Rules</div>
   <div class="tab" id="t-hist" onclick="sw('hist')">History</div>
+</div>
+
+<!-- SCANNER -->
+<div id="p-scan">
+  <div class="scan-hdr">
+    <div>
+      <div class="scan-title">Opportunity scanner — all rain markets</div>
+      <div class="scan-meta" id="scan-meta">Loading...</div>
+    </div>
+    <button onclick="loadScanner()" style="font-size:10px;padding:5px 12px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;">↻ Refresh</button>
+  </div>
+  <div class="scan-filters">
+    <button class="sf on" id="sf-all" onclick="setFilter('all')">All</button>
+    <button class="sf" id="sf-settled" onclick="setFilter('settled')">Already cleared</button>
+    <button class="sf" id="sf-near" onclick="setFilter('near-certain')">Near certain</button>
+    <button class="sf" id="sf-prob" onclick="setFilter('probabilistic')">Forecast-dependent</button>
+  </div>
+  <div id="opp-list" class="opp-list">
+    <div class="scan-loading">Scanning all cities...</div>
+  </div>
 </div>
 
 <!-- DASHBOARD -->
@@ -300,11 +369,19 @@ body{max-width:900px;margin:0 auto;}
     <h1 id="page-title"><em>Rain</em> Tracker</h1>
     <div class="header-meta" id="status-pills"><span class="pill pill-err">Loading...</span></div>
   </div>
-  <div style="display:flex;gap:0;border-bottom:0.5px solid var(--border);background:var(--paper);overflow-x:auto;">
-    <button class="city-btn active" id="city-seattle" onclick="switchCity('seattle')">Seattle</button>
-    <button class="city-btn" id="city-portland" onclick="switchCity('portland')">Portland</button>
-    <button class="city-btn" id="city-los_angeles" onclick="switchCity('los_angeles')">Los Angeles</button>
-    <button class="city-btn" id="city-san_francisco" onclick="switchCity('san_francisco')">San Francisco</button>
+  <div style="padding:8px 16px;border-bottom:0.5px solid var(--border);background:var(--paper);display:flex;align-items:center;gap:10px;">
+    <span style="font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;">City</span>
+    <select id="city-select" onchange="switchCity(this.value)" style="font-family:inherit;font-size:11px;padding:4px 8px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--ink);cursor:pointer;">
+      <option value="seattle">Seattle</option>
+      <option value="portland">Portland</option>
+      <option value="los_angeles">Los Angeles</option>
+      <option value="san_francisco">San Francisco</option>
+      <option value="new_york">New York</option>
+      <option value="chicago">Chicago</option>
+      <option value="miami">Miami</option>
+      <option value="denver">Denver</option>
+    </select>
+    <span id="city-detail-meta" style="font-size:10px;color:var(--muted)"></span>
   </div>
   <div class="notice" id="notice">Fetching data...</div>
   <div class="main">
@@ -490,19 +567,25 @@ const SERVER='';
 const betSlip={};
 let currentCity='seattle';
 const cityCache={};
+let scanFilter='all';
+let scanCache=null;
 
-const CITY_LABELS={
-  seattle:'Seattle',portland:'Portland',
-  los_angeles:'Los Angeles',san_francisco:'San Francisco'
+// All known Kalshi monthly rain series
+const ALL_CITIES={
+  seattle:     {label:'Seattle',    kalshi:'KXRAINSEAM', icao:'KSEA', nws_site:'SEW', nws_by:'SEA', tz:'America/Los_Angeles', regime:'frontal'},
+  portland:    {label:'Portland',   kalshi:'KXRAINPDXM', icao:'KPDX', nws_site:'PQR', nws_by:'PDX', tz:'America/Los_Angeles', regime:'frontal'},
+  los_angeles: {label:'Los Angeles',kalshi:'KXRAINLAXM', icao:'KLAX', nws_site:'LOX', nws_by:'LAX', tz:'America/Los_Angeles', regime:'mediterranean'},
+  san_francisco:{label:'San Francisco',kalshi:'KXRAINSFO',icao:'KSFO',nws_site:'MTR', nws_by:'SFO', tz:'America/Los_Angeles', regime:'frontal_seasonal'},
+  new_york:    {label:'New York',   kalshi:'KXRAINNYCM', icao:'KNYC', nws_site:'OKX', nws_by:'NYC', tz:'America/New_York',    regime:'mixed'},
+  chicago:     {label:'Chicago',    kalshi:'KXRAINCHIM', icao:'KORD', nws_site:'LOT', nws_by:'ORD', tz:'America/Chicago',     regime:'mixed'},
+  miami:       {label:'Miami',      kalshi:'KXRAINMIAM', icao:'KMIA', nws_site:'MFL', nws_by:'MIA', tz:'America/New_York',    regime:'convective'},
+  denver:      {label:'Denver',     kalshi:'KXRAINDENM', icao:'KDEN', nws_site:'BOU', nws_by:'DEN', tz:'America/Denver',      regime:'mixed'},
 };
 
 function switchCity(city){
-  if(city===currentCity)return;
   currentCity=city;
-  document.querySelectorAll('.city-btn').forEach(b=>b.classList.remove('active'));
-  const btn=document.getElementById('city-'+city);
-  if(btn)btn.classList.add('active');
-  // Show cached data instantly if available, then refresh
+  const sel=document.getElementById('city-select');
+  if(sel)sel.value=city;
   if(cityCache[city]){
     render(cityCache[city]);
   } else {
@@ -515,11 +598,173 @@ function switchCity(city){
   loadData();
 }
 
+// ── SCANNER ──────────────────────────────────────────────────────────────────
+function setFilter(f){
+  scanFilter=f;
+  ['all','settled','near-certain','prob'].forEach(k=>{
+    const el=document.getElementById('sf-'+k);
+    if(el)el.className='sf'+(k===f?' on':'');
+  });
+  if(scanCache)renderScanner(scanCache);
+}
+
+async function loadScanner(){
+  document.getElementById('opp-list').innerHTML='<div class="scan-loading">Scanning all cities...</div>';
+  document.getElementById('scan-meta').textContent='Fetching...';
+
+  const results=[];
+  const cities=Object.keys(ALL_CITIES);
+
+  // Fetch all cities in parallel
+  const fetches=cities.map(async city=>{
+    try{
+      const res=await fetch(SERVER+'/data?city='+city);
+      if(!res.ok)return null;
+      const d=await res.json();
+      cityCache[city]=d;
+      return{city,d};
+    }catch(e){return null;}
+  });
+
+  const settled=await Promise.allSettled(fetches);
+  const cityData=settled.map(r=>r.status==='fulfilled'?r.value:null).filter(Boolean);
+
+  // Build opportunity list from each city's markets
+  for(const{city,d} of cityData){
+    if(!d||!d.nws)continue;
+    const mtd=d.true_mtd||d.nws?.mtd||0;
+    const proj=d.projected||d.today_eod||mtd;
+    const daysLeft=d.days_remaining||31;
+    const markets=d.kalshi?.markets||[];
+
+    for(const m of markets){
+      const strike=m.inches||0;
+      if(!strike)continue;
+      const cushion=Math.round((mtd-strike)*100)/100;
+      const mode=cushion>=0.10?'settled':cushion>=-0.20?'near-certain':'probabilistic';
+      const SIGMA_TBL={11:1.4,10:1.4,9:1.3,8:1.2,7:1.0,6:.85,5:.7,4:.55,3:.4,2:.25,1:.15,0:.0};
+      const sig=SIGMA_TBL[Math.min(daysLeft,11)]||1.5;
+      const modelP=mode==='settled'?0.99:mode==='near-certain'?Math.min(0.97,0.90+(mtd-strike)/0.5*0.07):normCDF((proj-strike)/sig);
+      const kalshiP=(m.yes_ask||0);
+      const gap=Math.round((modelP-kalshiP)*100);
+      const conf=mode==='settled'?99:mode==='near-certain'?Math.round(modelP*100):Math.round((1-Math.min(sig/1.5,1))*100);
+
+      results.push({
+        city, cityLabel:ALL_CITIES[city]?.label||city,
+        strike, mode, cushion,
+        modelP:Math.round(modelP*100),
+        kalshiP:Math.round(kalshiP*100),
+        kalshiNo:Math.round((m.no_ask||0)*100),
+        gap, conf, daysLeft,
+        mtd, proj, sig,
+        ticker:m.ticker||'',
+        edge:m.edge||'HOLD',
+      });
+    }
+  }
+
+  // Sort: gap descending, with settled/near-certain ranked above probabilistic at same gap
+  results.sort((a,b)=>{
+    const modeScore={settled:3,'near-certain':2,probabilistic:1};
+    const am=modeScore[a.mode]||0, bm=modeScore[b.mode]||0;
+    if(Math.abs(a.gap-b.gap)<5) return bm-am;
+    return b.gap-a.gap;
+  });
+
+  scanCache=results;
+  const count=results.filter(r=>r.gap>=8).length;
+  document.getElementById('scan-meta').textContent=
+    `${cityData.length} cities · ${results.length} markets · ${count} actionable opportunities`;
+  renderScanner(results);
+}
+
+function normCDF(x){
+  const t=1/(1+.2316419*Math.abs(x)),d=.3989423*Math.exp(-x*x/2);
+  const p=d*t*(.3193815+t*(-.3565638+t*(1.7814779+t*(-1.8212560+t*1.3302744))));
+  return x>=0?1-p:p;
+}
+
+function renderScanner(results){
+  const wrap=document.getElementById('opp-list');
+  const filtered=results.filter(r=>{
+    if(scanFilter==='all')return r.gap>=5;
+    if(scanFilter==='settled')return r.mode==='settled'&&r.gap>=3;
+    if(scanFilter==='near-certain')return r.mode==='near-certain'&&r.gap>=3;
+    if(scanFilter==='probabilistic')return r.mode==='probabilistic'&&r.gap>=8;
+    return true;
+  });
+
+  if(!filtered.length){
+    wrap.innerHTML='<div class="scan-empty">No opportunities matching current filter.</div>';
+    return;
+  }
+
+  const modeLabel={settled:'Already cleared','near-certain':'Near certain',probabilistic:'Forecast-dependent'};
+  const modePill={settled:'mp-settled','near-certain':'mp-near',probabilistic:'mp-prob'};
+
+  wrap.innerHTML=filtered.map((r,i)=>{
+    const isSettled=r.mode==='settled'||r.mode==='near-certain';
+    const btnCls=isSettled?'':'prob';
+    const gapCls=r.gap>=10?'pos':r.gap>=5?'warn':'';
+
+    const thesis=r.mode==='settled'
+      ?`MTD <b>${r.mtd.toFixed(2)}"</b> already ${r.cushion>=0?'+'+r.cushion+'"':r.cushion+'"'} above ${r.strike}" strike. Market at ${r.kalshiP}¢ — only NWS revision risk.`
+      :r.mode==='near-certain'
+      ?`MTD <b>${r.mtd.toFixed(2)}"</b> at or near ${r.strike}" strike. Minimal forecast needed. Watch for corrections.`
+      :`MTD <b>${r.mtd.toFixed(2)}"</b>, needs <b>${(r.strike-r.mtd).toFixed(2)}"</b> more. Proj ${r.proj.toFixed(2)}" with σ ±${r.sig}". Check again at 7 days.`;
+
+    return `<div class="opp ${r.mode}" onclick="goToCity('${r.city}')">
+      <div class="opp-rank">${i+1}</div>
+      <div class="opp-body">
+        <div class="opp-top">
+          <span class="opp-city">${r.cityLabel}</span>
+          <span class="opp-strike">Above ${r.strike}"</span>
+          <span class="opp-mode-pill ${modePill[r.mode]}">${modeLabel[r.mode]}</span>
+        </div>
+        <div class="opp-nums">
+          <div class="opp-num"><span class="on-lbl">MTD cushion</span><span class="on-val ${r.cushion>=0?'pos':'warn'}">${r.cushion>=0?'+':''}${r.cushion}"</span></div>
+          <div class="opp-num"><span class="on-lbl">Model prob</span><span class="on-val">${r.modelP}%</span></div>
+          <div class="opp-num"><span class="on-lbl">Kalshi YES</span><span class="on-val">${r.kalshiP}¢</span></div>
+          <div class="opp-num"><span class="on-lbl">Confidence</span>
+            <span class="on-val">${r.conf}%</span>
+            <div class="conf-bar-wrap"><div class="conf-bar-fill" style="width:${r.conf}%"></div></div>
+          </div>
+          <div class="opp-num"><span class="on-lbl">Days left</span><span class="on-val">${r.daysLeft}</span></div>
+        </div>
+        <div class="opp-thesis">${thesis}</div>
+      </div>
+      <div class="opp-right">
+        <div class="opp-gap">
+          <div class="opp-gap-val ${gapCls}">+${r.gap}¢</div>
+          <div class="opp-gap-lbl">edge</div>
+        </div>
+        <button class="opp-bet-btn ${btnCls}" onclick="event.stopPropagation();addScanBet('${r.city}','${r.strike}',${r.kalshiP})">
+          BUY YES ${r.kalshiP}¢
+        </button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function goToCity(city){
+  switchCity(city);
+  sw('dash');
+  const sel=document.getElementById('city-select');
+  if(sel)sel.value=city;
+}
+
+function addScanBet(city,strike,price){
+  const k=`${city}-${strike}`;
+  betSlip[k]=(betSlip[k]||0)+100;
+  updatePlaceBtn();
+}
+
 function sw(t){
-  ['dash','pos','rules','hist'].forEach(x=>{
+  ['scan','dash','pos','rules','hist'].forEach(x=>{
     document.getElementById('p-'+x).style.display=x===t?'block':'none';
     document.getElementById('t-'+x).className='tab'+(x===t?' active':'');
   });
+  if(t==='scan'&&!scanCache)loadScanner();
 }
 
 function togRule(tog){
@@ -844,6 +1089,8 @@ function updatePlaceBtn(){
   btn.textContent=total>0?`Place ${count} bet${count>1?'s':''} · $${total} total ↗`:'No bets in slip';
 }
 
+// Start on scanner, pre-load Seattle in background
+loadScanner();
 loadData();
 </script>
 </body>
