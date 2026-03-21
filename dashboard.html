@@ -374,7 +374,7 @@ body{max-width:900px;margin:0 auto;}
 </div>
 
 <!-- DASHBOARD -->
-<div id="p-dash">
+<div id="p-dash" style="display:none">
   <div class="header">
     <h1 id="page-title"><em>Rain</em> Tracker</h1>
     <div class="header-meta" id="status-pills">
@@ -630,14 +630,17 @@ async function loadScanner(){
     for(const m of markets){
       const strike=m.inches||0;
       if(!strike)continue;
+      const kalshiP=(m.yes_ask||0);
+
+      // Use server-computed values if available, else fall back to JS model
+      const serverModelP = m.model_prob!==undefined ? m.model_prob : null;
       const cushion=Math.round((mtd-strike)*100)/100;
-      const mode=cushion>=0.10?'settled':cushion>=-0.20?'near-certain':'probabilistic';
+      const mode=m.mode||( cushion>=0.10?'settled':cushion>=-0.20?'near-certain':'probabilistic');
       const SIGMA_TBL={11:1.4,10:1.4,9:1.3,8:1.2,7:1.0,6:.85,5:.7,4:.55,3:.4,2:.25,1:.15,0:.0};
       const sig=SIGMA_TBL[Math.min(daysLeft,11)]||1.5;
-      const modelP=mode==='settled'?0.99:mode==='near-certain'?Math.min(0.97,0.90+(mtd-strike)/0.5*0.07):normCDF((proj-strike)/sig);
-      const kalshiP=(m.yes_ask||0);
+      const jsModelP=mode==='settled'?0.99:mode==='near-certain'?Math.min(0.97,0.90+(mtd-strike)/0.5*0.07):normCDF((proj-strike)/sig);
+      const modelP=serverModelP!==null?serverModelP:jsModelP;
       const gap=Math.round((modelP-kalshiP)*100);
-      const conf=mode==='settled'?99:mode==='near-certain'?Math.round(modelP*100):Math.round((1-Math.min(sig/1.5,1))*100);
 
       results.push({
         city, cityLabel:ALL_CITIES[city]?.label||city,
@@ -645,14 +648,14 @@ async function loadScanner(){
         modelP:Math.round(modelP*100),
         kalshiP:Math.round(kalshiP*100),
         kalshiNo:Math.round((m.no_ask||0)*100),
-        gap, conf, daysLeft,
+        gap, daysLeft,
         mtd, proj, sig,
         ticker:m.ticker||'',
         edge:m.edge||'HOLD',
-        // Liquidity from server (if analyze_value ran)
         liquidity:m.liquidity||null,
         net_gap_c:m.net_gap_c!==undefined?m.net_gap_c:gap,
         actionable:m.actionable!==undefined?m.actionable:gap>=5,
+        decision:m.decision||'',
       });
     }
   }
