@@ -331,6 +331,11 @@ body{max-width:900px;margin:0 auto;}
 .opp.settled .opp-size-btn{background:var(--yes-lt);color:var(--yes);border:0.5px solid var(--yes-border);}
 .opp.near-certain .opp-size-btn{background:var(--yes-lt);color:#3B6D11;border:0.5px solid var(--yes-border);}
 .opp.probabilistic .opp-size-btn{background:#fef3e8;color:#854F0B;border:0.5px solid #e8c49a;}
+.opp-grade-badge{display:inline-block;margin-left:6px;font-size:9px;padding:1px 5px;border-radius:3px;font-weight:600;}
+.grade-A{background:rgba(80,200,120,0.15);color:var(--gain);}
+.grade-B{background:rgba(74,158,255,0.15);color:#4a9eff;}
+.grade-C{background:rgba(255,180,0,0.15);color:var(--warn);}
+.grade-D{background:rgba(200,80,80,0.15);color:var(--no);}
 .opp.illiquid .opp-size-btn{background:var(--bg);color:var(--muted);border:0.5px solid var(--border);cursor:not-allowed;}
 
 .scan-empty{text-align:center;padding:40px 16px;color:var(--muted);font-size:12px;}
@@ -691,10 +696,16 @@ function renderScanner(results){
     const net=r.net_gap_c!==undefined?r.net_gap_c:r.gap;
     // Always exclude: fully priced (≥99¢), zero net gap, or explicitly skipped
     if(r.kalshiP>=99||net<=0||r.decision==='SKIP — fully priced')return false;
-    if(scanFilter==='all')return net>=5;
+    // Forecast-dependent: only show where projection EXCEEDS the strike
+    // "bet with the forecast" — never show a probabilistic play against our own model
+    const projClearsStrike = r.proj >= r.strike;
+    if(scanFilter==='all'){
+      if(r.mode==='probabilistic'&&!projClearsStrike) return false;
+      return net>=5;
+    }
     if(scanFilter==='settled')return r.mode==='settled'&&net>=3;
     if(scanFilter==='near-certain')return r.mode==='near-certain'&&net>=3;
-    if(scanFilter==='probabilistic')return r.mode==='probabilistic'&&net>=8;
+    if(scanFilter==='probabilistic')return r.mode==='probabilistic'&&net>=5&&projClearsStrike;
     return true;
   });
 
@@ -742,14 +753,22 @@ function renderScanner(results){
     return `<div class="opp ${cardCls}" onclick="goToCity('${r.city}')">
       <div class="opp-inner">
         <div class="opp-left">
-          <div class="opp-decision">${decision} · ${r.cityLabel} above ${r.strike}"</div>
+          <div class="opp-decision">
+            ${decision} · ${r.cityLabel} above ${r.strike}"
+            ${decision==='HOLD'?'<span style="font-size:10px;color:var(--muted);font-weight:400;margin-left:6px">— wait for better entry</span>':''}
+          </div>
           <div class="opp-context">${why}</div>
           <div class="opp-context" style="margin-top:3px">${illiquid?'<span style="color:var(--no)">⚠ Illiquid market — skip</span>':holdNote}</div>
           ${prelimWarn}
         </div>
         <div class="opp-right">
           <div class="opp-net-gap">+${netGap}¢</div>
-          <div class="opp-meta-right">${r.kalshiP}¢ YES · grade ${grade}<br>${rawGap}¢ − ${spread}¢ spread<br>$${maxDeploy} max size</div>
+          <div class="opp-meta-right" style="position:relative">
+            ${r.kalshiP}¢ YES
+            <span class="opp-grade-badge grade-${grade}" title="Liquidity grade: A=tight spread + deep book, B=tradeable, C=thin, D=avoid">Grade ${grade}</span>
+            <br>${rawGap}¢ gap − ${spread}¢ spread = ${netGap}¢ net
+            <br>$${maxDeploy} max · ${mm?'market maker active':'maker only'}
+          </div>
           <button class="opp-size-btn" ${illiquid?'disabled':''} onclick="event.stopPropagation();addScanBet('${r.city}','${r.strike}',${r.kalshiP})">
             ${illiquid?'Skip':'Buy $'+maxDeploy}
           </button>

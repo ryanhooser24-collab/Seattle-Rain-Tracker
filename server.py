@@ -787,7 +787,7 @@ def analyze_value(markets, projected_total, days_remaining=10, true_mtd=None, nw
 
         # Skip markets already fully priced — no edge to capture
         if yes_ask >= 0.99:
-            m["edge"] = "HOLD"; m["mode"] = "settled"; m["model_prob"] = 0.99
+            m["edge"] = "HOLD"; pass  # keep existing mode if set; m["model_prob"] = 0.99
             m["cushion"] = cushion; m["gap_c"] = 0; m["net_gap_c"] = 0
             m["decision"] = "SKIP — fully priced"; m["actionable"] = False
             m["confidence"] = conf; m["weighted_edge"] = 0
@@ -805,10 +805,10 @@ def analyze_value(markets, projected_total, days_remaining=10, true_mtd=None, nw
             # Preliminary reports get slightly lower confidence
             model_prob = 0.99 if nws_is_finalized else 0.95
         elif cushion is not None and cushion >= -0.20:
-            mode = "near_certain"
+            mode = "near-certain"
             model_prob = round(min(0.97, 0.90 + cushion / 0.5 * 0.07), 3)
         else:
-            mode = "forecast"
+            mode = "probabilistic"
             if sigma > 0:
                 model_prob = round(normcdf((projected_total - inches) / sigma), 3)
             else:
