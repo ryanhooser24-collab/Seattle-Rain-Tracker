@@ -411,78 +411,9 @@ body{max-width:900px;margin:0 auto;}
 <!-- POSITIONS -->
 <div id="p-pos" style="display:none">
   <div class="main">
-    <div class="bal-grid" style="margin-bottom:12px;">
-      <div class="bal-card"><div class="bal-lbl">Account balance</div><div class="bal-val c-blue">$342.18</div><div class="bal-sub">Available to trade</div></div>
-      <div class="bal-card"><div class="bal-lbl">Invested</div><div class="bal-val">$161.58</div><div class="bal-sub">2 open positions</div></div>
-      <div class="bal-card"><div class="bal-lbl">Unrealized P&L</div><div class="bal-val c-profit">+$23.40</div><div class="bal-sub">+14.5% on cost</div></div>
-      <div class="bal-card"><div class="bal-lbl">Exit signals</div><div class="bal-val c-profit">1 ready</div><div class="bal-sub">Above 6" at target</div></div>
+    <div id="portfolio-wrap">
+      <div class="scan-loading">Loading portfolio...</div>
     </div>
-    <div class="section-lbl">Open positions (2)</div>
-    <div class="pos-grid">
-      <div class="pos-card">
-        <div class="pos-hdr"><div class="pos-strike">Above 6 inches · Mar 2026</div><span class="pos-badge pb-yes">YES</span></div>
-        <div class="pos-body">
-          <div class="pos-stats">
-            <div class="pos-stat"><div class="psl">Contracts</div><div class="psv">142</div></div>
-            <div class="pos-stat"><div class="psl">Avg cost</div><div class="psv">71¢</div></div>
-            <div class="pos-stat"><div class="psl">Current</div><div class="psv">88¢</div></div>
-          </div>
-          <div class="pos-stats">
-            <div class="pos-stat"><div class="psl">Invested</div><div class="psv">$100.82</div></div>
-            <div class="pos-stat"><div class="psl">Value</div><div class="psv">$124.96</div></div>
-            <div class="pos-stat"><div class="psl">P&L</div><div class="psv c-profit">+$24.14</div></div>
-          </div>
-          <div class="thesis-box"><strong>Entry Mar 13 · 71¢ · proj 6.44":</strong> WU wet pattern, 6" strike well within range. Market underpricing.</div>
-          <div class="drift-row">
-            <div class="drift-lbl">Projection drift</div>
-            <div class="drift-bw"><div class="drift-bar d-good" style="width:85%"></div></div>
-            <div class="drift-val c-profit">+0.45"</div>
-          </div>
-          <div class="drift-note">Entry proj 6.44" → current 6.89" · thesis strengthening</div>
-          <div class="targets">
-            <div class="target-box tgt-profit"><div class="tgt-lbl">Profit target</div><div class="tgt-val">88¢</div><div class="tgt-sub">AT TARGET</div></div>
-            <div class="target-box tgt-stop"><div class="tgt-lbl">Stop loss</div><div class="tgt-val">58¢</div><div class="tgt-sub">-13¢ from entry</div></div>
-          </div>
-          <div class="sig-pill sig-exit">Target reached — consider exiting</div>
-          <div class="pos-btns">
-            <button class="pos-btn pos-btn-yes">Sell at market ↗</button>
-            <button class="pos-btn">Edit targets</button>
-          </div>
-        </div>
-      </div>
-      <div class="pos-card">
-        <div class="pos-hdr"><div class="pos-strike">Above 7 inches · Mar 2026</div><span class="pos-badge pb-no">NO</span></div>
-        <div class="pos-body">
-          <div class="pos-stats">
-            <div class="pos-stat"><div class="psl">Contracts</div><div class="psv">98</div></div>
-            <div class="pos-stat"><div class="psl">Avg cost</div><div class="psv">62¢</div></div>
-            <div class="pos-stat"><div class="psl">Current</div><div class="psv">55¢</div></div>
-          </div>
-          <div class="pos-stats">
-            <div class="pos-stat"><div class="psl">Invested</div><div class="psv">$60.76</div></div>
-            <div class="pos-stat"><div class="psl">Value</div><div class="psv">$53.90</div></div>
-            <div class="pos-stat"><div class="psl">P&L</div><div class="psv c-loss">-$6.86</div></div>
-          </div>
-          <div class="thesis-box"><strong>Entry Mar 15 · 62¢ · proj 6.12":</strong> Projection 0.88" below 7" strike. NO looked cheap. WU dry pattern.</div>
-          <div class="drift-row">
-            <div class="drift-lbl">Projection drift</div>
-            <div class="drift-bw"><div class="drift-bar d-warn" style="width:45%"></div></div>
-            <div class="drift-val" style="color:#BA7517">+0.77"</div>
-          </div>
-          <div class="drift-note" style="color:#BA7517">Entry proj 6.12" → current 6.89" · margin narrowing</div>
-          <div class="targets">
-            <div class="target-box tgt-profit"><div class="tgt-lbl">Profit target</div><div class="tgt-val">75¢</div><div class="tgt-sub">+13¢ from entry</div></div>
-            <div class="target-box tgt-stop"><div class="tgt-lbl">Proj stop</div><div class="tgt-val">6.80"</div><div class="tgt-sub">thesis break level</div></div>
-          </div>
-          <div class="sig-pill sig-watch">Projection drifting — review thesis</div>
-          <div class="pos-btns">
-            <button class="pos-btn pos-btn-no">Sell at market ↗</button>
-            <button class="pos-btn">Edit targets</button>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div class="footer">* Live positions via Kalshi API · Order execution coming soon</div>
   </div>
 </div>
 
@@ -802,6 +733,154 @@ function toggleTheme(){
     document.getElementById('t-'+x).className='tab'+(x===t?' active':'');
   });
   if(t==='scan'&&!scanCache)loadScanner();
+  if(t==='pos')loadPortfolio();
+}
+
+// ── PORTFOLIO ─────────────────────────────────────────────────────────────────
+let pnlTimeframe=90; // days
+
+async function loadPortfolio(){
+  const wrap=document.getElementById('portfolio-wrap');
+  if(!wrap)return;
+  wrap.innerHTML='<div class="scan-loading">Loading portfolio...</div>';
+  try{
+    const[portRes,pnlRes]=await Promise.all([
+      fetch(SERVER+'/portfolio'),
+      fetch(SERVER+'/pnl?limit=200')
+    ]);
+    const port=await portRes.json();
+    const pnl=await pnlRes.json();
+    renderPortfolio(port,pnl);
+  }catch(e){
+    wrap.innerHTML=`<div class="err-msg">Could not load portfolio: ${e.message}</div>`;
+  }
+}
+
+function renderPortfolio(port,pnl){
+  const wrap=document.getElementById('portfolio-wrap');
+  if(!wrap)return;
+
+  const cash=port.balance||0;
+  const portVal=port.portfolio_value||0;
+  const total=cash+portVal;
+  const totalPnl=pnl.total_pnl||0;
+  const trades=pnl.trades||[];
+  const positions=port.positions||[];
+
+  // Balance strip
+  const balHtml=`<div class="bal-grid" style="margin-bottom:12px">
+    <div class="bal-card"><div class="bal-lbl">Total value</div><div class="bal-val" style="font-family:'Instrument Serif',serif;font-style:italic">$${total.toFixed(2)}</div></div>
+    <div class="bal-card"><div class="bal-lbl">Cash</div><div class="bal-val">$${cash.toFixed(2)}</div></div>
+    <div class="bal-card"><div class="bal-lbl">Positions</div><div class="bal-val">$${portVal.toFixed(2)}</div><div class="bal-sub">${positions.length} open</div></div>
+    <div class="bal-card"><div class="bal-lbl">Total P&L</div><div class="bal-val" style="color:${totalPnl>=0?'var(--yes)':'var(--no)'}">${totalPnl>=0?'+':''}$${totalPnl.toFixed(2)}</div></div>
+  </div>`;
+
+  // P&L chart
+  const pnlHtml=`<div class="chart-card" style="margin-bottom:12px">
+    <div class="chart-hdr">
+      <div class="chart-title">Cumulative P&L</div>
+      <div style="display:flex;gap:4px">
+        ${[7,30,90,'All'].map(d=>`<button onclick="setPnlTimeframe(${d==='All'?9999:d})" id="pnl-tf-${d}" style="font-size:10px;padding:3px 8px;border-radius:3px;border:0.5px solid var(--border);background:${d===90?'var(--ink)':'var(--bg)'};color:${d===90?'var(--paper)':'var(--muted)'};cursor:pointer;font-family:inherit">${d}${d!=='All'?'d':''}</button>`).join('')}
+      </div>
+    </div>
+    <svg id="pnl-svg" viewBox="0 0 860 160" style="height:160px;display:block;width:100%"></svg>
+    <div class="chart-foot" id="pnl-foot"></div>
+  </div>`;
+
+  // Open positions
+  const posHtml=positions.length?`
+    <div class="section-lbl" style="margin-bottom:8px">Open positions</div>
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">
+      ${positions.map(p=>{
+        const upnl=p.unrealized_pnl||0;
+        const isRain=p.ticker?.includes('RAIN')||p.market_title?.toLowerCase().includes('rain');
+        return `<div class="opp ${upnl>=0?'settled':'probabilistic'}" style="cursor:default">
+          <div class="opp-inner">
+            <div class="opp-left">
+              <div class="opp-decision" style="font-size:12px">${p.market_title||p.ticker}</div>
+              <div class="opp-context">${Math.abs(p.yes_contracts)} contracts · cost $${(p.total_cost||0).toFixed(2)} · value $${(p.market_value||0).toFixed(2)}</div>
+            </div>
+            <div class="opp-right">
+              <div class="opp-net-gap" style="font-size:18px;color:${upnl>=0?'var(--yes)':'var(--no)'}">${upnl>=0?'+':''}$${upnl.toFixed(2)}</div>
+              <div class="opp-meta-right">${isRain?'🌧 Rain market':''}</div>
+            </div>
+          </div>
+        </div>`;
+      }).join('')}
+    </div>`:'<div class="scan-empty" style="padding:16px">No open positions</div>';
+
+  wrap.innerHTML=balHtml+pnlHtml+posHtml;
+  drawPnlChart(trades, pnlTimeframe);
+}
+
+function setPnlTimeframe(days){
+  pnlTimeframe=days;
+  [7,30,90,'All'].forEach(d=>{
+    const el=document.getElementById('pnl-tf-'+d);
+    if(el){
+      const active=(d==='All'&&days===9999)||(d!=='All'&&d===days);
+      el.style.background=active?'var(--ink)':'var(--bg)';
+      el.style.color=active?'var(--paper)':'var(--muted)';
+    }
+  });
+  const pnlData=window._pnlTrades||[];
+  drawPnlChart(pnlData,days);
+}
+
+function drawPnlChart(trades,days){
+  window._pnlTrades=trades;
+  const svg=document.getElementById('pnl-svg');
+  const foot=document.getElementById('pnl-foot');
+  if(!svg)return;
+
+  // Filter by timeframe
+  const cutoff=days>=9999?null:new Date(Date.now()-days*86400000).toISOString().slice(0,10);
+  const filtered=cutoff?trades.filter(t=>t.date>=cutoff):trades;
+
+  if(!filtered.length){
+    svg.innerHTML=`<text x="430" y="80" text-anchor="middle" font-size="12" fill="var(--muted)">No trades in this timeframe</text>`;
+    if(foot)foot.innerHTML='';
+    return;
+  }
+
+  const W=860,H=160,PL=50,PR=20,PT=16,PB=24;
+  const CW=W-PL-PR,CH=H-PT-PB;
+  const vals=filtered.map(t=>t.cumulative);
+  const minV=Math.min(0,...vals),maxV=Math.max(0,...vals);
+  const range=maxV-minV||1;
+  const xS=i=>PL+(i/(filtered.length-1||1))*CW;
+  const yS=v=>PT+(1-(v-minV)/range)*CH;
+  const zero=yS(0);
+
+  let html='';
+  // Zero line
+  html+=`<line x1="${PL}" y1="${zero}" x2="${W-PR}" y2="${zero}" stroke="var(--border)" stroke-width="1"/>`;
+  // Y labels
+  [minV,0,maxV].forEach(v=>{
+    if(Math.abs(v)<0.01)return;
+    html+=`<text x="${PL-4}" y="${yS(v)+4}" text-anchor="end" font-size="10" fill="var(--muted)">${v>=0?'+':''}$${Math.abs(v).toFixed(0)}</text>`;
+  });
+
+  // Area fill
+  const areaTop=filtered.map((t,i)=>`${xS(i)},${yS(t.cumulative)}`).join(' ');
+  const areaBot=`${xS(filtered.length-1)},${zero} ${xS(0)},${zero}`;
+  const lastVal=filtered[filtered.length-1]?.cumulative||0;
+  html+=`<polygon points="${areaTop} ${areaBot}" fill="${lastVal>=0?'rgba(29,158,117,.12)':'rgba(163,45,45,.10)'}"/>`;
+
+  // Line
+  const path=filtered.map((t,i)=>`${i===0?'M':'L'}${xS(i)},${yS(t.cumulative)}`).join(' ');
+  html+=`<path d="${path}" fill="none" stroke="${lastVal>=0?'var(--yes)':'var(--no)'}" stroke-width="2"/>`;
+
+  // Last point dot
+  const li=filtered.length-1;
+  html+=`<circle cx="${xS(li)}" cy="${yS(lastVal)}" r="4" fill="${lastVal>=0?'var(--yes)':'var(--no)'}"/>`;
+
+  // X labels — first and last date
+  html+=`<text x="${PL}" y="${H-4}" font-size="10" fill="var(--muted)">${filtered[0]?.date||''}</text>`;
+  html+=`<text x="${W-PR}" y="${H-4}" text-anchor="end" font-size="10" fill="var(--muted)">${filtered[li]?.date||''}</text>`;
+
+  svg.innerHTML=html;
+  if(foot)foot.innerHTML=`<span>${filtered.length} settled trades</span><span>P&L: <b style="color:${lastVal>=0?'var(--yes)':'var(--no)'}">${lastVal>=0?'+':''}$${lastVal.toFixed(2)}</b></span><span>${days>=9999?'All time':days+'d'}</span>`;
 }
 
 function togRule(tog){

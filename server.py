@@ -1255,6 +1255,101 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"error": str(e)})
 
+        elif path == "/portfolio":
+            # Fetch live Kalshi balance and positions
+            if not KALSHI_API_KEY:
+                self.send_json({"ok": False, "error": "No Kalshi API key"})
+            else:
+                try:
+                    headers = {
+                        "Authorization": f"Bearer {KALSHI_API_KEY}",
+                        "Content-Type": "application/json"
+                    }
+                    # Balance
+                    bal_r = requests.get(
+                        f"{KALSHI_BASE}/portfolio/balance",
+                        headers=headers, timeout=10
+                    )
+                    bal_r.raise_for_status()
+                    bal = bal_r.json()
+
+                    # Positions
+                    pos_r = requests.get(
+                        f"{KALSHI_BASE}/portfolio/positions",
+                        headers=headers, timeout=10,
+                        params={"limit": 100, "count_filter": "position"}
+                    )
+                    pos_r.raise_for_status()
+                    pos_data = pos_r.json()
+
+                    positions = []
+                    for p in pos_data.get("market_positions", []):
+                        positions.append({
+                            "ticker":        p.get("ticker",""),
+                            "market_title":  p.get("market_title",""),
+                            "yes_contracts": float(p.get("position", 0) or 0),
+                            "avg_yes_price": float(p.get("realized_pnl", 0) or 0),
+                            "market_value":  float(p.get("market_value", 0) or 0),
+                            "realized_pnl":  float(p.get("realized_pnl", 0) or 0),
+                            "unrealized_pnl":float(p.get("unrealized_pnl", 0) or 0),
+                            "total_cost":    float(p.get("total_cost", 0) or 0),
+                            "payout":        float(p.get("payout", 0) or 0),
+                        })
+
+                    self.send_json({
+                        "ok": True,
+                        "balance":    float(bal.get("balance", 0) or 0) / 100,
+                        "portfolio_value": float(bal.get("portfolio_value", 0) or 0) / 100,
+                        "positions":  positions,
+                        "count":      len(positions),
+                    })
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/pnl":
+            # Fetch trade history for P&L chart
+            # Returns settled trades grouped by date for charting
+            if not KALSHI_API_KEY:
+                self.send_json({"ok": False, "error": "No Kalshi API key"})
+            else:
+                try:
+                    qs     = parse_qs(urlparse(self.path).query)
+                    limit  = int(qs.get("limit", [100])[0])
+                    headers = {
+                        "Authorization": f"Bearer {KALSHI_API_KEY}",
+                        "Content-Type": "application/json"
+                    }
+                    r = requests.get(
+                        f"{KALSHI_BASE}/portfolio/settlements",
+                        headers=headers, timeout=10,
+                        params={"limit": limit}
+                    )
+                    r.raise_for_status()
+                    data = r.json()
+
+                    trades = []
+                    cumulative = 0.0
+                    for s in reversed(data.get("settlements", [])):
+                        pnl = float(s.get("revenue", 0) or 0) / 100
+                        cumulative += pnl
+                        trades.append({
+                            "date":       s.get("updated_ts", "")[:10],
+                            "ticker":     s.get("ticker", ""),
+                            "pnl":        round(pnl, 2),
+                            "cumulative": round(cumulative, 2),
+                            "no_total":   float(s.get("no_total_cost", 0) or 0) / 100,
+                            "yes_total":  float(s.get("yes_total_cost", 0) or 0) / 100,
+                        })
+
+                    self.send_json({
+                        "ok": True,
+                        "trades":     trades,
+                        "total_pnl":  round(cumulative, 2),
+                        "count":      len(trades),
+                    })
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)})
+
         elif path == "/" or path == "/dashboard":
             try:
                 with open("dashboard.html", "rb") as f:
