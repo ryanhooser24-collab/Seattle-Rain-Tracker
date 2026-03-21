@@ -619,6 +619,7 @@ async function loadScanner(){
   }
 
   // Build opportunity list from each city's markets
+  const results=[];
   for(const{city,d} of cityData){
     if(!d||!d.nws)continue;
     const mtd=d.true_mtd||d.nws?.mtd||0;
