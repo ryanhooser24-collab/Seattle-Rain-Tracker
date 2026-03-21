@@ -1145,13 +1145,20 @@ class Handler(BaseHTTPRequestHandler):
             today_remaining = wu_hourly.get("today_remaining", 0) if wu_hourly.get("ok") else 0
             today_eod       = round(true_mtd + today_remaining, 2)
 
-            # 10-day projected total uses true MTD + WU 10-day remainder
-            wu_remaining   = wu.get("total_forecast", 0)
-            # Correct days remaining using actual month length
+            # 10-day projected total uses true MTD + OM forecast for remaining days THIS MONTH ONLY
+            # total_forecast includes up to 16 days — must cap to days remaining in month
             import calendar
             now_dt         = datetime.now()
             days_in_month  = calendar.monthrange(now_dt.year, now_dt.month)[1]
             days_remaining = days_in_month - now_dt.day
+            month_prefix   = now_dt.strftime("%Y-%m")
+
+            # Sum only OM daily forecast days that fall within the current month
+            wu_days_this_month = [
+                d for d in wu.get("days", [])
+                if d.get("date", "").startswith(month_prefix)
+            ]
+            wu_remaining = round(sum(d.get("qpf", 0) for d in wu_days_this_month), 2)
 
             # Only show full month-end projection if WU covers remainder
             wu_covers_eom = days_remaining <= 10
@@ -1365,7 +1372,13 @@ class Handler(BaseHTTPRequestHandler):
                     true_mtd  = round(mtd + gap, 2)
                     today_rem = wu_hourly.get("today_remaining", 0) if wu_hourly.get("ok") else 0
                     today_eod = round(true_mtd + today_rem, 2)
-                    wu_remaining = wu.get("total_forecast", 0)
+                    # Cap to days within current month only — OM returns 16 days including next month
+                    month_prefix = datetime.now().strftime("%Y-%m")
+                    wu_days_this_month = [
+                        d for d in wu.get("days", [])
+                        if d.get("date", "").startswith(month_prefix)
+                    ]
+                    wu_remaining = round(sum(d.get("qpf", 0) for d in wu_days_this_month), 2)
                     wu_covers = days_remaining <= 10
                     projected = round(true_mtd + wu_remaining, 2) if wu_covers else None
                     proj_signal = projected if wu_covers else round(true_mtd + wu_remaining, 2)
