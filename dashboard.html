@@ -403,7 +403,7 @@ body{max-width:900px;margin:0 auto;}
     <div id="markets-wrap"></div>
     <button class="place-btn" id="place-btn" disabled>No bets in slip</button>
     <div class="footer">
-      NWS CLI daily report (settlement) · Open-Meteo GFS/ECMWF forecast · IEM ASOS gap fill · Kalshi prediction markets<br>
+      NWS CLI daily report (settlement) · Open-Meteo GFS/ECMWF best_match (hourly + 10-day) · IEM ASOS gap fill · Kalshi prediction markets<br>
       RAINM Feb 4 2026 · Trace = 0.00" · First complete DCR governs settlement
     </div>
   </div>
@@ -577,6 +577,8 @@ async function loadScanner(){
             projected:c.projected,
             days_remaining:c.days_remaining,
             wu_covers_eom:c.wu_covers_eom,
+            nws_is_finalized:c.nws_is_finalized,
+            nws_mtd_type:c.nws_mtd_type||'unknown',
             nws:{ok:true,mtd:c.true_mtd},
             kalshi:{ok:c.kalshi_ok,markets:c.markets},
           }
@@ -645,6 +647,8 @@ async function loadScanner(){
       results.push({
         city, cityLabel:ALL_CITIES[city]?.label||city,
         strike, mode, cushion,
+        nws_is_finalized: d.nws_is_finalized!==false,
+        nws_mtd_type: d.nws_mtd_type||'unknown',
         modelP:Math.round(modelP*100),
         kalshiP:Math.round(kalshiP*100),
         kalshiNo:Math.round((m.no_ask||0)*100),
@@ -717,6 +721,12 @@ function renderScanner(results){
        r.mode==='near-certain'&&netGap>=5?'BUY YES':
        netGap>=8?'BUY YES':illiquid?'SKIP — illiquid':'HOLD');
 
+    // Preliminary NWS warning for settled/near-certain
+    const isPrelim = r.nws_is_finalized===false;
+    const prelimWarn = isPrelim&&(r.mode==='settled'||r.mode==='near-certain')
+      ? `<div class="opp-context" style="margin-top:4px;color:var(--warn)">⚠ <b>NWS reading is preliminary</b> (intraday — not overnight finalized). MTD may shift when overnight report publishes ~1–2 AM. Confidence reduced; settled threshold tightened to 0.50" cushion.</div>`
+      : '';
+
     // One sentence why
     const why=r.mode==='settled'
       ?`MTD already <b>+${r.cushion}" above</b> the ${r.strike}" strike — functionally settled. Only NWS revision could reverse this.`
@@ -735,6 +745,7 @@ function renderScanner(results){
           <div class="opp-decision">${decision} · ${r.cityLabel} above ${r.strike}"</div>
           <div class="opp-context">${why}</div>
           <div class="opp-context" style="margin-top:3px">${illiquid?'<span style="color:var(--no)">⚠ Illiquid market — skip</span>':holdNote}</div>
+          ${prelimWarn}
         </div>
         <div class="opp-right">
           <div class="opp-net-gap">+${netGap}¢</div>
@@ -962,7 +973,8 @@ async function loadData(){
 
 function render(d){
   const{nws,wu,wu_hourly,iem,kalshi,true_mtd,gap_total,today_eod,today_remaining,
-        projected,wu_covers_eom,days_remaining,confidence,month,city_label}=d;
+        projected,wu_covers_eom,days_remaining,confidence,month,city_label,
+        nws_is_finalized,nws_mtd_type}=d;
 
   // Update page title with city
   const titleEl=document.getElementById('page-title');
@@ -981,7 +993,10 @@ function render(d){
     notice.innerHTML=`<b>${days_remaining} days remaining in ${month}.</b> Check back when ${days_remaining-10} fewer days remain — signals activate when WU 10-day covers month-end.`;
   }else{
     notice.className='notice live';
-    notice.innerHTML=`<b>${days_remaining} days remaining — trading window active.</b> WU forecast covers full month remainder. Signals live.`;
+    const nwsWarn = (nws_is_finalized===false)
+      ? ' <span style="color:var(--warn);font-weight:600">⚠ NWS reading is preliminary — MTD may shift overnight. Settled/near-certain confidence reduced.</span>'
+      : '';
+    notice.innerHTML=`<b>${days_remaining} days remaining — trading window active.</b> Open-Meteo forecast covers full month remainder. Signals live.${nwsWarn}`;
   }
 
   renderRainfall(d);
@@ -1017,7 +1032,7 @@ function renderRainfall(d){
 
   const wuRows=wu_hours.length
     ?wu_hours.map(h=>`<div class="xp-row"><div class="xp-time">${h.time||'—'}</div><div class="xp-bw"><div class="xp-bf xp-wu" style="width:${Math.round(h.qpf/wuMax*100)}%"></div></div><div class="xp-val xp-vwu">${h.qpf.toFixed(2)}"</div></div>`).join('')
-    :'<div style="font-size:10px;color:var(--muted)">No WU hourly — end of day</div>';
+    :'<div style="font-size:10px;color:var(--muted)">No OM hourly — end of day</div>';
 
   // EOM row — blank outside 10 days
   const eomInside=wu_covers_eom&&projected!=null;
@@ -1050,22 +1065,33 @@ function renderRainfall(d){
       </div>
       <div class="rf-row">
         <div class="rf-left"><div class="rdot d-nws"></div><div class="rf-meta">
-          <div class="rf-lbl"><span>NWS official</span><div class="tip"><b>NWS CLI report</b>Official NWS Daily Climate Report for this city. Settlement source for all Kalshi rain contracts. Published once daily.</div></div>
-          <div class="rf-sub">Through ${nws_time} · settlement source</div>
+          <div class="rf-lbl">
+            <span>NWS official</span>
+            ${d.nws_is_finalized===false
+              ? '<span style="margin-left:6px;font-size:9px;padding:2px 6px;border-radius:3px;background:rgba(255,180,0,0.15);color:var(--warn);letter-spacing:0.5px">PRELIMINARY</span>'
+              : '<span style="margin-left:6px;font-size:9px;padding:2px 6px;border-radius:3px;background:rgba(80,200,120,0.15);color:var(--gain);letter-spacing:0.5px">FINALIZED</span>'}
+            <div class="tip"><b>NWS CLI report</b>
+              ${d.nws_is_finalized===false
+                ? '<b style=\'color:#ffb400\'>⚠ PRELIMINARY:</b> Issued after 4 AM — intraday reading, not yet quality-controlled. MTD can be revised overnight by up to 0.5"+. Settled threshold tightened to 0.50" cushion.'
+                : '<b style=\'color:#50c878\'>✓ FINALIZED:</b> Issued between midnight–4 AM. This is the official daily summary from the ASOS DSM — most reliable reading. Settled threshold = 0.10" cushion.'}
+              <br>Settlement source for all Kalshi rain contracts.
+            </div>
+          </div>
+          <div class="rf-sub">Through ${nws_time} · ${d.nws_is_finalized===false ? 'preliminary · ' : 'finalized daily · '}settlement source</div>
         </div></div>
-        <div class="rf-right"><div class="rf-val v-nws">${nws_mtd.toFixed(2)}<span class="rf-unit"> in</span></div></div>
+        <div class="rf-right"><div class="rf-val v-nws" style="${d.nws_is_finalized===false ? 'opacity:0.8' : ''}">${nws_mtd.toFixed(2)}<span class="rf-unit"> in</span></div></div>
       </div>
       <div class="rf-row">
         <div class="rf-left"><div class="rdot d-iem"></div><div class="rf-meta">
-          <div class="rf-lbl"><span>IEM actual</span><div class="tip"><b>Iowa Env. Mesonet</b>Real ASOS gauge at the local airport station, 0.01" precision. Fills the gap since the last NWS report.</div></div>
+          <div class="rf-lbl"><span>IEM actual</span><div class="tip"><b>IEM ASOS Gap Fill</b><br>Source: mesonet.agron.iastate.edu · ASOS tipping bucket gauge<br>Records: since last overnight NWS DCR (1–2 AM local)<br>Precision: 0.01" per tip · updates hourly<br><b>⚠ Warning:</b> IEM data is preliminary — same gauge as NWS but not yet quality-controlled. Generally within 2–3% of final NWS total. Potential 0.05–0.10" cumulative drift over 12+ hours.</div></div>
           <div class="rf-sub">Since ${nws_time} · ASOS gauge</div>
         </div></div>
         <div class="rf-right"><button class="xbtn" onclick="togPanel()">↓ hourly</button><div class="rf-val v-iem">+${gap_total.toFixed(2)}<span class="rf-unit"> in</span></div></div>
       </div>
       <div class="rf-row">
         <div class="rf-left"><div class="rdot d-wuhr"></div><div class="rf-meta">
-          <div class="rf-lbl"><span>WU hourly</span><div class="tip"><b>WU hourly forecast</b>Open-Meteo hourly QPF. Picks up exactly where IEM ends and runs through midnight.</div></div>
-          <div class="rf-sub">Now → midnight · forecast</div>
+          <div class="rf-lbl"><span>OM hourly forecast</span><div class="tip"><b>Open-Meteo hourly QPF</b><br>Source: api.open-meteo.com · best_match model (GFS/ECMWF blend)<br>Updates: every 6 hours as models refresh<br>Purpose: fills remaining hours today from current time to midnight<br><b>⚠ Warning:</b> forecast accuracy degrades for convective rain (afternoon thunderstorms). Best for frontal/stratiform systems like Seattle/Portland.</div></div>
+          <div class="rf-sub">Now → midnight · Open-Meteo hourly</div>
         </div></div>
         <div class="rf-right"><button class="xbtn" style="color:var(--wu-hr)" onclick="togPanel()">↓ hourly</button><div class="rf-val v-wuhr">+${(today_remaining||0).toFixed(2)}<span class="rf-unit"> in</span></div></div>
       </div>
@@ -1075,20 +1101,20 @@ function renderRainfall(d){
           ${iemRows}
         </div>
         <div>
-          <div class="xp-title">WU hourly — now → midnight</div>
+          <div class="xp-title">Open-Meteo hourly forecast — now → midnight</div>
           ${wuRows}
         </div>
       </div>
       <div class="rf-row row-eod">
         <div class="rf-left"><div class="rdot d-eod"></div><div class="rf-meta">
-          <div class="rf-lbl"><span>EOD total</span><div class="tip"><b>Projected end-of-day</b>NWS + IEM gap + WU hourly remainder. Best estimate of where today's MTD will land when tomorrow's DCR publishes.</div></div>
+          <div class="rf-lbl"><span>EOD total</span><div class="tip"><b>Projected End-of-Day MTD</b><br>= NWS finalized MTD (last overnight)<br>+ IEM ASOS gap fill (since NWS report time)<br>+ Open-Meteo hourly QPF (now → midnight)<br>This is our best estimate of what tomorrow morning's NWS DCR will show.<br><b>⚠ Note:</b> Open-Meteo hourly is forecast, not measured. Actual may differ.</div></div>
           <div class="rf-sub">End of today · projected</div>
         </div></div>
         <div class="rf-right"><div class="rf-val v-eod">= ${today_eod.toFixed(2)}<span class="rf-unit"> in</span></div></div>
       </div>
       <div class="rf-row">
         <div class="rf-left"><div class="rdot d-wu10"></div><div class="rf-meta">
-          <div class="rf-lbl"><span>WU ${Math.min(days_remaining,10)}-day forecast</span><div class="tip"><b>WU ${Math.min(days_remaining,10)}-day forecast</b>Daily QPF for the month remainder. Only days within the remaining calendar are used — further days are ignored.</div></div>
+          <div class="rf-lbl"><span>OM ${Math.min(days_remaining,10)}-day forecast</span><div class="tip"><b>Open-Meteo ${Math.min(days_remaining,10)}-day QPF</b><br>Source: api.open-meteo.com · best_match model (GFS/ECMWF blend)<br>Updates: every 6 hours as models refresh<br>Coverage: through month-end only — days beyond are ignored<br><b>⚠ Accuracy:</b> GFS has a known wet bias in the Pacific Northwest. Days 1–3 are reliable; days 5–10 carry sigma ≈ 0.7–1.4" RMSE. Backtest in progress to calibrate.</div></div>
           <div class="rf-sub">${wuRain} rain days · ${days_remaining<=10?`through ${eomLabel}`:'partial coverage'}</div>
         </div></div>
         <div class="rf-right"><div class="rf-val v-wu10">+${wuSum.toFixed(2)}<span class="rf-unit"> in</span></div></div>
@@ -1138,7 +1164,7 @@ function renderChart(d){
       </div>
       <div class="bars">${bars}</div>
       <div class="chart-leg">
-        <span><span class="ls" style="background:var(--wu-hr);opacity:.85"></span>Today (IEM actual + WU hourly)</span>
+        <span><span class="ls" style="background:var(--wu-hr);opacity:.85"></span>Today (IEM actual + OM hourly forecast)</span>
         <span><span class="ls" style="background:var(--rain);opacity:.65"></span>WU forecast (used)</span>
         <span><span class="ls" style="background:var(--border)"></span>Beyond days remaining</span>
       </div>
@@ -1162,7 +1188,7 @@ function renderMarkets(d){
   if(!wu_covers_eom){
     wrap.innerHTML=`<div class="locked">
       <div class="locked-title">${days_remaining} days remaining — markets locked</div>
-      <div class="locked-sub">Signals and bet buttons activate when the WU 10-day window covers through ${eomLabel}.</div>
+      <div class="locked-sub">Signals and bet buttons activate when the Open-Meteo 10-day window covers through ${eomLabel}.</div>
     </div>`;
     return;
   }
@@ -1175,9 +1201,10 @@ function renderMarkets(d){
   const icao=ALL_CITIES[d.city]?.icao||d.city?.toUpperCase()||'KSEA';
 
   const cards=kalshi.markets.filter(m=>{
-    // Same filter as scanner — skip fully priced or zero gap
+    // City detail shows ALL open markets — including fully priced ones
+    // so you can track positions and see the full picture
     const yes_ask=Math.round((m.yes_ask||0)*100);
-    return yes_ask<99&&(m.net_gap_c||0)>0;
+    return yes_ask > 0;  // only hide markets with no price at all
   }).map(m=>{
     const strike=m.inches||0;
     const yes_ask=Math.round((m.yes_ask||0)*100);
@@ -1319,6 +1346,32 @@ loadData();
       No backtest data available for this city yet — actuals need to be added for other cities.
     </div>
 
+    <!-- IEM Accuracy Section -->
+    <div style="margin-top:28px">
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:12px;flex-wrap:wrap">
+        <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)">IEM Gap Fill Accuracy</div>
+        <button onclick="runIEMBacktest()" style="font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:var(--card);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:4px;cursor:pointer">Run IEM Test</button>
+        <span id="iem-bt-status" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+      <div id="iem-bt-result" style="display:none;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:11px;line-height:1.8"></div>
+      <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.6">
+        Compares IEM ASOS daily totals vs NWS official for the same day. Measures the error you carry when using IEM to fill the gap between overnight NWS reports.
+      </div>
+    </div>
+
+    <!-- NWS Corrections Section -->
+    <div style="margin-top:24px">
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:12px;flex-wrap:wrap">
+        <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)">NWS Correction History</div>
+        <button onclick="runCorrectionsBacktest()" style="font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:var(--card);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:4px;cursor:pointer">Check Corrections</button>
+        <span id="corr-bt-status" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+      <div id="corr-bt-result" style="display:none;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:11px;line-height:1.8"></div>
+      <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.6">
+        Scans the last 10 CLI versions for this city to detect MTD revisions ≥0.05". Answers: how often does NWS correct its figures, by how much, and in which direction?
+      </div>
+    </div>
+
     <div style="margin-top:28px;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:11px;color:var(--muted);line-height:1.7">
       <strong style="color:var(--ink)">How this works:</strong> For each past month with a known NWS actual, we query the Open-Meteo 
       Previous Runs API to get what GFS predicted at D-1, D-3, D-5, and D-7 before month end. 
@@ -1332,6 +1385,64 @@ loadData();
 
 <script>
 async function loadBacktest(){}  // called on tab switch, does nothing until user clicks Run
+
+async function runIEMBacktest(){
+  const city = document.getElementById('bt-city').value;
+  const status = document.getElementById('iem-bt-status');
+  const result = document.getElementById('iem-bt-result');
+  status.textContent = 'Running...';
+  result.style.display='none';
+  try{
+    const res = await fetch(SERVER+'/backtest/iem?city='+city+'&days=30');
+    const data = await res.json();
+    if(!data.ok){ status.textContent='Error: '+data.error; return; }
+    const s = data.summary;
+    if(!s||!s.n){ status.textContent='No matching data'; return; }
+    const biasColor = s.bias==='WET'?'color:#4a9eff':s.bias==='DRY'?'color:var(--warn)':'color:var(--gain)';
+    result.innerHTML = `
+      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:12px">
+        <div><div style="color:var(--muted);font-size:10px">Days compared</div><div style="font-size:18px;font-weight:700">${s.n}</div></div>
+        <div><div style="color:var(--muted);font-size:10px">Mean error</div><div style="font-size:18px;font-weight:700;${s.mean_err>0?'color:#4a9eff':s.mean_err<0?'color:var(--warn)':''}">${s.mean_err>0?'+':''}${s.mean_err}"</div></div>
+        <div><div style="color:var(--muted);font-size:10px">RMSE</div><div style="font-size:18px;font-weight:700">${s.rmse}"</div></div>
+        <div><div style="color:var(--muted);font-size:10px">Bias</div><div style="font-size:18px;font-weight:700;${biasColor}">${s.bias}</div></div>
+      </div>
+      <div style="color:var(--muted)">${s.interpretation}</div>
+      ${s.rainy_days?`<div style="margin-top:6px;color:var(--muted)">Rainy days (>${0.05}"): ${s.rainy_days} · MAE on rainy days: ${s.rainy_mae}"</div>`:''}
+    `;
+    result.style.display='block';
+    status.textContent = s.n+' days analyzed';
+  }catch(e){ status.textContent='Failed: '+e.message; }
+}
+
+async function runCorrectionsBacktest(){
+  const city = document.getElementById('bt-city').value;
+  const status = document.getElementById('corr-bt-status');
+  const result = document.getElementById('corr-bt-result');
+  status.textContent = 'Fetching CLI versions...';
+  result.style.display='none';
+  try{
+    const res = await fetch(SERVER+'/backtest/corrections?city='+city);
+    const data = await res.json();
+    if(!data.ok){ status.textContent='Error: '+data.error; return; }
+    const corrs = data.corrections||[];
+    const versions = data.versions||[];
+    let html = `<div style="margin-bottom:10px"><b>${versions.length}</b> CLI versions fetched · <b style="${corrs.length>0?'color:var(--warn)':''}">${corrs.length}</b> corrections ≥0.05" detected</div>`;
+    if(corrs.length===0){
+      html += `<div style="color:var(--gain)">✓ No significant corrections found in recent CLI history. NWS MTD has been stable.</div>`;
+    } else {
+      html += corrs.map(c=>`
+        <div style="padding:8px;margin-bottom:6px;background:var(--bg);border-radius:4px;border-left:3px solid ${c.direction==='DOWN'?'var(--warn)':'var(--gain)'}">
+          <span style="${c.direction==='DOWN'?'color:var(--warn)':'color:var(--gain)'}">${c.direction==='DOWN'?'▼ DOWN':'▲ UP'} ${Math.abs(c.delta)}"</span>
+          · v${c.from_version}→v${c.to_version} · ${c.from_mtd}" → ${c.to_mtd}"
+          ${c.is_cca?'<span style="color:var(--warn);margin-left:6px">CCA (official correction)</span>':''}
+        </div>`).join('');
+    }
+    html += `<div style="margin-top:10px;color:var(--muted);font-size:10px">Note: covers only the last ${versions.length} CLI versions (~recent days). For longer history, manual NWS archive review needed.</div>`;
+    result.innerHTML = html;
+    result.style.display='block';
+    status.textContent = 'Done';
+  }catch(e){ status.textContent='Failed: '+e.message; }
+}
 
 async function runBacktest(){
   const city = document.getElementById('bt-city').value;

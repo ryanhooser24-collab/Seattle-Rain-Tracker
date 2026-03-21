@@ -361,12 +361,36 @@ def fetch_nws_mtd(city_cfg=None):
 
         issuedby = cfg.get("nws_issuedby", "SEA")
         label    = cfg.get("label", "Seattle, WA")
+
+        # Classify report as finalized (overnight 12AM-4AM) or preliminary (intraday)
+        # Finalized DSM fires at 00:15 AM; CLI follows ~1-2AM. Afternoon CLIs are intraday.
+        is_finalized = False
+        issued_hour = None
+        if issued_time:
+            import re as _re
+            h_match = _re.search(r"(\d{3,4})\s+(AM|PM)", issued_time, _re.IGNORECASE)
+            if h_match:
+                raw_h = int(h_match.group(1))
+                ampm  = h_match.group(2).upper()
+                hour  = (raw_h // 100) % 12 + (12 if ampm == "PM" else 0)
+                if ampm == "AM" and raw_h // 100 == 12:
+                    hour = 0
+                issued_hour = hour
+                # Finalized = issued between midnight and 4 AM local time
+                is_finalized = (0 <= hour <= 4)
+
+        # MTD reliability: finalized report is authoritative; intraday is preliminary
+        mtd_type = "finalized" if is_finalized else "preliminary"
+
         return {
             "ok":          True,
             "mtd":         mtd,
             "today":       today,
             "date":        date,
             "issued":      issued_time,
+            "issued_hour": issued_hour,
+            "is_finalized": is_finalized,
+            "mtd_type":    mtd_type,
             "valid_as_of": valid_time,
             "source":      "NWS CLI" + issuedby + " (" + label + ")",
         }
@@ -734,7 +758,7 @@ def liquidity_score(market):
     }
 
 
-def analyze_value(markets, projected_total, days_remaining=10, true_mtd=None):
+def analyze_value(markets, projected_total, days_remaining=10, true_mtd=None, nws_is_finalized=True):
     """
     Three-mode probability + liquidity scoring.
 
@@ -775,9 +799,14 @@ def analyze_value(markets, projected_total, days_remaining=10, true_mtd=None):
             analyzed.append(m); continue
 
         # Three-mode probability
-        if cushion is not None and cushion >= 0.10:
+        # Settled cushion: 0.10" if NWS report is finalized (overnight), 
+        # 0.50" if preliminary (intraday) — intraday MTD can be revised down
+        settled_min = 0.10 if nws_is_finalized else 0.50
+
+        if cushion is not None and cushion >= settled_min:
             mode = "settled"
-            model_prob = 0.99
+            # Preliminary reports get slightly lower confidence
+            model_prob = 0.99 if nws_is_finalized else 0.95
         elif cushion is not None and cushion >= -0.20:
             mode = "near_certain"
             model_prob = round(min(0.97, 0.90 + cushion / 0.5 * 0.07), 3)
@@ -1185,6 +1214,9 @@ class Handler(BaseHTTPRequestHandler):
                 "mtd":              mtd,
                 "gap_total":        gap_total,
                 "true_mtd":         true_mtd,
+                    "nws_is_finalized":  nws.get("is_finalized", True),
+                    "nws_mtd_type":      nws.get("mtd_type", "unknown"),
+                    "nws_issued_hour":   nws.get("issued_hour"),
                 "today_remaining":  today_remaining,
                 "today_eod":        today_eod,
                 "projected":        projected,
@@ -1343,13 +1375,16 @@ class Handler(BaseHTTPRequestHandler):
                     if kalshi.get("ok"):
                         kalshi["markets"] = analyze_value(
                             kalshi["markets"], proj_signal, days_remaining,
-                            true_mtd=true_mtd
+                            true_mtd=true_mtd,
+                            nws_is_finalized=nws.get("is_finalized", True)
                         )
                     return {
                         "city":           city_key,
                         "city_label":     cfg["label"],
                         "ok":             nws.get("ok", False),
                         "true_mtd":       true_mtd,
+                        "nws_is_finalized": nws.get("is_finalized", True),
+                        "nws_mtd_type":   nws.get("mtd_type", "unknown"),
                         "today_eod":      today_eod,
                         "projected":      projected,
                         "days_remaining": days_remaining,
@@ -1529,7 +1564,185 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
-        elif path == "/portfolio":
+        elif path == "/backtest/iem":
+            # IEM gap fill accuracy backtest
+            # Measures: how well does IEM hourly data match the next morning's NWS finalized total?
+            # Method: for each past day, take (NWS_day_N + IEM_gap_fill) vs NWS_day_N+1
+            # ?city=seattle&days=30
+            qs       = parse_qs(urlparse(self.path).query)
+            city_key = qs.get("city", ["seattle"])[0]
+            days_back = int(qs.get("days", ["30"])[0])
+            cfg = CITIES.get(city_key, CITIES["seattle"])
+
+            try:
+                from datetime import date as dt_date, timedelta
+                results = []
+                iem_station = cfg["icao_code"][1:]  # KSEA → SEA
+
+                # Fetch IEM daily precipitation for the last N days
+                end_dt   = dt_date.today()
+                start_dt = end_dt - timedelta(days=days_back + 2)
+                params = {
+                    "station": iem_station,
+                    "data":    "p01i",
+                    "year1":   start_dt.year, "month1": start_dt.month, "day1": start_dt.day,
+                    "year2":   end_dt.year,   "month2": end_dt.month,   "day2": end_dt.day,
+                    "tz":      cfg.get("tz", "America/Los_Angeles"),
+                    "format":  "json", "latlon": "no", "missing": "M", "trace": "T",
+                    "direct":  "no",
+                }
+                r = requests.get(
+                    "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py",
+                    params=params, timeout=10
+                )
+                r.raise_for_status()
+                raw = r.json()
+                # Group hourly readings by date
+                from collections import defaultdict
+                daily_totals = defaultdict(float)
+                for obs in raw.get("data", []):
+                    t = obs.get("valid", "")
+                    p = obs.get("p01i", "M")
+                    if t and p not in ("M", "T", None):
+                        try:
+                            date_str = t[:10]
+                            daily_totals[date_str] += float(p)
+                        except:
+                            pass
+
+                # Also fetch NWS CLI archive via IEM API for the same period
+                nws_r = requests.get(
+                    f"https://mesonet.agron.iastate.edu/api/1/nws/cli.json",
+                    params={"station": cfg["nws_issuedby"], "days": days_back + 5},
+                    timeout=10
+                )
+                nws_data = {}
+                if nws_r.ok:
+                    for entry in nws_r.json().get("data", []):
+                        d = entry.get("date", "")
+                        p = entry.get("precip", None)
+                        if d and p is not None:
+                            try: nws_data[d] = float(p)
+                            except: pass
+
+                # Compare: IEM daily sum vs NWS official for same day
+                errors = []
+                for date_str, iem_total in sorted(daily_totals.items()):
+                    iem_in = round(iem_total, 2)
+                    nws_val = nws_data.get(date_str)
+                    if nws_val is not None:
+                        err = round(iem_in - nws_val, 3)
+                        errors.append(err)
+                        results.append({
+                            "date":    date_str,
+                            "iem":     iem_in,
+                            "nws":     nws_val,
+                            "error":   err,
+                            "pct_err": round(err / nws_val * 100, 1) if nws_val > 0.05 else None,
+                        })
+
+                summary = {}
+                if errors:
+                    n    = len(errors)
+                    mean = round(sum(errors)/n, 3)
+                    mae  = round(sum(abs(e) for e in errors)/n, 3)
+                    rmse = round((sum(e**2 for e in errors)/n)**0.5, 3)
+                    # Only on rainy days (NWS > 0.05")
+                    rainy = [r for r in results if r["nws"] > 0.05]
+                    rainy_errs = [r["error"] for r in rainy]
+                    summary = {
+                        "n": n, "mean_err": mean, "mae": mae, "rmse": rmse,
+                        "bias": "WET" if mean > 0.02 else "DRY" if mean < -0.02 else "NEUTRAL",
+                        "rainy_days": len(rainy),
+                        "rainy_mae": round(sum(abs(e) for e in rainy_errs)/len(rainy_errs), 3) if rainy_errs else None,
+                        "interpretation": (
+                            f"IEM is on average {abs(mean)}\" {'above' if mean>0 else 'below'} NWS official. "
+                            f"On rainy days (>{0.05}\"), mean absolute error is {summary.get('rainy_mae','?')}\". "
+                            f"This is the gap fill error you should expect in true_mtd."
+                        )
+                    }
+                    summary["interpretation"] = (
+                        f"IEM is on average {abs(mean):.3f}\" {'above' if mean>0 else 'below'} NWS official. "
+                        f"RMSE = {rmse}\". Rainy day MAE = {rainy_mae if (rainy_mae:=summary.get('rainy_mae')) else '?'}\". "
+                        f"Bias: {summary['bias']}."
+                    )
+
+                self.send_json({"ok": True, "city": city_key, "days": days_back,
+                                "results": results[-60:], "summary": summary})
+
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/backtest/corrections":
+            # NWS correction frequency backtest
+            # Fetches multiple CLI versions for recent days and compares them
+            # to detect how often and by how much NWS revises its MTD
+            qs       = parse_qs(urlparse(self.path).query)
+            city_key = qs.get("city", ["seattle"])[0]
+            cfg = CITIES.get(city_key, CITIES["seattle"])
+
+            try:
+                # Fetch last 50 versions of the CLI and look for CCA (corrected) products
+                cli_url = (
+                    f"https://forecast.weather.gov/product.php"
+                    f"?site={cfg['nws_site']}&issuedby={cfg['nws_issuedby']}"
+                    f"&product=CLI&format=txt&version=1"
+                )
+                headers = {"User-Agent": "Mozilla/5.0"}
+                # Fetch versions 1–10 and compare MTD values
+                versions = []
+                for v in range(1, 11):
+                    try:
+                        url = cli_url.replace("&version=1", f"&version={v}")
+                        r = requests.get(url, headers=headers, timeout=5)
+                        if not r.ok: break
+                        from bs4 import BeautifulSoup as BS
+                        soup = BS(r.text, "html.parser")
+                        pre = soup.find("pre")
+                        raw = pre.get_text() if pre else r.text
+                        mtd_m = re.search(r"MONTH TO DATE\s+([\d\.T]+)", raw, re.IGNORECASE)
+                        issued_m = re.search(r"(\d{3,4}\s+(?:AM|PM)\s+\w+\s+\w+\s+\w+\s+\d+\s+\d{4})", raw, re.IGNORECASE)
+                        cca = "CORRECTED" in raw or "CCA" in raw[:50]
+                        if mtd_m:
+                            versions.append({
+                                "version": v,
+                                "mtd": float(mtd_m.group(1)) if mtd_m.group(1) != "T" else 0.0,
+                                "issued": issued_m.group(1).strip() if issued_m else None,
+                                "is_correction": cca,
+                            })
+                    except:
+                        break
+
+                # Find corrections: MTD changed between versions
+                corrections = []
+                for i in range(1, len(versions)):
+                    prev = versions[i]    # older version (higher number = older)
+                    curr = versions[i-1]  # newer version
+                    delta = round(curr["mtd"] - prev["mtd"], 2)
+                    if abs(delta) >= 0.05:  # threshold for meaningful change
+                        corrections.append({
+                            "from_version": prev["version"],
+                            "to_version":   curr["version"],
+                            "from_mtd":     prev["mtd"],
+                            "to_mtd":       curr["mtd"],
+                            "delta":        delta,
+                            "direction":    "UP" if delta > 0 else "DOWN",
+                            "is_cca":       curr["is_correction"],
+                        })
+
+                self.send_json({
+                    "ok":          True,
+                    "city":        city_key,
+                    "versions":    versions,
+                    "corrections": corrections,
+                    "correction_count": len(corrections),
+                    "note": "Corrections ≥0.05\" in MTD across the last 10 CLI versions. Covers recent days only."
+                })
+
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+
             # Fetch live Kalshi balance and positions
             if not KALSHI_KEY_ID:
                 self.send_json({"ok": False, "error": "No Kalshi API key"})
