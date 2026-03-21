@@ -713,67 +713,100 @@ def liquidity_score(market):
     }
 
 
-def analyze_value(markets, projected_total, days_remaining=10):
+def analyze_value(markets, projected_total, days_remaining=10, true_mtd=None):
     """
-    Confidence-weighted edge signal.
+    Three-mode probability + liquidity scoring.
 
-    margin         = projection - strike  (how far we clear the bar)
-    confidence     = f(days_remaining)    (how much we trust the forecast)
-    weighted_edge  = margin × confidence
+    Mode 1 — SETTLED:    true_mtd >= strike + 0.10"  → prob = 0.99
+    Mode 2 — NEAR_CERT:  true_mtd >= strike - 0.20"  → prob = high, low forecast risk
+    Mode 3 — FORECAST:   true_mtd < strike            → normal distribution with sigma
 
-    Signal tiers (weighted_edge):
-      >= +0.40  → STRONG YES
-      >= +0.15  → LEAN YES
-      <= -0.40  → STRONG NO
-      <= -0.15  → LEAN NO
-      else      → HOLD (margin exists but confidence too low)
+    Gap = model_prob - kalshi_yes_ask
+    Net gap = gap - spread (friction cost)
     """
-    conf = confidence_weight(days_remaining)
+    from math import erf, sqrt
+    def normcdf(x):
+        return 0.5 * (1 + erf(x / sqrt(2)))
+
+    SIGMA_TABLE = {10:1.4,9:1.3,8:1.2,7:1.0,6:.85,5:.7,4:.55,3:.4,2:.25,1:.15,0:.0}
+    sigma = SIGMA_TABLE.get(min(days_remaining, 10), 1.5)
+    conf  = confidence_weight(days_remaining)
     analyzed = []
 
     for m in markets:
         inches = m.get("inches")
         if inches is None:
-            m["edge"] = "unknown"
-            m["edge_detail"] = ""
-            m["weighted_edge"] = 0
-            m["confidence"] = conf
-            analyzed.append(m)
-            continue
+            m["edge"] = "unknown"; m["edge_detail"] = ""
+            m["weighted_edge"] = 0; m["confidence"] = conf
+            analyzed.append(m); continue
 
+        cushion = round((true_mtd or 0) - inches, 2) if true_mtd is not None else None
+
+        # Three-mode probability
+        if cushion is not None and cushion >= 0.10:
+            mode = "settled"
+            model_prob = 0.99
+        elif cushion is not None and cushion >= -0.20:
+            mode = "near_certain"
+            model_prob = round(min(0.97, 0.90 + cushion / 0.5 * 0.07), 3)
+        else:
+            mode = "forecast"
+            if sigma > 0:
+                model_prob = round(normcdf((projected_total - inches) / sigma), 3)
+            else:
+                model_prob = 1.0 if projected_total >= inches else 0.0
+
+        yes_ask    = m.get("yes_ask", 0)
+        gap        = round(model_prob - yes_ask, 3)       # probability gap
+        gap_c      = round(gap * 100)                      # in cents
+
+        # Legacy weighted_edge for backward compatibility
         margin        = round(projected_total - inches, 2)
         weighted_edge = round(margin * conf, 3)
 
-        if weighted_edge >= 0.40:
+        if gap_c >= 12:
             edge = "STRONG_YES"
-        elif weighted_edge >= 0.15:
+        elif gap_c >= 6:
             edge = "LEAN_YES"
-        elif weighted_edge <= -0.40:
+        elif gap_c <= -12:
             edge = "STRONG_NO"
-        elif weighted_edge <= -0.15:
+        elif gap_c <= -6:
             edge = "LEAN_NO"
         else:
             edge = "HOLD"
 
         # Liquidity scoring
         liq        = liquidity_score(m)
-        # Net gap: raw probability gap minus round-trip friction (spread both ways)
-        raw_gap_c  = round(weighted_edge * 100)
-        friction_c = liq["spread_c"]   # one-way spread cost
-        net_gap_c  = max(0, raw_gap_c - friction_c)
+        friction_c = liq["spread_c"]
+        net_gap_c  = max(0, gap_c - friction_c)
         actionable = net_gap_c >= 5 and liq["grade"] in ("A", "B", "C")
 
+        # Simple decision: BUY / HOLD / SKIP
+        if actionable and edge in ("STRONG_YES", "LEAN_YES"):
+            decision = "BUY YES"
+        elif actionable and edge in ("STRONG_NO", "LEAN_NO"):
+            decision = "BUY NO"
+        elif liq["grade"] == "D":
+            decision = "SKIP — illiquid"
+        else:
+            decision = "HOLD"
+
         m["edge"]          = edge
+        m["mode"]          = mode
+        m["model_prob"]    = model_prob
+        m["cushion"]       = cushion
+        m["gap_c"]         = gap_c
         m["margin"]        = margin
         m["confidence"]    = conf
         m["weighted_edge"] = weighted_edge
+        m["sigma"]         = sigma
         m["liquidity"]     = liq
         m["net_gap_c"]     = net_gap_c
         m["actionable"]    = actionable
+        m["decision"]      = decision
         m["edge_detail"]   = (
-            f"Proj {projected_total:.2f}\" vs {inches:.0f}\" strike "
-            f"({margin:+.2f}\") × {int(conf*100)}% conf = {weighted_edge:+.3f} "
-            f"· liq {liq['grade']} ({liq['score']}/100) · net {net_gap_c}¢"
+            f"{mode} · model {int(model_prob*100)}% vs {int(yes_ask*100)}¢ "
+            f"= {gap_c:+d}¢ gap · {net_gap_c}¢ net · liq {liq['grade']}"
         )
         analyzed.append(m)
 
@@ -1057,7 +1090,11 @@ class Handler(BaseHTTPRequestHandler):
 
             # 10-day projected total uses true MTD + WU 10-day remainder
             wu_remaining   = wu.get("total_forecast", 0)
-            days_remaining = 31 - datetime.now().day
+            # Correct days remaining using actual month length
+            import calendar
+            now_dt         = datetime.now()
+            days_in_month  = calendar.monthrange(now_dt.year, now_dt.month)[1]
+            days_remaining = days_in_month - now_dt.day
 
             # Only show full month-end projection if WU covers remainder
             wu_covers_eom = days_remaining <= 10
@@ -1074,11 +1111,12 @@ class Handler(BaseHTTPRequestHandler):
             # WU days actually used (capped at days remaining)
             wu_days_used = min(days_remaining, len(wu.get("days", [])))
 
-            # Analyze Kalshi market value — confidence-weighted signal
+            # Analyze Kalshi market value — three-mode probability + liquidity scoring
             if kalshi.get("ok"):
                 proj_for_signal = projected if wu_covers_eom else round(true_mtd + wu_remaining, 2)
                 kalshi["markets"] = analyze_value(
-                    kalshi["markets"], proj_for_signal, days_remaining
+                    kalshi["markets"], proj_for_signal, days_remaining,
+                    true_mtd=true_mtd
                 )
 
             # Sigma estimates by days remaining (calibrated via Open-Meteo backtest)

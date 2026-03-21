@@ -288,44 +288,43 @@ body{max-width:900px;margin:0 auto;}
 .sf{font-size:10px;padding:4px 10px;border-radius:3px;border:0.5px solid var(--border);background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;}
 .sf.on{background:var(--ink);color:var(--paper);border-color:var(--ink);}
 .opp-list{padding:12px 16px;display:flex;flex-direction:column;gap:8px;}
-.opp{background:var(--paper);border:0.5px solid var(--border);border-radius:8px;overflow:hidden;display:grid;grid-template-columns:auto 1fr auto;align-items:stretch;}
-.opp.settled{border-color:var(--yes-border);}
-.opp.near-certain{border-color:#a8d4b8;}
-.opp.probabilistic{border-color:#e8c49a;}
-.opp.thin{border-color:var(--border);opacity:.6;}
-.opp-rank{display:flex;align-items:center;justify-content:center;width:36px;font-size:16px;font-weight:500;color:var(--muted);border-right:0.5px solid var(--border);background:var(--bg);}
-.opp.settled .opp-rank{background:var(--yes-lt);color:var(--yes);}
-.opp.near-certain .opp-rank{background:var(--yes-lt);color:var(--yes);}
-.opp.probabilistic .opp-rank{background:#fef3e8;color:#854F0B;}
-.opp-body{padding:10px 14px;min-width:0;}
-.opp-top{display:flex;align-items:center;gap:8px;margin-bottom:4px;flex-wrap:wrap;}
-.opp-city{font-size:12px;font-weight:500;color:var(--ink);}
-.opp-strike{font-size:12px;color:var(--muted);}
-.opp-mode-pill{font-size:9px;padding:1px 7px;border-radius:3px;letter-spacing:.5px;}
-.mp-settled{background:var(--yes-lt);color:var(--yes);}
-.mp-near{background:var(--yes-lt);color:var(--yes);}
-.mp-prob{background:#fef3e8;color:#854F0B;}
-.opp-nums{display:flex;gap:16px;font-size:11px;flex-wrap:wrap;}
-.opp-num{display:flex;flex-direction:column;gap:1px;}
-.on-lbl{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;}
-.on-val{font-weight:500;color:var(--ink);}
-.on-val.pos{color:var(--yes);}
-.on-val.warn{color:#854F0B;}
-.opp-thesis{font-size:10px;color:var(--muted);margin-top:5px;line-height:1.5;}
-.opp-thesis b{color:var(--ink);}
-.opp-right{display:flex;flex-direction:column;align-items:flex-end;justify-content:space-between;padding:10px 12px;gap:8px;min-width:100px;border-left:0.5px solid var(--border);}
-.opp-gap{text-align:right;}
-.opp-gap-val{font-size:20px;font-weight:500;}
-.opp-gap-val.pos{color:var(--yes);}
-.opp-gap-val.warn{color:#854F0B;}
-.opp-gap-lbl{font-size:9px;color:var(--muted);}
-.opp-bet-btn{font-size:10px;padding:6px 12px;border-radius:4px;cursor:pointer;font-family:inherit;white-space:nowrap;border:0.5px solid var(--yes-border);background:var(--yes-lt);color:var(--yes);}
-.opp-bet-btn.prob{border-color:#e8c49a;background:#fef3e8;color:#854F0B;}
-.opp-bet-btn.dis{border-color:var(--border);background:var(--bg);color:var(--muted);cursor:not-allowed;}
+
+/* Each opportunity: clean signal card */
+.opp{background:var(--paper);border:0.5px solid var(--border);border-radius:8px;overflow:hidden;cursor:pointer;transition:border-color .15s;}
+.opp:hover{border-color:var(--muted);}
+.opp.settled{border-left:3px solid var(--yes);}
+.opp.near-certain{border-left:3px solid #3B6D11;}
+.opp.probabilistic{border-left:3px solid #854F0B;}
+.opp.illiquid{opacity:.5;border-left:3px solid var(--border);}
+
+.opp-inner{display:flex;align-items:center;padding:12px 14px;gap:14px;}
+
+/* Left: city + strike + decision */
+.opp-left{flex:1;min-width:0;}
+.opp-decision{font-size:13px;font-weight:500;margin-bottom:3px;}
+.opp.settled .opp-decision{color:var(--yes);}
+.opp.near-certain .opp-decision{color:#3B6D11;}
+.opp.probabilistic .opp-decision{color:#854F0B;}
+.opp.illiquid .opp-decision{color:var(--muted);}
+.opp-context{font-size:11px;color:var(--muted);line-height:1.5;}
+.opp-context b{color:var(--ink);font-weight:500;}
+
+/* Right: net gap + grade + size */
+.opp-right{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0;}
+.opp-net-gap{font-size:22px;font-weight:500;line-height:1;}
+.opp.settled .opp-net-gap{color:var(--yes);}
+.opp.near-certain .opp-net-gap{color:#3B6D11;}
+.opp.probabilistic .opp-net-gap{color:#854F0B;}
+.opp.illiquid .opp-net-gap{color:var(--muted);}
+.opp-meta-right{font-size:10px;color:var(--muted);text-align:right;line-height:1.5;}
+.opp-size-btn{font-size:10px;padding:5px 12px;border-radius:4px;cursor:pointer;font-family:inherit;border:none;margin-top:2px;}
+.opp.settled .opp-size-btn{background:var(--yes-lt);color:var(--yes);border:0.5px solid var(--yes-border);}
+.opp.near-certain .opp-size-btn{background:var(--yes-lt);color:#3B6D11;border:0.5px solid var(--yes-border);}
+.opp.probabilistic .opp-size-btn{background:#fef3e8;color:#854F0B;border:0.5px solid #e8c49a;}
+.opp.illiquid .opp-size-btn{background:var(--bg);color:var(--muted);border:0.5px solid var(--border);cursor:not-allowed;}
+
 .scan-empty{text-align:center;padding:40px 16px;color:var(--muted);font-size:12px;}
 .scan-loading{text-align:center;padding:30px;color:var(--muted);font-size:11px;}
-.conf-bar-wrap{height:3px;background:var(--border);border-radius:2px;width:60px;overflow:hidden;margin-top:3px;}
-.conf-bar-fill{height:100%;border-radius:2px;background:var(--yes);}
 
 /* SHARED */
 .section-lbl{font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:10px;padding-bottom:6px;border-bottom:0.5px solid var(--border);}
@@ -691,88 +690,63 @@ function normCDF(x){
 function renderScanner(results){
   const wrap=document.getElementById('opp-list');
   const filtered=results.filter(r=>{
-    // Filter by actionability — must survive spread friction
-    const netGap=r.net_gap_c!==undefined?r.net_gap_c:r.gap;
-    if(scanFilter==='all')return netGap>=5;
-    if(scanFilter==='settled')return r.mode==='settled'&&netGap>=3;
-    if(scanFilter==='near-certain')return r.mode==='near-certain'&&netGap>=3;
-    if(scanFilter==='probabilistic')return r.mode==='probabilistic'&&netGap>=8;
+    const net=r.net_gap_c!==undefined?r.net_gap_c:r.gap;
+    if(scanFilter==='all')return net>=5||r.mode==='settled';
+    if(scanFilter==='settled')return r.mode==='settled';
+    if(scanFilter==='near-certain')return r.mode==='near-certain';
+    if(scanFilter==='probabilistic')return r.mode==='probabilistic'&&net>=8;
     return true;
   });
 
   if(!filtered.length){
-    wrap.innerHTML='<div class="scan-empty">No opportunities matching current filter.</div>';
+    wrap.innerHTML='<div class="scan-empty">No actionable opportunities right now.</div>';
     return;
   }
 
-  const modeLabel={settled:'Already cleared','near-certain':'Near certain',probabilistic:'Forecast-dependent'};
-  const modePill={settled:'mp-settled','near-certain':'mp-near',probabilistic:'mp-prob'};
-  const gradeColor={A:'var(--yes)',B:'#3B6D11',C:'#854F0B',D:'var(--no)'};
-
-  wrap.innerHTML=filtered.map((r,i)=>{
+  wrap.innerHTML=filtered.map(r=>{
     const liq=r.liquidity||{};
     const grade=liq.grade||'?';
-    const liqScore=liq.score||0;
-    const spread=liq.spread_c!==undefined?liq.spread_c:1;
-    const exitDepth=liq.exit_depth||0;
-    const oi=liq.open_interest||0;
-    const mm=liq.market_maker||false;
-    const maxDeploy=liq.max_deploy||500;
     const netGap=r.net_gap_c!==undefined?r.net_gap_c:r.gap;
-    const rawGap=r.gap;
+    const rawGap=r.gap||0;
+    const spread=liq.spread_c||1;
+    const maxDeploy=liq.max_deploy||500;
+    const mm=liq.market_maker||false;
+    const exitDepth=liq.exit_depth||0;
+    const illiquid=grade==='D';
+    const cardCls=illiquid?'illiquid':r.mode;
 
-    const isSettled=r.mode==='settled'||r.mode==='near-certain';
-    const gapCls=netGap>=12?'pos':netGap>=6?'warn':'';
-    const gcol=gradeColor[grade]||'var(--muted)';
+    // The one thing: what to do
+    const decision=r.decision||
+      (r.mode==='settled'&&netGap>=5?'BUY YES':
+       r.mode==='near-certain'&&netGap>=5?'BUY YES':
+       netGap>=8?'BUY YES':illiquid?'SKIP — illiquid':'HOLD');
 
-    // Liquidity warning flags
-    const liqWarn=grade==='D'?'⚠ Illiquid — skip':
-                  grade==='C'&&exitDepth<50?'⚠ Thin exit depth':
-                  mm?'✓ Market maker present':'';
-    const liqWarnCls=grade==='D'||(!mm&&exitDepth<50)?'warn':'pos';
-
-    const thesis=r.mode==='settled'
-      ?`MTD <b>${r.mtd.toFixed(2)}"</b> already <b>+${r.cushion}"</b> above ${r.strike}" strike. Only NWS revision risk. ${mm?'Market maker active — easy exit.':''}`
+    // One sentence why
+    const why=r.mode==='settled'
+      ?`MTD already <b>+${r.cushion}" above</b> the ${r.strike}" strike — functionally settled. Only NWS revision could reverse this.`
       :r.mode==='near-certain'
-      ?`MTD <b>${r.mtd.toFixed(2)}"</b> near ${r.strike}" strike. Minimal forecast needed.`
-      :`Needs <b>${(r.strike-r.mtd).toFixed(2)}"</b> more from forecast. Proj ${r.proj.toFixed(2)}" σ ±${r.sig}".`;
+      ?`MTD <b>${r.mtd.toFixed(2)}"</b> is at the ${r.strike}" strike — negligible forecast risk remaining.`
+      :`Projection <b>${r.proj.toFixed(2)}"</b> clears ${r.strike}" by ${(r.proj-r.strike).toFixed(2)}" but ${r.daysLeft} days of forecast risk remain. Check again at 7 days.`;
 
-    const btnDisabled=grade==='D';
-    const btnCls=btnDisabled?'dis':isSettled?'':'prob';
+    // Hold/exit guidance
+    const holdNote=mm
+      ?`Hold to settlement or exit when market reprices above ${r.kalshiP+8}¢.`
+      :`Hold to settlement — thin exit depth (${exitDepth} contracts), expect to hold full term.`;
 
-    return `<div class="opp ${r.mode}${grade==='D'?' thin':''}" onclick="goToCity('${r.city}')">
-      <div class="opp-rank">${i+1}</div>
-      <div class="opp-body">
-        <div class="opp-top">
-          <span class="opp-city">${r.cityLabel}</span>
-          <span class="opp-strike">Above ${r.strike}"</span>
-          <span class="opp-mode-pill ${modePill[r.mode]}">${modeLabel[r.mode]}</span>
-          ${mm?'<span class="opp-mode-pill" style="background:var(--rain-lt);color:var(--rain)">MM active</span>':''}
+    return `<div class="opp ${cardCls}" onclick="goToCity('${r.city}')">
+      <div class="opp-inner">
+        <div class="opp-left">
+          <div class="opp-decision">${decision} · ${r.cityLabel} above ${r.strike}"</div>
+          <div class="opp-context">${why}</div>
+          <div class="opp-context" style="margin-top:3px">${illiquid?'<span style="color:var(--no)">⚠ Illiquid market — skip</span>':holdNote}</div>
         </div>
-        <div class="opp-nums">
-          <div class="opp-num"><span class="on-lbl">Cushion</span><span class="on-val ${r.cushion>=0?'pos':'warn'}">${r.cushion>=0?'+':''}${r.cushion}"</span></div>
-          <div class="opp-num"><span class="on-lbl">Model</span><span class="on-val">${r.modelP}%</span></div>
-          <div class="opp-num"><span class="on-lbl">Kalshi YES</span><span class="on-val">${r.kalshiP}¢</span></div>
-          <div class="opp-num"><span class="on-lbl">Raw gap</span><span class="on-val">${rawGap}¢</span></div>
-          <div class="opp-num"><span class="on-lbl">Spread</span><span class="on-val ${spread<=1?'pos':spread<=2?'':'warn'}">${spread}¢</span></div>
-          <div class="opp-num"><span class="on-lbl">Liq grade</span>
-            <span class="on-val" style="color:${gcol}">${grade} (${liqScore})</span>
-            <div class="conf-bar-wrap"><div class="conf-bar-fill" style="width:${liqScore}%;background:${gcol}"></div></div>
-          </div>
-          <div class="opp-num"><span class="on-lbl">Exit depth</span><span class="on-val">${exitDepth} contracts</span></div>
-          <div class="opp-num"><span class="on-lbl">Max deploy</span><span class="on-val">$${maxDeploy}</span></div>
+        <div class="opp-right">
+          <div class="opp-net-gap">+${netGap}¢</div>
+          <div class="opp-meta-right">${r.kalshiP}¢ YES · grade ${grade}<br>${rawGap}¢ − ${spread}¢ spread<br>$${maxDeploy} max size</div>
+          <button class="opp-size-btn" ${illiquid?'disabled':''} onclick="event.stopPropagation();addScanBet('${r.city}','${r.strike}',${r.kalshiP})">
+            ${illiquid?'Skip':'Buy $'+maxDeploy}
+          </button>
         </div>
-        <div class="opp-thesis">${thesis}${liqWarn?` <span class="${liqWarnCls}">${liqWarn}</span>`:''}</div>
-      </div>
-      <div class="opp-right">
-        <div class="opp-gap">
-          <div style="font-size:11px;color:var(--muted);text-align:right;margin-bottom:1px">net gap</div>
-          <div class="opp-gap-val ${gapCls}">+${netGap}¢</div>
-          <div class="opp-gap-lbl" style="color:var(--muted)">${rawGap}¢ − ${spread}¢ spread</div>
-        </div>
-        <button class="opp-bet-btn ${btnCls}" ${btnDisabled?'disabled':''} onclick="event.stopPropagation();addScanBet('${r.city}','${r.strike}',${r.kalshiP})">
-          ${btnDisabled?'Illiquid':'BUY YES '+r.kalshiP+'¢'}
-        </button>
       </div>
     </div>`;
   }).join('');
