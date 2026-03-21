@@ -39,19 +39,29 @@ def kalshi_auth_headers(method, path):
     from cryptography.hazmat.backends import default_backend
 
     ts_ms = str(int(datetime.datetime.now().timestamp() * 1000))
-    # Strip query params before signing
     path_no_query = path.split("?")[0]
     msg = (ts_ms + method.upper() + path_no_query).encode("utf-8")
 
-    # Load private key — Railway stores it as a string with literal \n
-    pem = KALSHI_PRIVATE_KEY.replace("\\n", "\n").replace("\n", "\n")
+    # Normalize newlines — Railway may store literal \n as \\n
+    pem = KALSHI_PRIVATE_KEY
+    if "\\n" in pem:
+        pem = pem.replace("\\n", "\n")
     if "BEGIN" not in pem:
         raise ValueError("KALSHI_PRIVATE_KEY missing PEM header")
 
     private_key = serialization.load_pem_private_key(
         pem.encode("utf-8"), password=None, backend=default_backend()
     )
-    sig = private_key.sign(msg, padding.PKCS1v15(), hashes.SHA256())
+
+    # Kalshi uses RSA-PSS with SHA256
+    sig = private_key.sign(
+        msg,
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.DIGEST_SIZE
+        ),
+        hashes.SHA256()
+    )
     sig_b64 = base64.b64encode(sig).decode("utf-8")
 
     return {
