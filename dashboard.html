@@ -659,6 +659,10 @@ async function loadScanner(){
         mtd, proj, sig,
         ticker:m.ticker||'',
         edge:m.edge||'HOLD',
+        // Liquidity from server (if analyze_value ran)
+        liquidity:m.liquidity||null,
+        net_gap_c:m.net_gap_c!==undefined?m.net_gap_c:gap,
+        actionable:m.actionable!==undefined?m.actionable:gap>=5,
       });
     }
   }
@@ -687,10 +691,12 @@ function normCDF(x){
 function renderScanner(results){
   const wrap=document.getElementById('opp-list');
   const filtered=results.filter(r=>{
-    if(scanFilter==='all')return r.gap>=5;
-    if(scanFilter==='settled')return r.mode==='settled'&&r.gap>=3;
-    if(scanFilter==='near-certain')return r.mode==='near-certain'&&r.gap>=3;
-    if(scanFilter==='probabilistic')return r.mode==='probabilistic'&&r.gap>=8;
+    // Filter by actionability — must survive spread friction
+    const netGap=r.net_gap_c!==undefined?r.net_gap_c:r.gap;
+    if(scanFilter==='all')return netGap>=5;
+    if(scanFilter==='settled')return r.mode==='settled'&&netGap>=3;
+    if(scanFilter==='near-certain')return r.mode==='near-certain'&&netGap>=3;
+    if(scanFilter==='probabilistic')return r.mode==='probabilistic'&&netGap>=8;
     return true;
   });
 
@@ -701,45 +707,71 @@ function renderScanner(results){
 
   const modeLabel={settled:'Already cleared','near-certain':'Near certain',probabilistic:'Forecast-dependent'};
   const modePill={settled:'mp-settled','near-certain':'mp-near',probabilistic:'mp-prob'};
+  const gradeColor={A:'var(--yes)',B:'#3B6D11',C:'#854F0B',D:'var(--no)'};
 
   wrap.innerHTML=filtered.map((r,i)=>{
+    const liq=r.liquidity||{};
+    const grade=liq.grade||'?';
+    const liqScore=liq.score||0;
+    const spread=liq.spread_c!==undefined?liq.spread_c:1;
+    const exitDepth=liq.exit_depth||0;
+    const oi=liq.open_interest||0;
+    const mm=liq.market_maker||false;
+    const maxDeploy=liq.max_deploy||500;
+    const netGap=r.net_gap_c!==undefined?r.net_gap_c:r.gap;
+    const rawGap=r.gap;
+
     const isSettled=r.mode==='settled'||r.mode==='near-certain';
-    const btnCls=isSettled?'':'prob';
-    const gapCls=r.gap>=10?'pos':r.gap>=5?'warn':'';
+    const gapCls=netGap>=12?'pos':netGap>=6?'warn':'';
+    const gcol=gradeColor[grade]||'var(--muted)';
+
+    // Liquidity warning flags
+    const liqWarn=grade==='D'?'⚠ Illiquid — skip':
+                  grade==='C'&&exitDepth<50?'⚠ Thin exit depth':
+                  mm?'✓ Market maker present':'';
+    const liqWarnCls=grade==='D'||(!mm&&exitDepth<50)?'warn':'pos';
 
     const thesis=r.mode==='settled'
-      ?`MTD <b>${r.mtd.toFixed(2)}"</b> already ${r.cushion>=0?'+'+r.cushion+'"':r.cushion+'"'} above ${r.strike}" strike. Market at ${r.kalshiP}¢ — only NWS revision risk.`
+      ?`MTD <b>${r.mtd.toFixed(2)}"</b> already <b>+${r.cushion}"</b> above ${r.strike}" strike. Only NWS revision risk. ${mm?'Market maker active — easy exit.':''}`
       :r.mode==='near-certain'
-      ?`MTD <b>${r.mtd.toFixed(2)}"</b> at or near ${r.strike}" strike. Minimal forecast needed. Watch for corrections.`
-      :`MTD <b>${r.mtd.toFixed(2)}"</b>, needs <b>${(r.strike-r.mtd).toFixed(2)}"</b> more. Proj ${r.proj.toFixed(2)}" with σ ±${r.sig}". Check again at 7 days.`;
+      ?`MTD <b>${r.mtd.toFixed(2)}"</b> near ${r.strike}" strike. Minimal forecast needed.`
+      :`Needs <b>${(r.strike-r.mtd).toFixed(2)}"</b> more from forecast. Proj ${r.proj.toFixed(2)}" σ ±${r.sig}".`;
 
-    return `<div class="opp ${r.mode}" onclick="goToCity('${r.city}')">
+    const btnDisabled=grade==='D';
+    const btnCls=btnDisabled?'dis':isSettled?'':'prob';
+
+    return `<div class="opp ${r.mode}${grade==='D'?' thin':''}" onclick="goToCity('${r.city}')">
       <div class="opp-rank">${i+1}</div>
       <div class="opp-body">
         <div class="opp-top">
           <span class="opp-city">${r.cityLabel}</span>
           <span class="opp-strike">Above ${r.strike}"</span>
           <span class="opp-mode-pill ${modePill[r.mode]}">${modeLabel[r.mode]}</span>
+          ${mm?'<span class="opp-mode-pill" style="background:var(--rain-lt);color:var(--rain)">MM active</span>':''}
         </div>
         <div class="opp-nums">
-          <div class="opp-num"><span class="on-lbl">MTD cushion</span><span class="on-val ${r.cushion>=0?'pos':'warn'}">${r.cushion>=0?'+':''}${r.cushion}"</span></div>
-          <div class="opp-num"><span class="on-lbl">Model prob</span><span class="on-val">${r.modelP}%</span></div>
+          <div class="opp-num"><span class="on-lbl">Cushion</span><span class="on-val ${r.cushion>=0?'pos':'warn'}">${r.cushion>=0?'+':''}${r.cushion}"</span></div>
+          <div class="opp-num"><span class="on-lbl">Model</span><span class="on-val">${r.modelP}%</span></div>
           <div class="opp-num"><span class="on-lbl">Kalshi YES</span><span class="on-val">${r.kalshiP}¢</span></div>
-          <div class="opp-num"><span class="on-lbl">Confidence</span>
-            <span class="on-val">${r.conf}%</span>
-            <div class="conf-bar-wrap"><div class="conf-bar-fill" style="width:${r.conf}%"></div></div>
+          <div class="opp-num"><span class="on-lbl">Raw gap</span><span class="on-val">${rawGap}¢</span></div>
+          <div class="opp-num"><span class="on-lbl">Spread</span><span class="on-val ${spread<=1?'pos':spread<=2?'':'warn'}">${spread}¢</span></div>
+          <div class="opp-num"><span class="on-lbl">Liq grade</span>
+            <span class="on-val" style="color:${gcol}">${grade} (${liqScore})</span>
+            <div class="conf-bar-wrap"><div class="conf-bar-fill" style="width:${liqScore}%;background:${gcol}"></div></div>
           </div>
-          <div class="opp-num"><span class="on-lbl">Days left</span><span class="on-val">${r.daysLeft}</span></div>
+          <div class="opp-num"><span class="on-lbl">Exit depth</span><span class="on-val">${exitDepth} contracts</span></div>
+          <div class="opp-num"><span class="on-lbl">Max deploy</span><span class="on-val">$${maxDeploy}</span></div>
         </div>
-        <div class="opp-thesis">${thesis}</div>
+        <div class="opp-thesis">${thesis}${liqWarn?` <span class="${liqWarnCls}">${liqWarn}</span>`:''}</div>
       </div>
       <div class="opp-right">
         <div class="opp-gap">
-          <div class="opp-gap-val ${gapCls}">+${r.gap}¢</div>
-          <div class="opp-gap-lbl">edge</div>
+          <div style="font-size:11px;color:var(--muted);text-align:right;margin-bottom:1px">net gap</div>
+          <div class="opp-gap-val ${gapCls}">+${netGap}¢</div>
+          <div class="opp-gap-lbl" style="color:var(--muted)">${rawGap}¢ − ${spread}¢ spread</div>
         </div>
-        <button class="opp-bet-btn ${btnCls}" onclick="event.stopPropagation();addScanBet('${r.city}','${r.strike}',${r.kalshiP})">
-          BUY YES ${r.kalshiP}¢
+        <button class="opp-bet-btn ${btnCls}" ${btnDisabled?'disabled':''} onclick="event.stopPropagation();addScanBet('${r.city}','${r.strike}',${r.kalshiP})">
+          ${btnDisabled?'Illiquid':'BUY YES '+r.kalshiP+'¢'}
         </button>
       </div>
     </div>`;

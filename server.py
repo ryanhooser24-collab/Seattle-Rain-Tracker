@@ -86,6 +86,46 @@ CITIES = {
         "tradeable_months": [11, 12, 1, 2, 3, 4],
         "label":         "Los Angeles, CA",
     },
+    "new_york": {
+        "icao_code":     "KNYC",
+        "nws_site":      "OKX",
+        "nws_issuedby":  "NYC",
+        "kalshi_series": "KXRAINNYCM",
+        "lat": 40.779, "lon": -73.969,
+        "regime":        "mixed",
+        "tradeable_months": [10, 11, 12, 1, 2, 3, 4],
+        "label":         "New York, NY",
+    },
+    "chicago": {
+        "icao_code":     "KORD",
+        "nws_site":      "LOT",
+        "nws_issuedby":  "ORD",
+        "kalshi_series": "KXRAINCHIM",
+        "lat": 41.786, "lon": -87.752,
+        "regime":        "mixed",
+        "tradeable_months": [10, 11, 12, 1, 2, 3, 4],
+        "label":         "Chicago, IL",
+    },
+    "miami": {
+        "icao_code":     "KMIA",
+        "nws_site":      "MFL",
+        "nws_issuedby":  "MIA",
+        "kalshi_series": "KXRAINMIAM",
+        "lat": 25.795, "lon": -80.287,
+        "regime":        "convective",
+        "tradeable_months": [11, 12, 1, 2, 3, 4],
+        "label":         "Miami, FL",
+    },
+    "denver": {
+        "icao_code":     "KDEN",
+        "nws_site":      "BOU",
+        "nws_issuedby":  "DEN",
+        "kalshi_series": "KXRAINDENM",
+        "lat": 39.861, "lon": -104.673,
+        "regime":        "mixed",
+        "tradeable_months": list(range(1, 13)),
+        "label":         "Denver, CO",
+    },
 }
 
 # Active city for this deployment — change via CITY env var on Railway
@@ -561,20 +601,38 @@ def fetch_kalshi_markets(city_cfg=None):
             else:
                 label = subtitle or ticker
 
+            yes_ask   = float(m.get("yes_ask_dollars", 0) or 0)
+            yes_bid   = float(m.get("yes_bid_dollars", 0) or 0)
+            no_ask    = float(m.get("no_ask_dollars", 0) or 0)
+            no_bid    = float(m.get("no_bid_dollars", 0) or 0)
+            spread    = round(yes_ask - yes_bid, 4)
+
+            # Size at top of book
+            yes_ask_sz = float(m.get("yes_ask_size_fp", 0) or 0)
+            yes_bid_sz = float(m.get("yes_bid_size_fp", 0) or 0)
+            open_int   = float(m.get("open_interest_fp", 0) or 0)
+            volume     = float(m.get("volume_fp", 0) or 0)
+            volume_24h = float(m.get("volume_24h_fp", 0) or 0)
+
             markets.append({
-                "ticker":     ticker,
-                "title":      m.get("title", ""),
-                "subtitle":   subtitle,
-                "label":      label,
-                "inches":     inches,
-                "strike_type": m.get("strike_type", "greater"),
-                "yes_ask":    float(m.get("yes_ask_dollars", 0) or 0),
-                "no_ask":     float(m.get("no_ask_dollars", 0) or 0),
-                "yes_bid":    float(m.get("yes_bid_dollars", 0) or 0),
-                "no_bid":     float(m.get("no_bid_dollars", 0) or 0),
-                "last_price": float(m.get("last_price_dollars", 0) or 0),
-                "volume":     m.get("volume_fp", "0"),
-                "close_time": m.get("close_time", ""),
+                "ticker":       ticker,
+                "title":        m.get("title", ""),
+                "subtitle":     subtitle,
+                "label":        label,
+                "inches":       inches,
+                "strike_type":  m.get("strike_type", "greater"),
+                "yes_ask":      yes_ask,
+                "no_ask":       no_ask,
+                "yes_bid":      yes_bid,
+                "no_bid":       no_bid,
+                "spread":       spread,
+                "yes_ask_size": yes_ask_sz,
+                "yes_bid_size": yes_bid_sz,
+                "open_interest": open_int,
+                "volume":       volume,
+                "volume_24h":   volume_24h,
+                "last_price":   float(m.get("last_price_dollars", 0) or 0),
+                "close_time":   m.get("close_time", ""),
             })
 
         # Sort by inch threshold
@@ -607,6 +665,52 @@ def confidence_weight(days_remaining):
     else:
         # 8-10 days: very low, linear falloff
         return round(0.05 * (10 - days_remaining) / 2, 3)
+
+
+def liquidity_score(market):
+    """
+    Score 0-100 combining five execution factors.
+    Gates the raw gap — a great gap in an illiquid market is not actionable.
+
+    Factor 1 — Spread tightness     (25 pts) tight = market maker present
+    Factor 2 — Exit depth YES bid   (25 pts) can you get out before settlement?
+    Factor 3 — Open interest        (20 pts) total engagement = price reliability
+    Factor 4 — Volume 24h           (15 pts) recent activity = live market
+    Factor 5 — Book symmetry        (15 pts) mirror book = market maker signal
+    """
+    spread     = market.get("spread", 0.10)
+    yes_bid_sz = market.get("yes_bid_size", 0)
+    open_int   = market.get("open_interest", 0)
+    vol_24h    = market.get("volume_24h", 0)
+    yes_bid    = market.get("yes_bid", 0)
+    no_ask     = market.get("no_ask", 0)
+
+    spread_c = round(spread * 100)
+    f1 = 25 if spread_c <= 0 else 22 if spread_c == 1 else 18 if spread_c == 2 else 12 if spread_c == 3 else 6 if spread_c == 4 else 0
+    f2 = 25 if yes_bid_sz >= 2000 else 20 if yes_bid_sz >= 500 else 14 if yes_bid_sz >= 100 else 6 if yes_bid_sz >= 20 else 0
+    f3 = 20 if open_int >= 5000 else 14 if open_int >= 1000 else 8 if open_int >= 200 else 3 if open_int > 0 else 0
+    f4 = 15 if vol_24h >= 1000 else 10 if vol_24h >= 200 else 5 if vol_24h >= 50 else 0
+    pair_sum = round((yes_bid + no_ask) * 100)
+    f5 = 15 if 95 <= pair_sum <= 105 else 10 if 90 <= pair_sum <= 110 else 5 if 80 <= pair_sum <= 120 else 0
+
+    score = f1 + f2 + f3 + f4 + f5
+    yes_ask = market.get("yes_ask", 0.85)
+
+    return {
+        "score":         score,
+        "grade":         "A" if score >= 75 else "B" if score >= 55 else "C" if score >= 35 else "D",
+        "spread_pts":    f1,
+        "exit_pts":      f2,
+        "oi_pts":        f3,
+        "vol_pts":       f4,
+        "symmetry_pts":  f5,
+        "spread_c":      spread_c,
+        "exit_depth":    round(yes_bid_sz),
+        "open_interest": round(open_int),
+        "vol_24h":       round(vol_24h),
+        "market_maker":  f5 >= 10,
+        "max_deploy":    round(min(open_int * 0.10 * yes_ask, 2000)),
+    }
 
 
 def analyze_value(markets, projected_total, days_remaining=10):
@@ -651,13 +755,25 @@ def analyze_value(markets, projected_total, days_remaining=10):
         else:
             edge = "HOLD"
 
+        # Liquidity scoring
+        liq        = liquidity_score(m)
+        # Net gap: raw probability gap minus round-trip friction (spread both ways)
+        raw_gap_c  = round(weighted_edge * 100)
+        friction_c = liq["spread_c"]   # one-way spread cost
+        net_gap_c  = max(0, raw_gap_c - friction_c)
+        actionable = net_gap_c >= 5 and liq["grade"] in ("A", "B", "C")
+
         m["edge"]          = edge
         m["margin"]        = margin
         m["confidence"]    = conf
         m["weighted_edge"] = weighted_edge
+        m["liquidity"]     = liq
+        m["net_gap_c"]     = net_gap_c
+        m["actionable"]    = actionable
         m["edge_detail"]   = (
             f"Proj {projected_total:.2f}\" vs {inches:.0f}\" strike "
-            f"({margin:+.2f}\") × {int(conf*100)}% conf = {weighted_edge:+.3f}"
+            f"({margin:+.2f}\") × {int(conf*100)}% conf = {weighted_edge:+.3f} "
+            f"· liq {liq['grade']} ({liq['score']}/100) · net {net_gap_c}¢"
         )
         analyzed.append(m)
 
@@ -692,16 +808,41 @@ def ensure_tables():
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS forecast_snapshots (
                     id               SERIAL PRIMARY KEY,
-                    month            TEXT NOT NULL,          -- e.g. '2026-03'
+                    city             TEXT NOT NULL DEFAULT 'seattle',
+                    month            TEXT NOT NULL,
                     snapshot_date    DATE NOT NULL,
                     days_remaining   INTEGER NOT NULL,
                     true_mtd         NUMERIC(6,2),
                     wu_remaining     NUMERIC(6,2),
                     projected_eom    NUMERIC(6,2),
+                    sigma_estimate   NUMERIC(5,3),
                     confidence       NUMERIC(5,3),
                     wu_days_used     INTEGER,
                     created_at       TIMESTAMPTZ DEFAULT NOW(),
-                    UNIQUE (month, days_remaining)          -- one row per horizon
+                    UNIQUE (city, month, days_remaining)
+                );
+            """)
+            # Intraday snapshots — written every /data call, captures model vs market
+            # This powers the projection vs market chart
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS intraday_snapshots (
+                    id               SERIAL PRIMARY KEY,
+                    city             TEXT NOT NULL DEFAULT 'seattle',
+                    month            TEXT NOT NULL,
+                    snapshot_ts      TIMESTAMPTZ DEFAULT NOW(),
+                    days_remaining   INTEGER NOT NULL,
+                    true_mtd         NUMERIC(6,2),
+                    projected_eom    NUMERIC(6,2),
+                    sigma_estimate   NUMERIC(5,3),
+                    model_prob_5     NUMERIC(5,3),
+                    model_prob_6     NUMERIC(5,3),
+                    model_prob_7     NUMERIC(5,3),
+                    kalshi_yes_5     NUMERIC(5,3),
+                    kalshi_yes_6     NUMERIC(5,3),
+                    kalshi_yes_7     NUMERIC(5,3),
+                    gap_5            NUMERIC(5,3),
+                    gap_6            NUMERIC(5,3),
+                    gap_7            NUMERIC(5,3)
                 );
             """)
             cur.execute("""
@@ -739,12 +880,13 @@ def ensure_tables():
         conn.close()
 
 
-def maybe_write_snapshot(month, days_remaining, true_mtd, wu_remaining,
-                          projected_eom, confidence, wu_days_used):
+def maybe_write_snapshot(city, month, days_remaining, true_mtd, wu_remaining,
+                          projected_eom, confidence, wu_days_used, sigma=None,
+                          kalshi_markets=None):
     """
-    Write one snapshot row per (month, days_remaining).
-    The UNIQUE constraint silently skips duplicates — safe to call on every /data request.
-    Only writes when inside the 10-day window (days_remaining <= 10).
+    Write one daily snapshot row per (city, month, days_remaining).
+    Also writes an intraday snapshot on every call for the chart.
+    Only active inside the 10-day window.
     """
     if days_remaining > 10 or days_remaining < 0:
         return
@@ -753,11 +895,12 @@ def maybe_write_snapshot(month, days_remaining, true_mtd, wu_remaining,
         return
     try:
         with conn.cursor() as cur:
+            # Daily snapshot (one per horizon, idempotent)
             cur.execute("""
                 INSERT INTO forecast_snapshots
-                    (month, snapshot_date, days_remaining, true_mtd,
-                     wu_remaining, projected_eom, confidence, wu_days_used)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    (city, month, snapshot_date, days_remaining, true_mtd,
+                     wu_remaining, projected_eom, sigma_estimate, confidence, wu_days_used)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (month, days_remaining) DO NOTHING;
             """, (
                 month, date.today(), days_remaining, true_mtd,
@@ -938,16 +1081,26 @@ class Handler(BaseHTTPRequestHandler):
                     kalshi["markets"], proj_for_signal, days_remaining
                 )
 
-            # Write daily snapshot (once per days_remaining value, idempotent)
+            # Sigma estimates by days remaining (calibrated via Open-Meteo backtest)
+            SIGMA_TABLE = {
+                10:1.4, 9:1.3, 8:1.2, 7:1.0, 6:0.85, 5:0.7,
+                4:0.55, 3:0.4, 2:0.25, 1:0.15, 0:0.0
+            }
+            sigma_est = SIGMA_TABLE.get(min(days_remaining, 10), 1.5)
+
+            # Write snapshot — always inside 10-day window (intraday too)
             if wu_covers_eom and projected is not None:
                 maybe_write_snapshot(
-                    month       = f"{city_key}-{month_key}",
+                    city         = city_key,
+                    month        = f"{city_key}-{month_key}",
                     days_remaining = days_remaining,
-                    true_mtd    = true_mtd,
+                    true_mtd     = true_mtd,
                     wu_remaining = wu_remaining,
                     projected_eom = projected,
-                    confidence  = conf,
+                    confidence   = conf,
                     wu_days_used = wu_days_used,
+                    sigma        = sigma_est,
+                    kalshi_markets = kalshi.get("markets", []),
                 )
 
             result = {
@@ -988,6 +1141,42 @@ class Handler(BaseHTTPRequestHandler):
                     if hasattr(v, 'isoformat'):
                         r[k] = v.isoformat()
             self.send_json({"ok": True, "snapshots": rows, "count": len(rows)})
+
+        elif path == "/chart-data":
+            # Return intraday snapshots for projection vs market chart
+            from urllib.parse import parse_qs
+            qs     = parse_qs(urlparse(self.path).query)
+            city   = qs.get("city", ["seattle"])[0]
+            month  = qs.get("month", [datetime.now().strftime("%Y-%m")])[0]
+            conn   = get_db()
+            if not conn:
+                self.send_json({"ok": False, "error": "No DB", "rows": []})
+            else:
+                try:
+                    import psycopg2.extras
+                    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                        cur.execute("""
+                            SELECT snapshot_ts, days_remaining, true_mtd,
+                                   projected_eom, sigma_estimate,
+                                   model_prob_5, model_prob_6, model_prob_7,
+                                   kalshi_yes_5, kalshi_yes_6, kalshi_yes_7,
+                                   gap_5, gap_6, gap_7
+                            FROM intraday_snapshots
+                            WHERE city=%s AND month LIKE %s
+                            ORDER BY snapshot_ts ASC
+                        """, (city, f"{city}-{month}%"))
+                        rows = cur.fetchall()
+                        result = []
+                        for r in rows:
+                            d = dict(r)
+                            for k,v in d.items():
+                                if hasattr(v,'isoformat'): d[k]=v.isoformat()
+                                elif hasattr(v,'__float__'): d[k]=float(v)
+                            result.append(d)
+                    conn.close()
+                    self.send_json({"ok": True, "rows": result, "count": len(result)})
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e), "rows": []})
 
         elif path == "/accuracy":
             # Return forecast_accuracy view — all months with settlements
