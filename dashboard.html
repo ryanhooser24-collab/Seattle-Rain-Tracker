@@ -1070,8 +1070,13 @@ function renderRainfall(d){
   const eomRow=eomInside
     ?`<div class="rf-row row-eom">
         <div class="rf-left"><div class="rdot d-eom"></div><div class="rf-meta">
-          <div class="rf-lbl"><span>${eomLabel} total</span><div class="tip"><b>Projected month-end</b>EOD + WU ${Math.min(days_remaining,10)}-day remainder. Used to evaluate Kalshi strikes. Confidence: ${Math.round(conf*100)}%.</div></div>
-          <div class="rf-sub">${days_remaining} days remaining · ${Math.round(conf*100)}% confidence</div>
+          <div class="rf-lbl"><span>${eomLabel} total</span><div class="tip"><b>Projected month-end</b>EOD + WU ${Math.min(days_remaining,10)}-day remainder. Used to evaluate Kalshi strikes. Forecast reliability: improves significantly inside 7 days. At 10 days out, Open-Meteo sigma ≈ 1.4" RMSE. At 3 days, sigma ≈ 0.4". Backtest in progress to calibrate per city.</div></div>
+          <div class="rf-sub">${days_remaining} days remaining · ${
+            days_remaining<=0?'settled':
+            days_remaining<=3?'high confidence':
+            days_remaining<=7?'moderate confidence':
+            'forecast-dependent — verify near 7 days'
+          }</div>
         </div></div>
         <div class="rf-right"><div class="rf-val v-eom">= ${projected.toFixed(2)}<span class="rf-unit"> in</span></div></div>
       </div>`
