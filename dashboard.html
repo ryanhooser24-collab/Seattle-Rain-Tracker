@@ -16,6 +16,16 @@
   --eom:#0f6e56;--eom-lt:#e1f5ee;
   --warn:#6b5a1a;--warn-lt:#faf5e6;
 }
+[data-theme="dark"]{
+  --bg:#0f0f0f;--paper:#1a1a1a;--ink:#e8e4dc;--muted:#6a6560;--border:#2a2a2a;
+  --rain:#4a8fd4;--rain-lt:#1a2535;
+  --yes:#2d9e5a;--yes-lt:#0f2018;--yes-border:#1e5c34;
+  --no:#c44444;--no-lt:#2a0f0f;--no-border:#5c1e1e;
+  --gap:#c47a30;--gap-lt:#2a1a0a;--gap-border:#5c3a10;
+  --wu-hr:#3a9a5a;--wu-hr-lt:#0f2018;
+  --eom:#1a9e76;--eom-lt:#0a1e16;
+  --warn:#b09030;--warn-lt:#1a1600;
+}
 *{box-sizing:border-box;margin:0;padding:0;}
 html,body{background:var(--bg);color:var(--ink);font-family:'DM Mono',monospace;min-height:100vh;}
 body{max-width:900px;margin:0 auto;}
@@ -366,7 +376,10 @@ body{max-width:900px;margin:0 auto;}
 <div id="p-dash">
   <div class="header">
     <h1 id="page-title"><em>Rain</em> Tracker</h1>
-    <div class="header-meta" id="status-pills"><span class="pill pill-err">Loading...</span></div>
+    <div class="header-meta" id="status-pills">
+      <span class="pill pill-err">Loading...</span>
+      <button id="theme-toggle" onclick="toggleTheme()" style="font-size:14px;background:none;border:none;cursor:pointer;padding:2px 4px;color:var(--muted)">☾</button>
+    </div>
   </div>
   <div style="padding:8px 16px;border-bottom:0.5px solid var(--border);background:var(--paper);display:flex;align-items:center;gap:10px;">
     <span style="font-size:10px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;">City</span>
@@ -767,7 +780,23 @@ function addScanBet(city,strike,price){
   updatePlaceBtn();
 }
 
-function sw(t){
+function toggleTheme(){
+  const isDark=document.documentElement.getAttribute('data-theme')==='dark';
+  document.documentElement.setAttribute('data-theme',isDark?'light':'dark');
+  document.getElementById('theme-toggle').textContent=isDark?'☾':'☀';
+  localStorage.setItem('theme',isDark?'light':'dark');
+}
+// Apply saved theme on load
+(function(){
+  const t=localStorage.getItem('theme')||
+    (window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
+  document.documentElement.setAttribute('data-theme',t);
+  // Button set after DOM loads
+  window.addEventListener('DOMContentLoaded',()=>{
+    const btn=document.getElementById('theme-toggle');
+    if(btn)btn.textContent=t==='dark'?'☀':'☾';
+  });
+})();
   ['scan','dash','pos','rules','hist'].forEach(x=>{
     document.getElementById('p-'+x).style.display=x===t?'block':'none';
     document.getElementById('t-'+x).className='tab'+(x===t?' active':'');
@@ -896,21 +925,21 @@ function renderRainfall(d){
       </div>
       <div class="rf-row">
         <div class="rf-left"><div class="rdot d-iem"></div><div class="rf-meta">
-          <div class="rf-lbl"><span>IEM actual</span><div class="tip"><b>Iowa Env. Mesonet</b>Real ASOS gauge at KSEA, 0.01" precision. Fills the gap between the last NWS report and now using the same physical instrument.</div></div>
+          <div class="rf-lbl"><span>IEM actual</span><div class="tip"><b>Iowa Env. Mesonet</b>Real ASOS gauge at the local airport station, 0.01" precision. Fills the gap since the last NWS report.</div></div>
           <div class="rf-sub">Since ${nws_time} · ASOS gauge</div>
         </div></div>
         <div class="rf-right"><button class="xbtn" onclick="togPanel()">↓ hourly</button><div class="rf-val v-iem">+${gap_total.toFixed(2)}<span class="rf-unit"> in</span></div></div>
       </div>
       <div class="rf-row">
         <div class="rf-left"><div class="rdot d-wuhr"></div><div class="rf-meta">
-          <div class="rf-lbl"><span>WU hourly</span><div class="tip"><b>WU hourly forecast</b>QPF pinned to KSEA. Picks up exactly where IEM ends and runs through midnight — completing today's projected total.</div></div>
+          <div class="rf-lbl"><span>WU hourly</span><div class="tip"><b>WU hourly forecast</b>QPF pinned to the local airport station. Picks up exactly where IEM ends and runs through midnight.</div></div>
           <div class="rf-sub">Now → midnight · forecast</div>
         </div></div>
         <div class="rf-right"><button class="xbtn" style="color:var(--wu-hr)" onclick="togPanel()">↓ hourly</button><div class="rf-val v-wuhr">+${(today_remaining||0).toFixed(2)}<span class="rf-unit"> in</span></div></div>
       </div>
       <div class="xpanel" id="xpanel">
         <div>
-          <div class="xp-title">IEM KSEA actuals — since last DCR</div>
+          <div class="xp-title">IEM actuals — since last DCR</div>
           ${iemRows}
         </div>
         <div>
@@ -949,8 +978,8 @@ function togPanel(){
 // ── CHART ─────────────────────────────────────────────────────────────────────
 function renderChart(d){
   const{wu,today_eod,days_remaining,city}=d;
-  const cfg={seattle:'KSEA',portland:'KPDX',los_angeles:'KLAX',san_francisco:'KSFO'};
-  const icao=cfg[city]||'KSEA';
+  const cityIcao=ALL_CITIES[city]?.icao||'KSEA';
+  const icao=cityIcao;
   const wuDays=wu.days||[];
   const allDays=[{d:'Today',q:today_eod||0,today:true},...wuDays.map(x=>({d:x.date||'',q:x.qpf||0,today:false}))];
   const maxQ=Math.max(...allDays.map(x=>x.q),0.01);
@@ -1011,68 +1040,66 @@ function renderMarkets(d){
   }
 
   const proj=projected||today_eod;
-  const conf=d.confidence||0;
-  const eMap={
-    STRONG_YES:['e-syes','▲▲ Strong YES'],
-    LEAN_YES:  ['e-lyes','▲ Lean YES'],
-    STRONG_NO: ['e-sno','▼▼ Strong NO'],
-    LEAN_NO:   ['e-lno','▼ Lean NO'],
-    HOLD:      ['e-hold','— Hold'],
-  };
+  const icao=ALL_CITIES[d.city]?.icao||d.city?.toUpperCase()||'KSEA';
 
-  const cards=kalshi.markets.map(m=>{
+  const cards=kalshi.markets.filter(m=>{
+    // Same filter as scanner — skip fully priced or zero gap
+    const yes_ask=Math.round((m.yes_ask||0)*100);
+    return yes_ask<99&&(m.net_gap_c||0)>0;
+  }).map(m=>{
     const strike=m.inches||0;
     const yes_ask=Math.round((m.yes_ask||0)*100);
     const no_ask=Math.round((m.no_ask||0)*100);
-    const edge=m.edge||'HOLD';
-    const margin=m.margin||0;
-    const wEdge=m.weighted_edge||0;
-    const[badgeCls,badgeTxt]=eMap[edge]||['e-hold','— Hold'];
-    const aboveStrike=proj>=strike;
-    const strikePct=Math.min(100,Math.round(strike/10*100));
-    const projPct=Math.min(100,Math.max(0,Math.round(proj/10*100)));
-    const fillColor=aboveStrike?'var(--yes)':'var(--no)';
-    const ticker=m.ticker||('T'+strike);
+    const decision=m.decision||'HOLD';
+    const netGap=m.net_gap_c||0;
+    const liq=m.liquidity||{};
+    const grade=liq.grade||'?';
+    const maxDeploy=liq.max_deploy||500;
+    const mm=liq.market_maker||false;
+    const mode=m.mode||'forecast';
+    const cushion=m.cushion;
+    const modelP=Math.round((m.model_prob||0)*100);
 
-    return `<div class="mcard">
-      <div class="mcard-hdr">
-        <div class="mcard-top">
-          <div class="mcard-strike">${m.label||('Above '+strike+' inches')}</div>
-          <span class="edge-badge ${badgeCls}">${badgeTxt}</span>
+    const isBuy=decision==='BUY YES';
+    const isSkip=decision.startsWith('SKIP')||grade==='D';
+    const cardBorder=mode==='settled'?'var(--yes-border)':mode==='near_certain'?'#a8d4b8':'#e8c49a';
+
+    const why=mode==='settled'
+      ?`MTD already <b>+${cushion}"</b> above ${strike}" — functionally settled`
+      :mode==='near_certain'
+      ?`MTD at ${strike}" strike — minimal forecast risk`
+      :`Proj ${proj.toFixed(2)}" vs ${strike}" strike`;
+
+    const holdNote=mm
+      ?`Hold to settlement or sell above ${yes_ask+8}¢`
+      :`Hold to settlement (thin exit depth)`;
+
+    return `<div class="mcard" style="border-left:3px solid ${cardBorder}">
+      <div style="padding:10px 12px;border-bottom:0.5px solid var(--border);">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+          <div style="font-size:13px;font-weight:500;color:${isSkip?'var(--muted)':isBuy?'var(--yes)':'#854F0B'}">${decision} · Above ${strike}"</div>
+          <div style="font-size:10px;font-weight:500;color:${netGap>=10?'var(--yes)':netGap>=5?'#854F0B':'var(--muted)'};font-size:16px">+${netGap}¢</div>
         </div>
-        <div class="proj-bar-labels"><span>0"</span><span><b>Strike: ${strike}"</b></span><span>10"</span></div>
-        <div class="proj-bar-wrap">
-          <div class="proj-bar-fill" style="width:${Math.min(projPct,100)}%;background:${fillColor};opacity:.6"></div>
-          <div class="proj-mk-strike" style="left:calc(${strikePct}% - 1px)"></div>
-          <div class="proj-mk-proj" style="left:calc(${projPct}% - 1px)"></div>
-        </div>
-        <div class="proj-detail">Proj ${proj.toFixed(2)}" vs ${strike}" strike (${margin>=0?'+':''}${margin.toFixed(2)}") · edge ${wEdge>=0?'+':''}${wEdge.toFixed(3)} · ${Math.round(conf*100)}% conf</div>
+        <div style="font-size:11px;color:var(--muted);line-height:1.5">${why}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px">${isSkip?'⚠ Illiquid — skip':holdNote}</div>
       </div>
-      <div class="odds-row">
-        <div class="odds-side odds-yes"><div class="odds-lbl">YES</div><div class="odds-price">${yes_ask}¢</div></div>
-        <div class="odds-mid"><div style="font-size:14px;color:var(--muted)">↔</div><div class="odds-mid-detail">margin<br><b>${margin>=0?'+':''}${margin.toFixed(2)}"</b></div></div>
-        <div class="odds-side odds-no"><div class="odds-lbl">NO</div><div class="odds-price">${no_ask}¢</div></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:0.5px solid var(--border);">
+        <div style="font-size:11px;color:var(--muted)">Model <b style="color:var(--ink)">${modelP}%</b> · Kalshi <b style="color:var(--ink)">${yes_ask}¢</b> · Grade <b style="color:var(--ink)">${grade}</b> · Max <b style="color:var(--ink)">$${maxDeploy}</b></div>
       </div>
-      <div class="bet-area">
-        <div class="bet-cols">
-          <div class="bet-col"><div class="bet-col-lbl">Bet YES</div><div class="bet-btns">
-            <button class="bet-btn bet-btn-yes" onclick="addBet('${ticker}','YES',50)">+$50</button>
-            <button class="bet-btn bet-btn-yes" onclick="addBet('${ticker}','YES',100)">+$100</button>
-            <button class="bet-btn bet-btn-yes" onclick="addBet('${ticker}','YES',200)">+$200</button>
-          </div></div>
-          <div class="bet-col"><div class="bet-col-lbl">Bet NO</div><div class="bet-btns">
-            <button class="bet-btn bet-btn-no" onclick="addBet('${ticker}','NO',50)">+$50</button>
-            <button class="bet-btn bet-btn-no" onclick="addBet('${ticker}','NO',100)">+$100</button>
-            <button class="bet-btn bet-btn-no" onclick="addBet('${ticker}','NO',200)">+$200</button>
-          </div></div>
-        </div>
-        <div class="bet-slip-row" id="slip-${ticker}-YES"></div>
-        <div class="bet-slip-row" id="slip-${ticker}-NO"></div>
+      <div style="display:flex;gap:6px;padding:8px 12px;">
+        <button style="flex:1;padding:7px;font-size:10px;cursor:${isSkip?'not-allowed':'pointer'};border-radius:4px;font-family:inherit;background:${isBuy&&!isSkip?'var(--yes-lt)':'var(--bg)'};color:${isBuy&&!isSkip?'var(--yes)':'var(--muted)'};border:0.5px solid ${isBuy&&!isSkip?'var(--yes-border)':'var(--border)'};" onclick="addBet('${m.ticker||strike}','YES',${maxDeploy})" ${isSkip?'disabled':''}>
+          ${isSkip?'Skip':'Buy YES $'+maxDeploy}
+        </button>
+        <button style="flex:1;padding:7px;font-size:10px;cursor:pointer;border-radius:4px;font-family:inherit;background:var(--bg);color:var(--muted);border:0.5px solid var(--border);" onclick="addBet('${m.ticker||strike}','NO',50)">
+          No 50 contracts
+        </button>
       </div>
     </div>`;
   }).join('');
 
-  wrap.innerHTML=`<div class="markets-grid">${cards}</div>`;
+  wrap.innerHTML=cards
+    ?`<div class="markets-grid">${cards}</div>`
+    :`<div class="locked"><div class="locked-title">No actionable markets</div><div class="locked-sub">All open markets are fully priced or below the edge threshold.</div></div>`;
 }
 
 function addBet(ticker,side,amt){
