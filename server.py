@@ -407,7 +407,11 @@ def fetch_wu_hourly(city_cfg=None):
     """
     cfg = city_cfg or CITY_CFG
     try:
-        now_local = datetime.now()
+        import pytz
+        tz_name   = cfg.get("tz", "America/Los_Angeles")
+        local_tz  = pytz.timezone(tz_name)
+        now_local = datetime.utcnow().replace(
+            tzinfo=pytz.utc).astimezone(local_tz)
         today_str = now_local.strftime("%Y-%m-%d")
         now_hour  = now_local.hour
 
@@ -435,6 +439,9 @@ def fetch_wu_hourly(city_cfg=None):
             if not t:
                 continue
             hour_num = int(t[11:13])
+            # IEM covers midnight → last completed observation (~1 hour lag)
+            # OM covers current hour → midnight — no overlap risk due to IEM lag
+            # Flow: NWS overnight MTD (through midnight) → IEM (midnight→now) → OM hourly (now→midnight)
             if hour_num >= now_hour:
                 qpf_mm = float(precip[i] or 0) if i < len(precip) else 0.0
                 qpf_in = round(qpf_mm / 25.4, 3)
@@ -459,57 +466,45 @@ def fetch_wu_hourly(city_cfg=None):
 
 def fetch_iem_gap(nws_issued_str, city_cfg=None):
     """
-    Fetch IEM ASOS precipitation since the NWS report time.
-    Uses Iowa Environmental Mesonet ASOS data — same instrument as NWS,
-    0.01" precision, no rounding issues.
+    Fetch IEM ASOS precipitation from midnight (local) to now.
 
-    nws_issued_str: e.g. "618 PM PDT TUE MAR 17 2026"
-    Returns gap total in inches and list of hourly readings.
+    NWS MTD covers midnight-to-midnight in LOCAL STANDARD TIME.
+    During DST the ASOS DSM day runs 1AM-to-1AM local time (clock-wall).
+    So the IEM anchor is:
+      - Standard time (Nov-Mar approx): midnight (00:00 local)
+      - Daylight time (Mar-Nov approx): 1:00 AM local (DST shift)
+    We detect DST by checking if the city timezone is currently observing DST.
     """
     cfg = city_cfg or CITY_CFG
-    iem_station = cfg["icao_code"][1:]  # strip leading K: KSEA -> SEA, KPDX -> PDX
+    iem_station = cfg["icao_code"][1:]
     try:
-        from datetime import datetime, timezone, timedelta
-        import csv
-        from io import StringIO
+        import pytz
+        from datetime import datetime as dt_cls, timedelta
 
-        now_local = datetime.now()
+        tz_name   = cfg.get("tz", "America/Los_Angeles")
+        local_tz  = pytz.timezone(tz_name)
+        now_utc   = dt_cls.utcnow().replace(tzinfo=pytz.utc)
+        now_local = now_utc.astimezone(local_tz)
+
+        # Detect DST: ASOS DSM counts midnight-to-midnight in standard time.
+        # During DST, wall-clock midnight = standard time 11 PM the night before,
+        # so the DSM day starts at wall-clock 1:00 AM.
+        is_dst = bool(now_local.dst())
+        gap_start_hour = 1 if is_dst else 0
+        gap_start_str  = "01:00" if is_dst else "00:00"
+
         today_str = now_local.strftime("%Y-%m-%d")
 
-        # Parse NWS issued time to get gap start
-        # Format: "618 PM PDT TUE MAR 17 2026" or "1020 AM PDT..."
-        gap_start_hour = None
-        gap_start_str  = None
+        # Sanity: if current time is before gap_start_hour (e.g. 12:30 AM during DST)
+        # IEM gap would be negative — return zero gracefully
+        if now_local.hour < gap_start_hour:
+            return {
+                "ok": True, "gap_total": 0.0, "readings": [],
+                "gap_start": gap_start_str,
+                "gap_end": now_local.strftime("%I:%M %p"),
+                "source": "IEM ASOS (pre-gap-start)"
+            }
 
-        if nws_issued_str:
-            # Extract time portion e.g. "618 PM" or "1020 AM"
-            time_match = re.search(
-                r"(\d{3,4})\s+(AM|PM)",
-                nws_issued_str, re.IGNORECASE
-            )
-            if time_match:
-                raw_time = time_match.group(1)
-                ampm     = time_match.group(2).upper()
-                # Parse HHMM or HMM
-                if len(raw_time) == 3:
-                    h, m = int(raw_time[0]), int(raw_time[1:])
-                else:
-                    h, m = int(raw_time[:2]), int(raw_time[2:])
-                if ampm == "PM" and h != 12:
-                    h += 12
-                elif ampm == "AM" and h == 12:
-                    h = 0
-                gap_start_hour = h
-                gap_start_str  = f"{h:02d}:{m:02d}"
-
-        # If we can't parse, use 17:00 as fallback
-        if gap_start_hour is None:
-            gap_start_hour = 17
-            gap_start_str  = "17:00"
-
-        # Build IEM request — get today's precip data from gap start to now
-        # p01i = precipitation in last 1 minute interval, in inches
-        tz = cfg.get("tz", "America/Los_Angeles")
         url = (
             f"https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
             f"?station={iem_station}"
@@ -518,7 +513,7 @@ def fetch_iem_gap(nws_issued_str, city_cfg=None):
             f"&hour1={gap_start_hour}&min1=0"
             f"&year2={now_local.year}&month2={now_local.month:02d}&day2={now_local.day:02d}"
             f"&hour2={now_local.hour}&min2={now_local.minute}"
-            f"&tz={tz}"
+            f"&tz={tz_name}"
             f"&format=comma&latlon=no&direct=no&report_type=1"
         )
 
@@ -551,8 +546,10 @@ def fetch_iem_gap(nws_issued_str, city_cfg=None):
 
         gap_total = round(gap_total, 2)
 
-        # Sanity check — gap > 3" in a few hours is unrealistic
-        if gap_total > 3.0:
+        # Sanity check — gap fill covers midnight→now, up to ~18 hours.
+        # 5" threshold: rare but possible during atmospheric rivers (Seattle Nov 2006: 15.63"/month)
+        # 3" was too low and would silently zero out heavy rain events.
+        if gap_total > 5.0:
             return {
                 "ok": False,
                 "error": f"IEM returned unrealistic gap total {gap_total} - ignoring",
