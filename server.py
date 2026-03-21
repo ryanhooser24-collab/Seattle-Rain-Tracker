@@ -1248,12 +1248,28 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     cfg = CITIES.get(city_key)
                     if not cfg: return None
-                    wu        = fetch_wu_forecast(cfg)
-                    wu_hourly = fetch_wu_hourly(cfg)
-                    nws       = fetch_nws_mtd(cfg)
-                    kalshi    = fetch_kalshi_markets(cfg)
+                    # Fetch all 5 sources in parallel within the city
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as inner:
+                        f_wu      = inner.submit(fetch_wu_forecast, cfg)
+                        f_hourly  = inner.submit(fetch_wu_hourly, cfg)
+                        f_nws     = inner.submit(fetch_nws_mtd, cfg)
+                        f_kalshi  = inner.submit(fetch_kalshi_markets, cfg)
+                        # NWS needed for IEM — wait for it with 5s timeout
+                        try:
+                            nws = f_nws.result(timeout=5)
+                        except Exception:
+                            nws = {"ok": False, "mtd": 0, "issued": None}
+                        f_iem = inner.submit(fetch_iem_gap, nws.get("issued"), cfg)
+                        try: wu       = f_wu.result(timeout=5)
+                        except Exception: wu = {"ok": False, "total_forecast": 0, "days": []}
+                        try: wu_hourly = f_hourly.result(timeout=5)
+                        except Exception: wu_hourly = {"ok": False, "today_remaining": 0}
+                        try: kalshi   = f_kalshi.result(timeout=5)
+                        except Exception: kalshi = {"ok": False, "markets": []}
+                        try: iem      = f_iem.result(timeout=5)
+                        except Exception: iem = {"ok": False, "gap_total": 0}
+
                     mtd       = nws.get("mtd", 0)
-                    iem       = fetch_iem_gap(nws.get("issued"), cfg)
                     gap       = iem.get("gap_total", 0) if iem.get("ok") else 0
                     true_mtd  = round(mtd + gap, 2)
                     today_rem = wu_hourly.get("today_remaining", 0) if wu_hourly.get("ok") else 0
@@ -1268,22 +1284,34 @@ class Handler(BaseHTTPRequestHandler):
                             true_mtd=true_mtd
                         )
                     return {
-                        "city":          city_key,
-                        "city_label":    cfg["label"],
-                        "ok":            nws.get("ok", False),
-                        "true_mtd":      true_mtd,
-                        "today_eod":     today_eod,
-                        "projected":     projected,
+                        "city":           city_key,
+                        "city_label":     cfg["label"],
+                        "ok":             nws.get("ok", False),
+                        "true_mtd":       true_mtd,
+                        "today_eod":      today_eod,
+                        "projected":      projected,
                         "days_remaining": days_remaining,
-                        "wu_covers_eom": wu_covers,
-                        "markets":       kalshi.get("markets", []),
-                        "kalshi_ok":     kalshi.get("ok", False),
+                        "wu_covers_eom":  wu_covers,
+                        "markets":        kalshi.get("markets", []),
+                        "kalshi_ok":      kalshi.get("ok", False),
                     }
                 except Exception as e:
                     return {"city": city_key, "ok": False, "error": str(e), "markets": []}
 
+            # Hard 25s wall-clock timeout on entire scan — Railway kills at 60s
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
-                city_results = list(ex.map(fetch_city, list(CITIES.keys())))
+                futures = {ex.submit(fetch_city, ck): ck for ck in CITIES.keys()}
+                city_results = []
+                done, _ = concurrent.futures.wait(futures, timeout=25)
+                for f in done:
+                    result = f.result()
+                    if result:
+                        city_results.append(result)
+                # Any city that timed out gets a placeholder
+                for f, ck in futures.items():
+                    if f not in done:
+                        city_results.append({"city": ck, "ok": False,
+                                             "error": "timeout", "markets": []})
 
             self.send_json({
                 "ok": True,
@@ -1311,8 +1339,30 @@ class Handler(BaseHTTPRequestHandler):
                 today = date.today()
 
                 # Pull settlements from Postgres if available
+                # Confirmed NWS monthly actuals — sourced from official CLMSEA reports
+                # "last year" column cross-referenced with monthly CLM reports
+                CONFIRMED_ACTUALS = {
+                    "seattle": {
+                        "2024-10": 2.15,  # from Nov 2025 CLM "last year" column
+                        "2024-11": 4.86,  # from Nov 2025 CLM "last year" column
+                        "2024-12": 5.50,  # from Dec 2025 CLM "last year" column
+                        "2025-01": 1.92,  # confirmed multiple sources
+                        "2025-11": 5.71,  # NWS CLMSEA confirmed
+                        "2025-12": 7.37,  # NWS CLMSEA confirmed
+                        "2026-01": 3.19,  # NWS CLMSEA confirmed
+                        "2026-02": 2.92,  # NWS CLMSEA confirmed
+                    },
+                    "portland": {},
+                    "los_angeles": {},
+                    "san_francisco": {},
+                    "new_york": {},
+                    "chicago": {},
+                    "miami": {},
+                    "denver": {},
+                }
+                settlements = CONFIRMED_ACTUALS.get(city_key, {})
+                # Also try Postgres if available (adds any manually entered settlements)
                 conn = get_db()
-                settlements = {}
                 if conn:
                     try:
                         with conn.cursor() as cur:
