@@ -1556,16 +1556,23 @@ class Handler(BaseHTTPRequestHandler):
 
                     positions = []
                     for p in pos_data.get("market_positions", []):
+                        # Kalshi v2 field names (confirmed from API response)
+                        qty       = p.get("position") or p.get("quantity") or p.get("yes_position") or 0
+                        cost      = p.get("total_traded") or p.get("total_cost") or p.get("cost") or 0
+                        mkt_val   = p.get("market_value") or p.get("value") or 0
+                        r_pnl     = p.get("realized_pnl") or p.get("ralized_pnl") or 0
+                        ur_pnl    = p.get("unrealized_pnl") or 0
                         positions.append({
                             "ticker":        p.get("ticker",""),
-                            "market_title":  p.get("market_title",""),
-                            "yes_contracts": float(p.get("position", 0) or 0),
-                            "avg_yes_price": float(p.get("realized_pnl", 0) or 0),
-                            "market_value":  float(p.get("market_value", 0) or 0),
-                            "realized_pnl":  float(p.get("realized_pnl", 0) or 0),
-                            "unrealized_pnl":float(p.get("unrealized_pnl", 0) or 0),
-                            "total_cost":    float(p.get("total_cost", 0) or 0),
-                            "payout":        float(p.get("payout", 0) or 0),
+                            "market_title":  p.get("market_title","") or p.get("title",""),
+                            "yes_contracts": float(qty),
+                            "avg_yes_price": round(float(cost) / max(float(qty), 1) / 100, 2) if qty else 0,
+                            "market_value":  float(mkt_val) / 100,
+                            "realized_pnl":  float(r_pnl) / 100,
+                            "unrealized_pnl":float(ur_pnl) / 100,
+                            "total_cost":    float(cost) / 100,
+                            "payout":        float(p.get("payout", 0) or 0) / 100,
+                            "_raw":          p,  # temporary — remove after confirming fields
                         })
 
                     self.send_json({
