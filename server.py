@@ -1182,7 +1182,6 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/chart-data":
             # Return intraday snapshots for projection vs market chart
-            from urllib.parse import parse_qs
             qs     = parse_qs(urlparse(self.path).query)
             city   = qs.get("city", ["seattle"])[0]
             month  = qs.get("month", [datetime.now().strftime("%Y-%m")])[0]
