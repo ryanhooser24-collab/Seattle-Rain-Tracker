@@ -775,9 +775,12 @@ function toggleTheme(){
     if(btn)btn.textContent=t==='dark'?'☀':'☾';
   });
 })();
-  ['scan','dash','pos','rules','hist'].forEach(x=>{
-    document.getElementById('p-'+x).style.display=x===t?'block':'none';
-    document.getElementById('t-'+x).className='tab'+(x===t?' active':'');
+function sw(t){
+  ['scan','dash','pos','rules','hist','bt'].forEach(x=>{
+    const p=document.getElementById('p-'+x)||document.getElementById('s-'+x);
+    if(p)p.style.display=x===t?'block':'none';
+    const tb=document.getElementById('t-'+x);
+    if(tb)tb.className='tab'+(x===t?' active':'');
   });
   if(t==='scan'&&!scanCache)loadScanner();
   if(t==='pos')loadPortfolio();
