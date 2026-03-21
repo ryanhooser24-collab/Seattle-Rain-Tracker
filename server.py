@@ -28,7 +28,7 @@ except ImportError:
     PSYCOPG2_AVAILABLE = False
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-KALSHI_KEY_ID     = os.environ.get("KALSHI_KEY_ID", "")
+KALSHI_KEY_ID     = os.environ.get("KALSHI_KEY_ID", "") or os.environ.get("KALSHI_API_KEY", "")
 KALSHI_PRIVATE_KEY = os.environ.get("KALSHI_PRIVATE_KEY", "")
 
 def kalshi_auth_headers(method, path):
