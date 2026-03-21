@@ -605,7 +605,7 @@ def fetch_kalshi_markets(city_cfg=None):
             yes_bid   = float(m.get("yes_bid_dollars", 0) or 0)
             no_ask    = float(m.get("no_ask_dollars", 0) or 0)
             no_bid    = float(m.get("no_bid_dollars", 0) or 0)
-            spread    = round(yes_ask - yes_bid, 4)
+            spread    = max(0.0, round(yes_ask - yes_bid, 4))
 
             # Size at top of book
             yes_ask_sz = float(m.get("yes_ask_size_fp", 0) or 0)
@@ -741,6 +741,17 @@ def analyze_value(markets, projected_total, days_remaining=10, true_mtd=None):
             analyzed.append(m); continue
 
         cushion = round((true_mtd or 0) - inches, 2) if true_mtd is not None else None
+        yes_ask = m.get("yes_ask", 0)
+
+        # Skip markets already fully priced — no edge to capture
+        if yes_ask >= 0.99:
+            m["edge"] = "HOLD"; m["mode"] = "settled"; m["model_prob"] = 0.99
+            m["cushion"] = cushion; m["gap_c"] = 0; m["net_gap_c"] = 0
+            m["decision"] = "SKIP — fully priced"; m["actionable"] = False
+            m["confidence"] = conf; m["weighted_edge"] = 0
+            m["liquidity"] = liquidity_score(m); m["sigma"] = sigma
+            m["margin"] = round(projected_total - inches, 2)
+            analyzed.append(m); continue
 
         # Three-mode probability
         if cushion is not None and cushion >= 0.10:
@@ -756,7 +767,6 @@ def analyze_value(markets, projected_total, days_remaining=10, true_mtd=None):
             else:
                 model_prob = 1.0 if projected_total >= inches else 0.0
 
-        yes_ask    = m.get("yes_ask", 0)
         gap        = round(model_prob - yes_ask, 3)       # probability gap
         gap_c      = round(gap * 100)                      # in cents
 

@@ -691,9 +691,11 @@ function renderScanner(results){
   const wrap=document.getElementById('opp-list');
   const filtered=results.filter(r=>{
     const net=r.net_gap_c!==undefined?r.net_gap_c:r.gap;
-    if(scanFilter==='all')return net>=5||r.mode==='settled';
-    if(scanFilter==='settled')return r.mode==='settled';
-    if(scanFilter==='near-certain')return r.mode==='near-certain';
+    // Always exclude: fully priced (≥99¢), zero net gap, or explicitly skipped
+    if(r.kalshiP>=99||net<=0||r.decision==='SKIP — fully priced')return false;
+    if(scanFilter==='all')return net>=5;
+    if(scanFilter==='settled')return r.mode==='settled'&&net>=3;
+    if(scanFilter==='near-certain')return r.mode==='near-certain'&&net>=3;
     if(scanFilter==='probabilistic')return r.mode==='probabilistic'&&net>=8;
     return true;
   });
