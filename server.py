@@ -1237,6 +1237,29 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"error": str(e)})
 
+        elif path == "/ping":
+            # Diagnostic: time each external source for one city
+            import time
+            city_key = parse_qs(urlparse(self.path).query).get("city", ["seattle"])[0]
+            cfg = CITIES.get(city_key, CITIES["seattle"])
+            results = {}
+            for name, fn, args in [
+                ("open_meteo_daily", fetch_wu_forecast, [cfg]),
+                ("open_meteo_hourly", fetch_wu_hourly,  [cfg]),
+                ("nws_cli",          fetch_nws_mtd,     [cfg]),
+                ("kalshi",           fetch_kalshi_markets, [cfg]),
+                ("iem_asos",         fetch_iem_gap,     [None, cfg]),
+            ]:
+                t0 = time.time()
+                try:
+                    r = fn(*args)
+                    elapsed = round(time.time() - t0, 2)
+                    results[name] = {"ok": r.get("ok", False), "elapsed_s": elapsed,
+                                     "error": r.get("error") if not r.get("ok") else None}
+                except Exception as e:
+                    results[name] = {"ok": False, "elapsed_s": round(time.time()-t0,2), "error": str(e)}
+            self.send_json({"city": city_key, "sources": results})
+
         elif path == "/scan":
             # Server-side parallel scan of all cities — much faster than browser parallel
             import concurrent.futures, calendar
