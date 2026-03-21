@@ -402,7 +402,7 @@ body{max-width:900px;margin:0 auto;}
     <div id="markets-wrap"></div>
     <button class="place-btn" id="place-btn" disabled>No bets in slip</button>
     <div class="footer">
-      NWS CLI daily report (settlement) · Weather Underground daily + hourly (forecast) · IEM ASOS gap fill · Kalshi prediction markets<br>
+      NWS CLI daily report (settlement) · Open-Meteo GFS/ECMWF forecast · IEM ASOS gap fill · Kalshi prediction markets<br>
       RAINM Feb 4 2026 · Trace = 0.00" · First complete DCR governs settlement
     </div>
   </div>
@@ -555,22 +555,67 @@ async function loadScanner(){
   document.getElementById('opp-list').innerHTML='<div class="scan-loading">Scanning all cities...</div>';
   document.getElementById('scan-meta').textContent='Fetching...';
 
-  const results=[];
-  const cities=Object.keys(ALL_CITIES);
+  let cityData=[];
 
-  // Fetch all cities in parallel
-  const fetches=cities.map(async city=>{
-    try{
-      const res=await fetch(SERVER+'/data?city='+city);
-      if(!res.ok)return null;
-      const d=await res.json();
-      cityCache[city]=d;
-      return{city,d};
-    }catch(e){return null;}
-  });
+  // Try fast server-side scan first
+  try{
+    const ctrl=new AbortController();
+    setTimeout(()=>ctrl.abort(),20000);
+    const res=await fetch(SERVER+'/scan',{signal:ctrl.signal});
+    if(res.ok){
+      const data=await res.json();
+      if(data.ok&&data.cities){
+        // Convert /scan response to same format as individual /data calls
+        cityData=data.cities.filter(c=>c&&c.ok).map(c=>({
+          city:c.city,
+          d:{
+            city:c.city,
+            city_label:c.city_label,
+            true_mtd:c.true_mtd,
+            today_eod:c.today_eod||c.true_mtd,
+            projected:c.projected,
+            days_remaining:c.days_remaining,
+            wu_covers_eom:c.wu_covers_eom,
+            nws:{ok:true,mtd:c.true_mtd},
+            kalshi:{ok:c.kalshi_ok,markets:c.markets},
+          }
+        }));
+        document.getElementById('scan-meta').textContent=
+          `${cityData.length} cities loaded`;
+      }
+    }
+  }catch(e){
+    console.log('Fast scan failed, falling back to individual fetches');
+  }
 
-  const settled=await Promise.allSettled(fetches);
-  const cityData=settled.map(r=>r.status==='fulfilled'?r.value:null).filter(Boolean);
+  // Fallback: individual city fetches with timeout
+  if(!cityData.length){
+    const cities=Object.keys(ALL_CITIES);
+    let completed=0;
+    function fetchWithTimeout(city){
+      const ctrl=new AbortController();
+      const tid=setTimeout(()=>ctrl.abort(),10000);
+      return fetch(SERVER+'/data?city='+city,{signal:ctrl.signal})
+        .then(r=>r.ok?r.json():null)
+        .then(d=>{clearTimeout(tid);return d?{city,d}:null;})
+        .catch(()=>{clearTimeout(tid);return null;});
+    }
+    const fetches=cities.map(city=>
+      fetchWithTimeout(city).then(result=>{
+        completed++;
+        document.getElementById('scan-meta').textContent=
+          `Scanning... ${completed}/${cities.length} cities`;
+        return result;
+      })
+    );
+    const settled=await Promise.allSettled(fetches);
+    cityData=settled.map(r=>r.status==='fulfilled'?r.value:null).filter(Boolean);
+  }
+
+  if(!cityData.length){
+    document.getElementById('opp-list').innerHTML='<div class="scan-empty">Could not reach server.</div>';
+    return;
+  }
 
   // Build opportunity list from each city's markets
   for(const{city,d} of cityData){
@@ -916,7 +961,7 @@ function render(d){
   if(titleEl)titleEl.innerHTML=`${city_label||'Rain'} <em>Rain</em> Tracker`;
 
   // Pills
-  const src=[['NWS',nws.ok],['WU',wu.ok],['IEM',iem.ok],['Kalshi',kalshi.ok]];
+  const src=[['NWS',nws.ok],['OM',wu.ok],['IEM',iem.ok],['Kalshi',kalshi.ok]];
   document.getElementById('status-pills').innerHTML=
     src.map(([n,ok])=>`<span class="pill ${ok?'pill-ok':'pill-err'}">${n} ${ok?'✓':'✗'}</span>`).join('')+
     `<span class="upd">Updated ${new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}</span>`;
@@ -1011,7 +1056,7 @@ function renderRainfall(d){
       </div>
       <div class="rf-row">
         <div class="rf-left"><div class="rdot d-wuhr"></div><div class="rf-meta">
-          <div class="rf-lbl"><span>WU hourly</span><div class="tip"><b>WU hourly forecast</b>QPF pinned to the local airport station. Picks up exactly where IEM ends and runs through midnight.</div></div>
+          <div class="rf-lbl"><span>WU hourly</span><div class="tip"><b>WU hourly forecast</b>Open-Meteo hourly QPF. Picks up exactly where IEM ends and runs through midnight.</div></div>
           <div class="rf-sub">Now → midnight · forecast</div>
         </div></div>
         <div class="rf-right"><button class="xbtn" style="color:var(--wu-hr)" onclick="togPanel()">↓ hourly</button><div class="rf-val v-wuhr">+${(today_remaining||0).toFixed(2)}<span class="rf-unit"> in</span></div></div>

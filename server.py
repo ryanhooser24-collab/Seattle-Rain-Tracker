@@ -32,8 +32,10 @@ KALSHI_API_KEY = os.environ.get("KALSHI_API_KEY", "")
 PORT           = int(os.environ.get("PORT", 8765))
 DATABASE_URL   = os.environ.get("DATABASE_URL", "")   # Railway Postgres
 
-# WU internal API key
-WU_API_KEY = "e1f10a1e78da46f5b10a1e78da96f525"
+# Open-Meteo — free, no API key required, stable documented API
+OM_DAILY_URL  = "https://api.open-meteo.com/v1/forecast"
+OM_HOURLY_URL = "https://api.open-meteo.com/v1/forecast"
+OM_PREV_URL   = "https://previous-runs-api.open-meteo.com/v1/forecast"
 
 # ── MULTI-CITY CONFIG ─────────────────────────────────────────────────────────
 # Each city needs:
@@ -142,7 +144,7 @@ NWS_URL      = (f"https://forecast.weather.gov/product.php"
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def validate_wu_data(data, days, total, city_cfg=None):
+def validate_forecast_data(data, days, total, city_cfg=None):
     """
     Run sanity checks on WU forecast data.
     Returns (is_valid, warning_message)
@@ -164,7 +166,7 @@ def validate_wu_data(data, days, total, city_cfg=None):
                 forecast_date = datetime.strptime(first_date, "%Y-%m-%d")
                 delta = abs((today - forecast_date).days)
                 if delta > 2:
-                    warnings.append(f"Forecast appears stale — first date is {first_date}")
+                    warnings.append(f"Forecast appears stale - first date is {first_date}")
             except:
                 pass
 
@@ -173,11 +175,11 @@ def validate_wu_data(data, days, total, city_cfg=None):
     wet_months = cfg.get("tradeable_months", [])
     if wet_months and month in wet_months and total == 0.0:
         label = cfg.get("label", "this city")
-        return False, f"WU returned 0.00\" total during {label} wet season — likely bad data"
+        return False, f"WU returned 0.00\" total during {label} wet season - likely bad data"
 
     # 4. Unreasonably high values (>15" in 7 days would be record-breaking for any US city)
     if total > 15.0:
-        return False, f"WU returned {total}\" over 7 days — unrealistically high, likely bad data"
+        return False, f"WU returned {total}\" over 7 days - unrealistically high, likely bad data"
 
     # 5. Check qpf field actually exists and has numeric values
     for d in days:
@@ -195,86 +197,71 @@ def validate_wu_data(data, days, total, city_cfg=None):
 
 
 def fetch_wu_forecast(city_cfg=None):
-    """Fetch 7-day QPF forecast from Weather Underground internal API."""
+    """
+    Fetch 10-day daily QPF from Open-Meteo (replaces Weather Underground).
+    Open-Meteo uses GFS + ECMWF — same underlying models as WU.
+    Free, stable, no API key, no rotation risk.
+    Returns same structure as old WU function for backward compatibility.
+    """
     cfg = city_cfg or CITY_CFG
     try:
-        url = (
-            f"https://api.weather.com/v3/wx/forecast/daily/10day"
-            f"?apiKey={WU_API_KEY}"
-            f"&icaoCode={cfg['icao_code']}"
-            f"&language=en-US&units=e&format=json"
-        )
-        headers = {
-            "Origin": "https://www.wunderground.com",
-            "Referer": "https://www.wunderground.com/",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/145.0.0.0 Safari/537.36"
+        params = {
+            "latitude":      cfg["lat"],
+            "longitude":     cfg["lon"],
+            "daily":         "precipitation_sum",
+            "timezone":      cfg["tz"],
+            "forecast_days": 16,
+            "models":        "best_match",
         }
-        r = requests.get(url, headers=headers, timeout=10)
-
-        # Detect API key rotation (401 = unauthorized, 403 = forbidden)
-        if r.status_code in (401, 403):
-            return {
-                "ok": False,
-                "error": "WU API key has rotated — manual entry required",
-                "days": [], "total_forecast": 0, "source": "Weather Underground",
-                "needs_manual": True
-            }
-
+        r = requests.get(OM_DAILY_URL, params=params, timeout=6)
         r.raise_for_status()
         data = r.json()
 
-        # Check for error response disguised as 200
-        if "errors" in data or "statusCode" in data:
-            return {
-                "ok": False,
-                "error": f"WU returned error response: {data.get('errors') or data.get('statusCode')}",
-                "days": [], "total_forecast": 0, "source": "Weather Underground",
-                "needs_manual": True
-            }
+        if "error" in data:
+            return {"ok": False, "error": data["error"], "days": [], "total_forecast": 0,
+                    "source": "Open-Meteo", "needs_manual": False}
 
-        dates   = data.get("validTimeLocal", [])
-        qpf     = data.get("qpf", [])
-        dow     = data.get("dayOfWeek", [])
-        narr    = data.get("narrative", [])
+        dates = data.get("daily", {}).get("time", [])
+        precip = data.get("daily", {}).get("precipitation_sum", [])
 
         days = []
-        for i in range(len(dates)):
-            date_str = dates[i][:10] if dates[i] else ""
+        for i, date_str in enumerate(dates):
+            qpf_mm = float(precip[i] or 0) if i < len(precip) else 0.0
+            qpf_in = round(qpf_mm / 25.4, 3)  # mm → inches
             days.append({
                 "date":      date_str,
-                "dayOfWeek": dow[i] if i < len(dow) else "",
-                "qpf":       float(qpf[i]) if i < len(qpf) and qpf[i] is not None else 0.0,
-                "narrative": narr[i] if i < len(narr) else "",
+                "dayOfWeek": "",
+                "qpf":       qpf_in,
+                "narrative": "",
             })
 
+        # Validation: sanity check values
         total = round(sum(d["qpf"] for d in days), 2)
-
-        # Run validation
-        is_valid, warning = validate_wu_data(data, days, total, cfg)
-        if not is_valid:
-            return {
-                "ok": False,
-                "error": warning,
-                "days": [], "total_forecast": 0,
-                "source": "Weather Underground",
-                "needs_manual": True
-            }
+        now_month = datetime.now().month
+        wet_months = cfg.get("tradeable_months", [])
+        if wet_months and now_month in wet_months and total == 0.0:
+            return {"ok": False,
+                    "error": f"Open-Meteo returned 0.00 inches during {cfg.get('label','')} wet season - check coordinates",
+                    "days": [], "total_forecast": 0, "source": "Open-Meteo", "needs_manual": False}
+        if total > 15.0:
+            return {"ok": False, "error": f"Open-Meteo returned {total} inches - unrealistically high",
+                    "days": [], "total_forecast": 0, "source": "Open-Meteo", "needs_manual": False}
 
         return {
-            "ok": True,
-            "days": days,
+            "ok":            True,
+            "days":          days,
             "total_forecast": total,
-            "source": "Weather Underground",
-            "warning": warning,  # May be None or a non-fatal warning string
-            "needs_manual": False
+            "source":        "Open-Meteo (GFS/ECMWF best match)",
+            "warning":       None,
+            "needs_manual":  False,
         }
 
     except requests.exceptions.Timeout:
-        return {"ok": False, "error": "WU request timed out — try refreshing", "days": [], "total_forecast": 0, "source": "Weather Underground", "needs_manual": True}
-    except requests.exceptions.ConnectionError:
-        return {"ok": False, "error": "Cannot reach WU — check internet connection", "days": [], "total_forecast": 0, "source": "Weather Underground", "needs_manual": True}
+        return {"ok": False, "error": "Open-Meteo timed out", "days": [], "total_forecast": 0,
+                "source": "Open-Meteo", "needs_manual": False}
     except Exception as e:
-        return {"ok": False, "error": f"WU fetch failed: {str(e)}", "days": [], "total_forecast": 0, "source": "Weather Underground", "needs_manual": True}
+        return {"ok": False, "error": f"Open-Meteo fetch failed: {str(e)}", "days": [], "total_forecast": 0,
+                "source": "Open-Meteo", "needs_manual": False}
 
 
 def fetch_nws_mtd(city_cfg=None):
@@ -286,7 +273,7 @@ def fetch_nws_mtd(city_cfg=None):
                f"&product=CLI&format=txt")
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(nws_url, headers=headers, timeout=10)
+        r = requests.get(nws_url, headers=headers, timeout=6)
         r.raise_for_status()
         text = r.text
 
@@ -349,61 +336,56 @@ def fetch_nws_mtd(city_cfg=None):
 
 def fetch_wu_hourly(city_cfg=None):
     """
-    Fetch WU hourly forecast for today from current hour through midnight.
-    Used to complete today's projected EOD total alongside IEM actuals.
-    Returns hourly QPF list and today's remaining total.
+    Fetch hourly QPF from Open-Meteo for today (current hour through midnight).
+    Replaces Weather Underground hourly — same purpose, stable free API.
+    Returns same structure as old WU hourly function.
     """
     cfg = city_cfg or CITY_CFG
     try:
-        url = (
-            f"https://api.weather.com/v3/wx/forecast/hourly/2day"
-            f"?apiKey={WU_API_KEY}"
-            f"&icaoCode={cfg['icao_code']}"
-            f"&language=en-US&units=e&format=json"
-        )
-        headers = {
-            "Origin": "https://www.wunderground.com",
-            "Referer": "https://www.wunderground.com/",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/145.0.0.0 Safari/537.36"
+        now_local = datetime.now()
+        today_str = now_local.strftime("%Y-%m-%d")
+        now_hour  = now_local.hour
+
+        params = {
+            "latitude":      cfg["lat"],
+            "longitude":     cfg["lon"],
+            "hourly":        "precipitation",
+            "timezone":      cfg["tz"],
+            "start_date":    today_str,
+            "end_date":      today_str,
+            "models":        "best_match",
         }
-        r = requests.get(url, headers=headers, timeout=10)
-
-        if r.status_code in (401, 403):
-            return {"ok": False, "error": "WU hourly API key rotated", "hours": [], "today_remaining": 0}
-
+        r = requests.get(OM_HOURLY_URL, params=params, timeout=6)
         r.raise_for_status()
         data = r.json()
 
-        times = data.get("validTimeLocal", [])
-        qpf   = data.get("qpf", [])
+        if "error" in data:
+            return {"ok": False, "error": data["error"], "hours": [], "today_remaining": 0}
 
-        now_local  = datetime.now()
-        today_str  = now_local.strftime("%Y-%m-%d")
-        now_hour   = now_local.hour
+        times  = data.get("hourly", {}).get("time", [])
+        precip = data.get("hourly", {}).get("precipitation", [])
 
-        # Filter to remaining hours today (from current hour through 11 PM)
         today_hours = []
         for i, t in enumerate(times):
             if not t:
                 continue
-            # Parse hour from validTimeLocal e.g. "2026-03-18T20:00:00-0700"
-            hour_date = t[:10]
-            hour_num  = int(t[11:13])
-            if hour_date == today_str and hour_num >= now_hour:
-                p = float(qpf[i]) if i < len(qpf) and qpf[i] is not None else 0.0
+            hour_num = int(t[11:13])
+            if hour_num >= now_hour:
+                qpf_mm = float(precip[i] or 0) if i < len(precip) else 0.0
+                qpf_in = round(qpf_mm / 25.4, 3)
                 today_hours.append({
-                    "time":  t[11:16],  # HH:MM
-                    "hour":  hour_num,
-                    "qpf":   round(p, 2)
+                    "time": t[11:16],
+                    "hour": hour_num,
+                    "qpf":  qpf_in,
                 })
 
         today_remaining = round(sum(h["qpf"] for h in today_hours), 2)
 
         return {
-            "ok":             True,
-            "hours":          today_hours,
+            "ok":              True,
+            "hours":           today_hours,
             "today_remaining": today_remaining,
-            "source":         "Weather Underground hourly"
+            "source":          "Open-Meteo hourly",
         }
 
     except Exception as e:
@@ -476,7 +458,7 @@ def fetch_iem_gap(nws_issued_str, city_cfg=None):
         )
 
         headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=15)
+        r = requests.get(url, headers=headers, timeout=6)
         r.raise_for_status()
 
         lines = r.text.strip().split("\n")
@@ -548,7 +530,7 @@ def fetch_kalshi_markets(city_cfg=None):
             "Authorization": f"Bearer {KALSHI_API_KEY}",
             "Content-Type": "application/json"
         }
-        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r = requests.get(url, params=params, headers=headers, timeout=6)
         r.raise_for_status()
         data = r.json()
 
@@ -1241,7 +1223,7 @@ class Handler(BaseHTTPRequestHandler):
                 url = f"{KALSHI_BASE}/markets"
                 params = {"series_ticker": KALSHI_SERIES, "status": "open", "limit": 10}
                 hdrs = {"Authorization": f"Bearer {KALSHI_API_KEY}"}
-                r = requests.get(url, params=params, headers=hdrs, timeout=10)
+                r = requests.get(url, params=params, headers=hdrs, timeout=6)
                 raw = r.json()
                 mkts = raw.get("markets", [])
                 debug = []
@@ -1254,6 +1236,185 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"total": len(mkts), "sample": debug})
             except Exception as e:
                 self.send_json({"error": str(e)})
+
+        elif path == "/scan":
+            # Server-side parallel scan of all cities — much faster than browser parallel
+            import concurrent.futures, calendar
+            now_dt = datetime.now()
+            days_in_month = calendar.monthrange(now_dt.year, now_dt.month)[1]
+            days_remaining = days_in_month - now_dt.day
+
+            def fetch_city(city_key):
+                try:
+                    cfg = CITIES.get(city_key)
+                    if not cfg: return None
+                    wu        = fetch_wu_forecast(cfg)
+                    wu_hourly = fetch_wu_hourly(cfg)
+                    nws       = fetch_nws_mtd(cfg)
+                    kalshi    = fetch_kalshi_markets(cfg)
+                    mtd       = nws.get("mtd", 0)
+                    iem       = fetch_iem_gap(nws.get("issued"), cfg)
+                    gap       = iem.get("gap_total", 0) if iem.get("ok") else 0
+                    true_mtd  = round(mtd + gap, 2)
+                    today_rem = wu_hourly.get("today_remaining", 0) if wu_hourly.get("ok") else 0
+                    today_eod = round(true_mtd + today_rem, 2)
+                    wu_remaining = wu.get("total_forecast", 0)
+                    wu_covers = days_remaining <= 10
+                    projected = round(true_mtd + wu_remaining, 2) if wu_covers else None
+                    proj_signal = projected if wu_covers else round(true_mtd + wu_remaining, 2)
+                    if kalshi.get("ok"):
+                        kalshi["markets"] = analyze_value(
+                            kalshi["markets"], proj_signal, days_remaining,
+                            true_mtd=true_mtd
+                        )
+                    return {
+                        "city":          city_key,
+                        "city_label":    cfg["label"],
+                        "ok":            nws.get("ok", False),
+                        "true_mtd":      true_mtd,
+                        "today_eod":     today_eod,
+                        "projected":     projected,
+                        "days_remaining": days_remaining,
+                        "wu_covers_eom": wu_covers,
+                        "markets":       kalshi.get("markets", []),
+                        "kalshi_ok":     kalshi.get("ok", False),
+                    }
+                except Exception as e:
+                    return {"city": city_key, "ok": False, "error": str(e), "markets": []}
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+                city_results = list(ex.map(fetch_city, list(CITIES.keys())))
+
+            self.send_json({
+                "ok": True,
+                "cities": [r for r in city_results if r],
+                "days_remaining": days_remaining,
+                "timestamp": datetime.now().isoformat(),
+            })
+
+
+        elif path == "/backtest":
+            # Open-Meteo Previous Runs backtest
+            # ?city=seattle&months=6  → returns per-horizon error stats
+            # Uses Previous Runs API to get what GFS predicted at D-1..D-7
+            # Compare against NWS actual monthly settlements from Postgres
+            qs      = parse_qs(urlparse(self.path).query)
+            city_key = qs.get("city", ["seattle"])[0]
+            months_back = int(qs.get("months", ["6"])[0])
+            cfg = CITIES.get(city_key, CITIES["seattle"])
+
+            try:
+                from datetime import date, timedelta
+                import calendar as cal_mod
+
+                results = []
+                today = date.today()
+
+                # Pull settlements from Postgres if available
+                conn = get_db()
+                settlements = {}
+                if conn:
+                    try:
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                SELECT month, settled_total FROM month_settlements
+                                WHERE month LIKE %s ORDER BY month DESC LIMIT %s
+                            """, (f"{city_key}-%", months_back))
+                            for row in cur.fetchall():
+                                settlements[row[0]] = float(row[1])
+                        conn.close()
+                    except:
+                        pass
+
+                # For each past complete month, fetch Previous Runs at D-1..D-7
+                for m_back in range(1, months_back + 1):
+                    # Get month
+                    month_date = today.replace(day=1)
+                    for _ in range(m_back):
+                        month_date = (month_date - timedelta(days=1)).replace(day=1)
+
+                    year  = month_date.year
+                    month = month_date.month
+                    days_in_month = cal_mod.monthrange(year, month)[1]
+                    last_day = date(year, month, days_in_month)
+                    month_key = f"{city_key}-{year}-{month:02d}"
+
+                    actual = settlements.get(month_key)
+
+                    # Fetch at each lead time
+                    horizon_data = {}
+                    for lead in [1, 3, 5, 7]:
+                        target_date = last_day - timedelta(days=lead)
+                        try:
+                            # Open-Meteo Previous Runs API
+                            # past_days=N returns what was predicted N days ago
+                            r = requests.get(
+                                OM_PREV_URL,
+                                params={
+                                    "latitude":      cfg["lat"],
+                                    "longitude":     cfg["lon"],
+                                    "daily":         "precipitation_sum",
+                                    "timezone":      cfg["tz"],
+                                    "past_days":     lead,
+                                    "forecast_days": 16,
+                                    "models":        f"previous_day_{lead}",
+                                },
+                                timeout=10
+                            )
+                            r.raise_for_status()
+                            data = r.json()
+                            dates_list = data.get("daily", {}).get("time", [])
+                            precip = data.get("daily", {}).get("precipitation_sum", [])
+                            # Sum for the full month
+                            month_total_mm = sum(
+                                float(p or 0) for d, p in zip(dates_list, precip)
+                                if d and d[:7] == f"{year}-{month:02d}"
+                            )
+                            horizon_data[f"d{lead}"] = round(month_total_mm / 25.4, 2)
+                        except:
+                            horizon_data[f"d{lead}"] = None
+
+                    results.append({
+                        "month":    f"{year}-{month:02d}",
+                        "city":     city_key,
+                        "actual":   actual,
+                        "horizons": horizon_data,
+                        "errors": {
+                            f"d{lead}": round(horizon_data.get(f"d{lead}",0) - actual, 2)
+                            if actual is not None and horizon_data.get(f"d{lead}") is not None
+                            else None
+                            for lead in [1, 3, 5, 7]
+                        } if actual is not None else {}
+                    })
+
+                # Compute summary stats per horizon
+                summary = {}
+                for lead in [1, 3, 5, 7]:
+                    key = f"d{lead}"
+                    errs = [r["errors"].get(key) for r in results if r.get("errors") and r["errors"].get(key) is not None]
+                    if errs:
+                        n = len(errs)
+                        summary[key] = {
+                            "n":         n,
+                            "mean_err":  round(sum(errs)/n, 3),
+                            "mae":       round(sum(abs(e) for e in errs)/n, 3),
+                            "rmse":      round((sum(e**2 for e in errs)/n)**0.5, 3),
+                            "bias":      "WET" if sum(errs)/n > 0.1 else "DRY" if sum(errs)/n < -0.1 else "NEUTRAL",
+                            # This is the empirical sigma — replace hardcoded table with this
+                            "sigma":     round((sum(e**2 for e in errs)/n)**0.5, 3),
+                        }
+
+                self.send_json({
+                    "ok":      True,
+                    "city":    city_key,
+                    "months":  months_back,
+                    "results": results,
+                    "summary": summary,
+                    "note":    "sigma values can replace SIGMA_TABLE in analyze_value for calibrated probabilities"
+                })
+
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
 
         elif path == "/portfolio":
             # Fetch live Kalshi balance and positions
