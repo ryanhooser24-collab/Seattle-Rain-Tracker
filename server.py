@@ -58,7 +58,7 @@ def kalshi_auth_headers(method, path):
         msg,
         padding.PSS(
             mgf=padding.MGF1(hashes.SHA256()),
-            salt_length=padding.PSS.DIGEST_SIZE
+            salt_length=32
         ),
         hashes.SHA256()
     )
