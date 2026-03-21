@@ -28,7 +28,38 @@ except ImportError:
     PSYCOPG2_AVAILABLE = False
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-KALSHI_API_KEY = os.environ.get("KALSHI_API_KEY", "")
+KALSHI_KEY_ID     = os.environ.get("KALSHI_KEY_ID", "")
+KALSHI_PRIVATE_KEY = os.environ.get("KALSHI_PRIVATE_KEY", "")
+
+def kalshi_auth_headers(method, path):
+    """Generate RSA-signed headers for Kalshi API v2."""
+    import datetime, base64
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.backends import default_backend
+
+    ts_ms = str(int(datetime.datetime.now().timestamp() * 1000))
+    # Strip query params before signing
+    path_no_query = path.split("?")[0]
+    msg = (ts_ms + method.upper() + path_no_query).encode("utf-8")
+
+    # Load private key — Railway stores it as a string with literal \n
+    pem = KALSHI_PRIVATE_KEY.replace("\\n", "\n").replace("\n", "\n")
+    if "BEGIN" not in pem:
+        raise ValueError("KALSHI_PRIVATE_KEY missing PEM header")
+
+    private_key = serialization.load_pem_private_key(
+        pem.encode("utf-8"), password=None, backend=default_backend()
+    )
+    sig = private_key.sign(msg, padding.PKCS1v15(), hashes.SHA256())
+    sig_b64 = base64.b64encode(sig).decode("utf-8")
+
+    return {
+        "KALSHI-ACCESS-KEY":       KALSHI_KEY_ID,
+        "KALSHI-ACCESS-SIGNATURE": sig_b64,
+        "KALSHI-ACCESS-TIMESTAMP": ts_ms,
+        "Content-Type":            "application/json",
+    }
 PORT           = int(os.environ.get("PORT", 8765))
 DATABASE_URL   = os.environ.get("DATABASE_URL", "")   # Railway Postgres
 
@@ -521,15 +552,13 @@ def fetch_kalshi_markets(city_cfg=None):
     """Fetch open rain markets from Kalshi API for given city."""
     cfg = city_cfg or CITY_CFG
     try:
-        if not KALSHI_API_KEY:
-            return {"ok": False, "error": "Kalshi API key not set", "markets": []}
+        if not KALSHI_KEY_ID:
+            return {"ok": False, "error": "Kalshi key not configured", "markets": []}
 
+        path = "/trade-api/v2/markets"
         url = f"{KALSHI_BASE}/markets"
         params = {"series_ticker": cfg["kalshi_series"], "status": "open", "limit": 100}
-        headers = {
-            "Authorization": f"Bearer {KALSHI_API_KEY}",
-            "Content-Type": "application/json"
-        }
+        headers = kalshi_auth_headers("GET", path)
         r = requests.get(url, params=params, headers=headers, timeout=6)
         r.raise_for_status()
         data = r.json()
@@ -1222,7 +1251,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 url = f"{KALSHI_BASE}/markets"
                 params = {"series_ticker": KALSHI_SERIES, "status": "open", "limit": 10}
-                hdrs = {"Authorization": f"Bearer {KALSHI_API_KEY}"}
+                hdrs = kalshi_auth_headers("GET", "/trade-api/v2/markets")
                 r = requests.get(url, params=params, headers=hdrs, timeout=6)
                 raw = r.json()
                 mkts = raw.get("markets", [])
@@ -1410,9 +1439,10 @@ class Handler(BaseHTTPRequestHandler):
                     month = month_date.month
                     days_in_month = cal_mod.monthrange(year, month)[1]
                     last_day = date(year, month, days_in_month)
-                    month_key = f"{city_key}-{year}-{month:02d}"
+                    month_key     = f"{city_key}-{year}-{month:02d}"  # for Postgres
+                    actual_key    = f"{year}-{month:02d}"              # for CONFIRMED_ACTUALS
 
-                    actual = settlements.get(month_key)
+                    actual = settlements.get(actual_key) or settlements.get(month_key)
 
                     # Fetch at each lead time
                     horizon_data = {}
@@ -1491,18 +1521,15 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/portfolio":
             # Fetch live Kalshi balance and positions
-            if not KALSHI_API_KEY:
+            if not KALSHI_KEY_ID:
                 self.send_json({"ok": False, "error": "No Kalshi API key"})
             else:
                 try:
-                    headers = {
-                        "Authorization": f"Bearer {KALSHI_API_KEY}",
-                        "Content-Type": "application/json"
-                    }
                     # Balance
                     bal_r = requests.get(
                         f"{KALSHI_BASE}/portfolio/balance",
-                        headers=headers, timeout=10
+                        headers=kalshi_auth_headers("GET", "/trade-api/v2/portfolio/balance"),
+                        timeout=10
                     )
                     bal_r.raise_for_status()
                     bal = bal_r.json()
@@ -1510,7 +1537,8 @@ class Handler(BaseHTTPRequestHandler):
                     # Positions
                     pos_r = requests.get(
                         f"{KALSHI_BASE}/portfolio/positions",
-                        headers=headers, timeout=10,
+                        headers=kalshi_auth_headers("GET", "/trade-api/v2/portfolio/positions"),
+                        timeout=10,
                         params={"limit": 100, "count_filter": "position"}
                     )
                     pos_r.raise_for_status()
@@ -1543,19 +1571,16 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/pnl":
             # Fetch trade history for P&L chart
             # Returns settled trades grouped by date for charting
-            if not KALSHI_API_KEY:
+            if not KALSHI_KEY_ID:
                 self.send_json({"ok": False, "error": "No Kalshi API key"})
             else:
                 try:
                     qs     = parse_qs(urlparse(self.path).query)
                     limit  = int(qs.get("limit", [100])[0])
-                    headers = {
-                        "Authorization": f"Bearer {KALSHI_API_KEY}",
-                        "Content-Type": "application/json"
-                    }
                     r = requests.get(
                         f"{KALSHI_BASE}/portfolio/settlements",
-                        headers=headers, timeout=10,
+                        headers=kalshi_auth_headers("GET", "/trade-api/v2/portfolio/settlements"),
+                        timeout=10,
                         params={"limit": limit}
                     )
                     r.raise_for_status()
