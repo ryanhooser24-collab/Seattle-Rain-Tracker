@@ -732,21 +732,15 @@ function renderScanner(results){
        r.mode==='near-certain'&&netGap>=5?'BUY YES':
        netGap>=8?'BUY YES':illiquid?'SKIP — illiquid':'HOLD');
 
-    // Preliminary NWS warning for settled/near-certain
-    const isPrelim = r.nws_is_finalized===false;
-    const prelimWarn = isPrelim&&(r.mode==='settled'||r.mode==='near-certain')
-      ? `<div class="opp-context" style="margin-top:4px;color:var(--warn)">⚠ <b>NWS reading is preliminary</b> (intraday — not overnight finalized). MTD may shift when overnight report publishes ~1–2 AM. Confidence reduced; settled threshold tightened to 0.50" cushion.</div>`
-      : '';
-
     // One sentence why
     const why=r.mode==='settled'
       ?`MTD already <b>+${r.cushion}" above</b> the ${r.strike}" strike.
         ${r.cushion>=0.50
           ? 'Strong cushion — NWS correction would need to be unusually large to reverse.'
           : r.cushion>=0.25
-            ? 'Moderate cushion — low but non-zero risk from NWS correction or IEM drift.'
-            : 'Thin cushion — watch for overnight NWS report. Small correction could change classification.'
-        } Based on finalized overnight NWS reading + IEM gap fill.`
+            ? 'Moderate cushion — low but non-zero risk from IEM drift.'
+            : 'Thin cushion — small IEM drift could change classification.'
+        } Based on overnight NWS base + IEM gap fill.`
       :r.mode==='near-certain'
       ?`MTD <b>${r.mtd.toFixed(2)}"</b> is at the ${r.strike}" strike — negligible forecast risk remaining.`
       :`Projection <b>${r.proj.toFixed(2)}"</b> clears ${r.strike}" by ${(r.proj-r.strike).toFixed(2)}" but ${r.daysLeft} days of forecast risk remain. Check again at 7 days.`;
@@ -770,15 +764,9 @@ function renderScanner(results){
           <div class="opp-decision">
             ${decision} · ${r.cityLabel} above ${r.strike}"
             ${decision==='HOLD'?'<span style="font-size:10px;color:var(--muted);font-weight:400;margin-left:6px">— wait for better entry</span>':''}
-            ${(r.mode==='settled'||r.mode==='near-certain')
-              ? (r.nws_is_finalized===false
-                  ? '<span style="font-size:9px;margin-left:8px;padding:1px 5px;border-radius:3px;background:rgba(255,180,0,0.15);color:var(--warn)">NWS PRELIMINARY</span>'
-                  : '<span style="font-size:9px;margin-left:8px;padding:1px 5px;border-radius:3px;background:rgba(80,200,120,0.12);color:var(--gain)">NWS FINALIZED</span>')
-              : ''}
           </div>
           <div class="opp-context">${why}</div>
           <div class="opp-context" style="margin-top:3px">${illiquid?'<span style="color:var(--no)">⚠ Illiquid market — skip</span>':holdNote}</div>
-          ${prelimWarn}
         </div>
         <div class="opp-right">
           <div class="opp-net-gap">+${netGap}¢</div>

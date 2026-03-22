@@ -801,14 +801,13 @@ def analyze_value(markets, projected_total, days_remaining=10, true_mtd=None, nw
             analyzed.append(m); continue
 
         # Three-mode probability
-        # Settled cushion: 0.10" if NWS report is finalized (overnight), 
-        # 0.50" if preliminary (intraday) — intraday MTD can be revised down
-        settled_min = 0.10 if nws_is_finalized else 0.50
+        # Pipeline already corrects for preliminary NWS: base = MTD - today + IEM gap fill.
+        # Result is equally reliable regardless of report timing, so threshold is always 0.10".
+        settled_min = 0.10
 
         if cushion is not None and cushion >= settled_min:
             mode = "settled"
-            # Preliminary reports get slightly lower confidence
-            model_prob = 0.99 if nws_is_finalized else 0.95
+            model_prob = 0.99
         elif cushion is not None and cushion >= -0.20:
             mode = "near-certain"
             model_prob = round(min(0.97, 0.90 + cushion / 0.5 * 0.07), 3)
