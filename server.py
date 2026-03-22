@@ -1337,6 +1337,22 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"error": str(e)})
 
+        elif path == "/debug/positions":
+            # Raw Kalshi position response — use to verify field names / units
+            try:
+                pos_r = requests.get(
+                    f"{KALSHI_BASE}/portfolio/positions",
+                    headers=kalshi_auth_headers("GET", "/trade-api/v2/portfolio/positions"),
+                    timeout=10,
+                    params={"limit": 10, "count_filter": "position"}
+                )
+                pos_r.raise_for_status()
+                raw = pos_r.json()
+                sample = raw.get("market_positions", [])[:3]
+                self.send_json({"ok": True, "raw_positions": sample, "count": len(raw.get("market_positions", []))})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
         elif path == "/ping":
             # Diagnostic: time each external source for one city
             import time
@@ -1816,21 +1832,24 @@ class Handler(BaseHTTPRequestHandler):
 
                     positions = []
                     for p in pos_data.get("market_positions", []):
-                        qty     = float(p.get("position_fp", 0) or 0)
-                        cost    = float(p.get("total_traded_dollars", 0) or 0)
-                        r_pnl   = float(p.get("realized_pnl_dollars", 0) or 0)
-                        mkt_exp = float(p.get("market_exposure_dollars", 0) or 0)
+                        # Kalshi API returns monetary values in CENTS (integers)
+                        # Field names have no _dollars suffix
+                        qty     = int(p.get("position", 0) or 0)
+                        cost    = float(p.get("total_traded", 0) or 0) / 100
+                        r_pnl   = float(p.get("realized_pnl", 0) or 0) / 100
+                        mkt_exp = float(p.get("market_exposure", 0) or 0) / 100
+                        fees    = float(p.get("fees_paid", 0) or 0) / 100
                         ur_pnl  = mkt_exp - cost  # unrealized = current exposure - cost basis
                         positions.append({
                             "ticker":        p.get("ticker", ""),
                             "market_title":  p.get("market_title", "") or p.get("ticker", ""),
                             "yes_contracts": qty,
                             "avg_yes_price": round(cost / max(qty, 1), 2),
-                            "market_value":  mkt_exp,
-                            "realized_pnl":  r_pnl,
+                            "market_value":  round(mkt_exp, 2),
+                            "realized_pnl":  round(r_pnl, 2),
                             "unrealized_pnl":round(ur_pnl, 2),
-                            "total_cost":    cost,
-                            "payout":        float(p.get("fees_paid_dollars", 0) or 0),
+                            "total_cost":    round(cost, 2),
+                            "payout":        round(fees, 2),
                         })
 
                     self.send_json({
