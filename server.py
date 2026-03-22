@@ -913,9 +913,18 @@ def analyze_value(markets, projected_total, days_remaining=10, true_mtd=None, nw
             analyzed.append(m); continue
 
         # Three-mode probability
-        # Pipeline already corrects for preliminary NWS: base = MTD - today + IEM gap fill.
-        # Result is equally reliable regardless of report timing, so threshold is always 0.10".
-        settled_min = 0.10
+        # Dynamic settled cushion — earlier in month = tighter threshold because:
+        #   - IEM gap fill is the edge (real-time vs stale NWS CLI)
+        #   - More days remaining = more runway to absorb any IEM/NWS measurement delta
+        #   - Speed of entry matters: earlier signal = lower ask price
+        if days_remaining >= 15:
+            settled_min = 0.02   # very early, maximum aggression
+        elif days_remaining >= 8:
+            settled_min = 0.05   # mid-month, moderate confidence
+        elif days_remaining >= 3:
+            settled_min = 0.10   # late month, current threshold
+        else:
+            settled_min = 0.15   # final days, must be certain
 
         if cushion is not None and cushion >= settled_min:
             mode = "settled"
@@ -964,11 +973,18 @@ def analyze_value(markets, projected_total, days_remaining=10, true_mtd=None, nw
         else:
             decision = "HOLD"
 
+        no_ask     = m.get("no_ask", 0)
+        no_gap     = round((1 - model_prob) - no_ask, 3)   # NO prob gap
+        no_gap_c   = round(no_gap * 100)
+        no_net_gap_c = max(0, no_gap_c - friction_c)
+
         m["edge"]          = edge
         m["mode"]          = mode
         m["model_prob"]    = model_prob
         m["cushion"]       = cushion
         m["gap_c"]         = gap_c
+        m["no_gap_c"]      = no_gap_c
+        m["no_net_gap_c"]  = no_net_gap_c
         m["margin"]        = margin
         m["confidence"]    = conf
         m["weighted_edge"] = weighted_edge
@@ -1917,6 +1933,184 @@ class Handler(BaseHTTPRequestHandler):
 
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
+
+        elif path.startswith("/orderbook/"):
+            # GET /orderbook/{ticker} — fetch Kalshi order book for sizing
+            ticker = path.split("/orderbook/")[1].strip("/")
+            if not ticker:
+                self.send_json({"ok": False, "error": "No ticker"})
+            else:
+                try:
+                    ob_path = f"/trade-api/v2/markets/{ticker}/orderbook"
+                    r = requests.get(
+                        f"{KALSHI_BASE}/markets/{ticker}/orderbook",
+                        headers=kalshi_auth_headers("GET", ob_path),
+                        timeout=8
+                    )
+                    r.raise_for_status()
+                    ob = r.json().get("orderbook", {})
+
+                    # YES asks: [[price_cents, size], ...] sorted ascending
+                    yes_asks = ob.get("yes", [])  # [[price, size], ...]
+
+                    # Compute available depth below edge_ceiling (97¢ for settled plays)
+                    EDGE_CEILING = 97
+                    depth = []
+                    total_contracts = 0
+                    total_cost = 0.0
+                    for level in yes_asks:
+                        price_c = int(level[0])
+                        size    = int(level[1])
+                        if price_c > EDGE_CEILING:
+                            break
+                        cost = round(price_c / 100 * size, 2)
+                        depth.append({"price_c": price_c, "size": size, "cost": cost})
+                        total_contracts += size
+                        total_cost += cost
+
+                    self.send_json({
+                        "ok":              True,
+                        "ticker":          ticker,
+                        "depth":           depth,
+                        "total_contracts": total_contracts,
+                        "total_cost":      round(total_cost, 2),
+                        "edge_ceiling_c":  EDGE_CEILING,
+                        "levels":          len(depth),
+                    })
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/orders" and self.command == "POST":
+            # POST /orders — execute a settled-play buy order
+            # Body: { "ticker": "KXRAINCHIM-26APR-4", "yes_price_c": 67, "count": 100 }
+            # Sweeps orderbook level by level up to edge_ceiling, respects cash balance
+            if not KALSHI_KEY_ID:
+                self.send_json({"ok": False, "error": "No Kalshi API key"})
+            else:
+                try:
+                    length = int(self.headers.get("Content-Length", 0))
+                    body   = json.loads(self.rfile.read(length))
+                    ticker      = body.get("ticker", "")
+                    side        = body.get("side", "yes").lower()
+                    count       = int(body.get("count", 0))
+                    yes_price_c = int(body.get("yes_price_c", 0))
+
+                    if not ticker or count <= 0 or yes_price_c <= 0:
+                        self.send_json({"ok": False, "error": "ticker, count, yes_price_c required"})
+                        return
+
+                    if yes_price_c > 97:
+                        self.send_json({"ok": False, "error": "yes_price_c exceeds edge ceiling (97¢)"})
+                        return
+
+                    order_path = "/trade-api/v2/orders"
+                    payload = {
+                        "ticker":    ticker,
+                        "side":      side,        # "yes" or "no"
+                        "action":    "buy",
+                        "type":      "limit",
+                        "count":     count,
+                        "yes_price": yes_price_c,
+                    }
+                    r = requests.post(
+                        f"{KALSHI_BASE}/orders",
+                        headers=kalshi_auth_headers("POST", order_path),
+                        json=payload,
+                        timeout=10
+                    )
+                    resp = r.json()
+                    if r.ok:
+                        self.send_json({
+                            "ok":     True,
+                            "ticker": ticker,
+                            "side":   side,
+                            "count":  count,
+                            "price_c": yes_price_c,
+                            "order":  resp,
+                        })
+                    else:
+                        self.send_json({"ok": False, "error": resp, "status": r.status_code})
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/orders/auto":
+            # GET /orders/auto?ticker=X — compute auto-size for a settled play
+            # Fetches orderbook + cash balance, returns recommended order list
+            # One order per price level, sweeping up to edge_ceiling
+            qs     = parse_qs(urlparse(self.path).query)
+            ticker = qs.get("ticker", [""])[0]
+            side   = qs.get("side", ["yes"])[0].lower()  # "yes" or "no"
+            if not ticker or not KALSHI_KEY_ID:
+                self.send_json({"ok": False, "error": "ticker and API key required"})
+            else:
+                try:
+                    EDGE_CEILING    = 97   # max price to buy (cents) — same for YES and NO
+                    MAX_POSITION_PCT = 0.40
+
+                    # Fetch cash balance
+                    bal_r = requests.get(
+                        f"{KALSHI_BASE}/portfolio/balance",
+                        headers=kalshi_auth_headers("GET", "/trade-api/v2/portfolio/balance"),
+                        timeout=8
+                    )
+                    bal_r.raise_for_status()
+                    bal       = bal_r.json()
+                    cash_c    = int(bal.get("balance", 0))
+                    port_c    = int(bal.get("portfolio_value", 0))
+                    cash_dollars  = cash_c / 100
+                    port_dollars  = port_c / 100
+
+                    # Fetch orderbook
+                    ob_path = f"/trade-api/v2/markets/{ticker}/orderbook"
+                    ob_r = requests.get(
+                        f"{KALSHI_BASE}/markets/{ticker}/orderbook",
+                        headers=kalshi_auth_headers("GET", ob_path),
+                        timeout=8
+                    )
+                    ob_r.raise_for_status()
+                    ob = ob_r.json().get("orderbook", {})
+
+                    # YES asks are in "yes" key; NO asks are in "no" key
+                    # Both sorted ascending by price
+                    asks = ob.get(side, [])
+
+                    budget = min(cash_dollars, port_dollars * MAX_POSITION_PCT)
+
+                    orders    = []
+                    spent     = 0.0
+                    for level in asks:
+                        price_c = int(level[0])
+                        size    = int(level[1])
+                        if price_c > EDGE_CEILING:
+                            break
+                        level_cost = price_c / 100 * size
+                        if spent + level_cost > budget:
+                            remaining = budget - spent
+                            partial   = int(remaining / (price_c / 100))
+                            if partial > 0:
+                                orders.append({"price_c": price_c, "count": partial,
+                                               "cost": round(partial * price_c / 100, 2)})
+                                spent += partial * price_c / 100
+                            break
+                        orders.append({"price_c": price_c, "count": size,
+                                       "cost": round(level_cost, 2)})
+                        spent += level_cost
+
+                    self.send_json({
+                        "ok":           True,
+                        "ticker":       ticker,
+                        "side":         side,
+                        "cash":         round(cash_dollars, 2),
+                        "portfolio":    round(port_dollars, 2),
+                        "budget":       round(budget, 2),
+                        "orders":       orders,
+                        "total_contracts": sum(o["count"] for o in orders),
+                        "total_cost":   round(spent, 2),
+                        "edge_ceiling_c": EDGE_CEILING,
+                        "max_position_pct": MAX_POSITION_PCT,
+                    })
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)})
 
         elif path == "/portfolio":
             # Fetch live Kalshi balance and positions

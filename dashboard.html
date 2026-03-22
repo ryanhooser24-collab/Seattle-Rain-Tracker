@@ -372,6 +372,7 @@ body{max-width:900px;margin:0 auto;}
     <button class="sf" id="sf-settled" onclick="setFilter('settled')">Already cleared</button>
     <button class="sf" id="sf-near" onclick="setFilter('near-certain')">Near certain</button>
     <button class="sf" id="sf-prob" onclick="setFilter('probabilistic')">Forecast-dependent</button>
+    <button class="sf" id="sf-no" onclick="setFilter('no-value')" style="color:var(--no)">NO value</button>
   </div>
   <div id="opp-list" class="opp-list">
     <div class="scan-loading">Scanning all cities...</div>
@@ -642,7 +643,9 @@ async function loadScanner(){
       // Use server-computed values if available, else fall back to JS model
       const serverModelP = m.model_prob!==undefined ? m.model_prob : null;
       const cushion=Math.round((mtd-strike)*100)/100;
-      const mode=m.mode||( cushion>=0.10?'settled':cushion>=-0.20?'near-certain':'probabilistic');
+      // Dynamic settled cushion — mirrors server analyze_value logic
+      const settledMin = daysLeft >= 15 ? 0.02 : daysLeft >= 8 ? 0.05 : daysLeft >= 3 ? 0.10 : 0.15;
+      const mode=m.mode||( cushion>=settledMin?'settled':cushion>=-0.20?'near-certain':'probabilistic');
       const SIGMA_TBL={11:1.4,10:1.4,9:1.3,8:1.2,7:1.0,6:.85,5:.7,4:.55,3:.4,2:.25,1:.15,0:.0};
       const sig=SIGMA_TBL[Math.min(daysLeft,11)]||1.5;
       const jsModelP=mode==='settled'?0.99:mode==='near-certain'?Math.min(0.97,0.90+(mtd-strike)/0.5*0.07):normCDF((proj-strike)/sig);
@@ -692,12 +695,64 @@ function normCDF(x){
 
 function renderScanner(results){
   const wrap=document.getElementById('opp-list');
+
+  // For NO filter: build NO-value results from same data
+  if(scanFilter==='no-value'){
+    const noResults = results.filter(r=>{
+      const noNet = r.no_net_gap_c||0;
+      return noNet >= 5 && r.decision !== 'SKIP — fully priced';
+    }).sort((a,b)=>(b.no_net_gap_c||0)-(a.no_net_gap_c||0));
+
+    if(!noResults.length){
+      wrap.innerHTML='<div class="scan-empty">No NO-value opportunities right now.</div>';
+      return;
+    }
+    wrap.innerHTML = noResults.map(r => {
+      const liq=r.liquidity||{};
+      const grade=liq.grade||'?';
+      const noNet=r.no_net_gap_c||0;
+      const noGap=r.no_gap_c||0;
+      const spread=liq.spread_c||1;
+      const noAsk=r.kalshiNo||0;
+      const maxDeploy=liq.max_deploy||500;
+      const mm=liq.market_maker||false;
+      const illiquid=grade==='D';
+      const modelNoP = Math.round((1-(r.modelP/100))*100);
+      return `<div class="opp probabilistic" onclick="goToCity('${r.city}')" style="border-left-color:var(--no)">
+        <div class="opp-inner">
+          <div class="opp-left">
+            <div class="opp-decision" style="color:var(--no)">
+              BUY NO · ${r.cityLabel} above ${r.strike}"
+            </div>
+            <div class="opp-context">
+              Model <b>${modelNoP}%</b> NO · market pricing NO at <b>${noAsk}¢</b> · <b>+${noGap}¢</b> gap · <b>${noNet}¢</b> net of spread
+            </div>
+            <div class="opp-context" style="margin-top:3px">
+              Projection <b>${(r.proj||0).toFixed(2)}"</b> vs strike <b>${r.strike}"</b> · ${r.daysLeft}d left · ${mm?'market maker active':'maker only'}
+            </div>
+          </div>
+          <div class="opp-right">
+            <div class="opp-net-gap" style="color:var(--no)">+${noNet}¢</div>
+            <div class="opp-meta-right">
+              ${noAsk}¢ NO
+              <span class="opp-grade-badge grade-${grade}">Grade ${grade}</span>
+              <br>${noGap}¢ gap − ${spread}¢ spread = ${noNet}¢ net
+              <br>$${maxDeploy} max
+            </div>
+            <button class="opp-size-btn" ${illiquid?'disabled':''} style="background:var(--no-lt,#fef2f2);color:var(--no);border-color:var(--no)" onclick="event.stopPropagation();addScanBet('${r.city}','${r.strike}',${noAsk},'${r.ticker}','no')">
+              ${illiquid?'Skip':'Buy NO $'+maxDeploy}
+            </button>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+    return;
+  }
+
   const filtered=results.filter(r=>{
     const net=r.net_gap_c!==undefined?r.net_gap_c:r.gap;
     // Always exclude: fully priced (≥99¢), zero net gap, or explicitly skipped
     if(r.kalshiP>=99||net<=0||r.decision==='SKIP — fully priced')return false;
-    // Forecast-dependent: only show where projection EXCEEDS the strike
-    // "bet with the forecast" — never show a probabilistic play against our own model
     const projClearsStrike = r.proj >= r.strike;
     if(scanFilter==='all'){
       return net>=5;
@@ -732,17 +787,20 @@ function renderScanner(results){
        netGap>=8?'BUY YES':illiquid?'SKIP — illiquid':'HOLD');
 
     // One sentence why
+    const settledMinDisp = r.daysLeft >= 15 ? 0.02 : r.daysLeft >= 8 ? 0.05 : r.daysLeft >= 3 ? 0.10 : 0.15;
     const why=r.mode==='settled'
-      ?`MTD already <b>+${r.cushion}" above</b> the ${r.strike}" strike.
+      ?`MTD <b>+${r.cushion}" above</b> the ${r.strike}" strike (threshold: ${settledMinDisp}" · ${r.daysLeft}d left).
         ${r.cushion>=0.50
-          ? 'Strong cushion — NWS correction would need to be unusually large to reverse.'
-          : r.cushion>=0.25
-            ? 'Moderate cushion — low but non-zero risk from IEM drift.'
-            : 'Thin cushion — small IEM drift could change classification.'
-        } Based on overnight NWS base + IEM gap fill.`
+          ? 'Strong cushion — very high confidence.'
+          : r.cushion>=0.15
+            ? 'Solid cushion — IEM/NWS delta unlikely to reverse.'
+            : r.daysLeft >= 8
+              ? 'Thin cushion — but ample runway remaining. Monitor daily.'
+              : 'Thin cushion — late month, watch closely.'
+        } NWS base + IEM gap fill.`
       :r.mode==='near-certain'
       ?`MTD <b>${r.mtd.toFixed(2)}"</b> is at the ${r.strike}" strike — negligible forecast risk remaining.`
-      :`Projection <b>${r.proj.toFixed(2)}"</b> clears ${r.strike}" by ${(r.proj-r.strike).toFixed(2)}" but ${r.daysLeft} days of forecast risk remain. Check again at 7 days.`;
+      :`Projection <b>${r.proj.toFixed(2)}"</b> clears ${r.strike}" by ${(r.proj-r.strike).toFixed(2)}" but ${r.daysLeft} days of forecast risk remain.`;
 
     // Hold/exit guidance
     const holdNote=r.mode==='settled'
@@ -775,8 +833,8 @@ function renderScanner(results){
             <br>${rawGap}¢ gap − ${spread}¢ spread = ${netGap}¢ net
             <br>$${maxDeploy} max · ${mm?'market maker active':'maker only'}
           </div>
-          <button class="opp-size-btn" ${illiquid?'disabled':''} onclick="event.stopPropagation();addScanBet('${r.city}','${r.strike}',${r.kalshiP})">
-            ${illiquid?'Skip':'Buy $'+maxDeploy}
+          <button class="opp-size-btn" ${illiquid?'disabled':''} onclick="event.stopPropagation();addScanBet('${r.city}','${r.strike}',${r.kalshiP},'${r.ticker}','${r.mode}')">
+            ${illiquid?'Skip':r.mode==='settled'?'⚡ Auto-buy $'+maxDeploy:'Buy $'+maxDeploy}
           </button>
         </div>
       </div>
@@ -791,10 +849,83 @@ function goToCity(city){
   if(sel)sel.value=city;
 }
 
-function addScanBet(city,strike,price){
-  const k=`${city}-${strike}`;
-  betSlip[k]=(betSlip[k]||0)+100;
+function addScanBet(city, strike, price, ticker, mode) {
+  if (mode === 'settled') {
+    autoExecuteSettled(ticker, city, strike, 'yes');
+    return;
+  }
+  if (mode === 'no') {
+    autoExecuteSettled(ticker, city, strike, 'no');
+    return;
+  }
+  // Non-settled YES: add to manual bet slip
+  const k = `${city}-${strike}`;
+  betSlip[k] = (betSlip[k] || 0) + 100;
   updatePlaceBtn();
+}
+
+async function autoExecuteSettled(ticker, city, strike, side='yes') {
+  if (!ticker) { showToast('No ticker available for this market', 'error'); return; }
+
+  const sideLabel = side === 'yes' ? 'YES' : 'NO';
+  const ok = confirm(
+    `AUTO-EXECUTE ${sideLabel} PLAY\n\n` +
+    `${ticker}\n` +
+    `Will sweep ${sideLabel} orderbook up to ${side==='yes'?'97':'97'}¢, capped at 40% of portfolio.\n\n` +
+    `Proceed?`
+  );
+  if (!ok) return;
+
+  showToast(`Fetching orderbook for ${ticker} ${sideLabel}...`, 'info');
+
+  try {
+    const autoRes = await fetch(`${SERVER}/orders/auto?ticker=${ticker}&side=${side}`);
+    const auto = await autoRes.json();
+    if (!auto.ok) { showToast('Auto-size failed: ' + (auto.error || 'unknown'), 'error'); return; }
+    if (!auto.orders || auto.orders.length === 0) {
+      showToast(`No available ${sideLabel} depth below ceiling`, 'error'); return;
+    }
+
+    showToast(`Placing ${auto.orders.length} order(s) · ${auto.total_contracts} contracts · $${auto.total_cost}...`, 'info');
+
+    let filled = 0, failed = 0;
+    for (const o of auto.orders) {
+      const r = await fetch(SERVER + '/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ticker, side, yes_price_c: o.price_c, count: o.count })
+      });
+      const res = await r.json();
+      if (res.ok) filled += o.count;
+      else { failed++; console.error('Order failed:', res); }
+    }
+
+    if (filled > 0) {
+      showToast(`✓ ${filled} ${sideLabel} contracts placed on ${ticker}. Refresh Positions to confirm.`, 'success');
+      scanCache = null;
+    }
+    if (failed > 0) showToast(`${failed} order level(s) failed — check console`, 'error');
+
+  } catch (e) {
+    showToast('Execution error: ' + e.message, 'error');
+  }
+}
+
+// Toast notification system
+function showToast(msg, type='info') {
+  let wrap = document.getElementById('toast-wrap');
+  if (!wrap) {
+    wrap = document.createElement('div');
+    wrap.id = 'toast-wrap';
+    wrap.style.cssText = 'position:fixed;bottom:24px;right:24px;z-index:9999;display:flex;flex-direction:column;gap:8px;max-width:360px';
+    document.body.appendChild(wrap);
+  }
+  const t = document.createElement('div');
+  const bg = type === 'success' ? 'var(--yes)' : type === 'error' ? 'var(--no)' : 'var(--ink)';
+  t.style.cssText = `background:${bg};color:#fff;padding:10px 14px;border-radius:6px;font-size:11px;font-family:'DM Mono',monospace;line-height:1.5;box-shadow:0 2px 8px rgba(0,0,0,.2);`;
+  t.textContent = msg;
+  wrap.appendChild(t);
+  setTimeout(() => t.remove(), type === 'error' ? 6000 : 4000);
 }
 
 function toggleTheme(){
