@@ -145,9 +145,9 @@ CITIES = {
         "label":         "New York, NY",
     },
     "chicago": {
-        "icao_code":     "KORD",
+        "icao_code":     "KMDW",          # Kalshi settles on Midway (KMDW), NOT O'Hare (KORD)
         "nws_site":      "LOT",
-        "nws_issuedby":  "ORD",
+        "nws_issuedby":  "MDW",           # Midway CLI report, not ORD
         "kalshi_series": "KXRAINCHIM",
         "lat": 41.786, "lon": -87.752,  "tz": "America/Chicago",
         "regime":        "mixed",
@@ -402,6 +402,124 @@ def fetch_nws_mtd(city_cfg=None):
 
     except Exception as e:
         return {"ok": False, "error": str(e), "mtd": 0.0, "today": 0.0, "date": "", "source": "NWS CLI"}
+
+
+
+# ── CLM ACTUALS CACHE ─────────────────────────────────────────────────────────
+# Keyed by city_key → { "YYYY-MM": inches, ... }
+# Populated on first backtest request, refreshed if > 6 hours old
+import time as _time
+_CLM_CACHE = {}          # { city_key: { "YYYY-MM": float } }
+_CLM_CACHE_TS = {}       # { city_key: float (unix ts) }
+_CLM_CACHE_TTL = 6 * 3600  # 6 hours
+
+def fetch_nws_clm_actuals(city_key):
+    """
+    Fetch historical monthly precipitation actuals from NWS CLM product.
+    CLM = Monthly Weather Summary — issued once per month, contains
+    'TOTAL PRECIPITATION' table with daily values + monthly total.
+    Returns { "YYYY-MM": inches } for the last ~14 months.
+    """
+    cfg = CITIES.get(city_key)
+    if not cfg:
+        return {}
+
+    now = _time.time()
+    if city_key in _CLM_CACHE and (now - _CLM_CACHE_TS.get(city_key, 0)) < _CLM_CACHE_TTL:
+        return _CLM_CACHE[city_key]
+
+    actuals = {}
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    # Fetch last 14 CLM versions (1 per month usually, some offices issue corrections)
+    clm_url = (f"https://forecast.weather.gov/product.php"
+               f"?site={cfg['nws_site']}"
+               f"&issuedby={cfg['nws_issuedby']}"
+               f"&product=CLM&format=txt")
+
+    for version in range(1, 16):
+        try:
+            url = clm_url + f"&version={version}"
+            r = requests.get(url, headers=headers, timeout=8)
+            if not r.ok:
+                break
+            soup = BeautifulSoup(r.text, "html.parser")
+            pre  = soup.find("pre")
+            raw  = pre.get_text() if pre else r.text
+
+            # Extract month/year from header e.g. "CLIMATE REPORT FOR FEBRUARY 2026"
+            month_match = re.search(
+                r"(?:CLIMATE REPORT FOR|MONTHLY SUMMARY FOR|SUMMARY FOR)\s+"
+                r"([A-Z]+)\s+(\d{4})",
+                raw, re.IGNORECASE
+            )
+            if not month_match:
+                # Try alternate: "MONTHLY WEATHER SUMMARY...JANUARY 2026"
+                month_match = re.search(
+                    r"\b(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|"
+                    r"SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+(\d{4})\b",
+                    raw, re.IGNORECASE
+                )
+            if not month_match:
+                continue
+
+            month_name = month_match.group(1).upper()
+            year       = int(month_match.group(2))
+            month_map  = {"JANUARY":1,"FEBRUARY":2,"MARCH":3,"APRIL":4,
+                          "MAY":5,"JUNE":6,"JULY":7,"AUGUST":8,
+                          "SEPTEMBER":9,"OCTOBER":10,"NOVEMBER":11,"DECEMBER":12}
+            month_num  = month_map.get(month_name)
+            if not month_num:
+                continue
+            month_key = f"{year}-{month_num:02d}"
+
+            # Extract monthly total precipitation
+            # Pattern 1: "TOTAL PRECIPITATION  X.XX" or "MONTHLY PRECIP  X.XX"
+            total_match = re.search(
+                r"(?:TOTAL PRECIP(?:ITATION)?|MONTHLY PRECIP(?:ITATION)?)"
+                r"\s+([\d\.]+|T)\b",
+                raw, re.IGNORECASE
+            )
+            if not total_match:
+                # Pattern 2: look for precipitation summary line
+                # e.g. "PRECIPITATION   3.14   ..."
+                total_match = re.search(
+                    r"^PRECIPITATION\s+([\d\.]+|T)",
+                    raw, re.IGNORECASE | re.MULTILINE
+                )
+            if not total_match:
+                # Pattern 3: sum daily precip values from the table
+                # Find lines like " 1   0.00   0.00 ..." under PRECIPITATION section
+                # Fallback: skip this version
+                continue
+
+            val_str = total_match.group(1).strip()
+            if val_str == "T":
+                actuals[month_key] = 0.0
+            else:
+                actuals[month_key] = float(val_str)
+
+        except Exception:
+            continue
+
+    # Merge with hardcoded Seattle values so we never lose confirmed data
+    HARDCODED = {
+        "seattle": {
+            "2024-10": 2.15,
+            "2024-11": 4.86,
+            "2024-12": 5.50,
+            "2025-01": 1.92,
+            "2025-11": 5.71,
+            "2025-12": 7.37,
+            "2026-01": 3.19,
+            "2026-02": 2.92,
+        }
+    }
+    merged = {**HARDCODED.get(city_key, {}), **actuals}  # live data wins on conflict
+
+    _CLM_CACHE[city_key]    = merged
+    _CLM_CACHE_TS[city_key] = now
+    return merged
 
 
 def fetch_wu_hourly(city_cfg=None):
@@ -1498,30 +1616,10 @@ class Handler(BaseHTTPRequestHandler):
                 results = []
                 today = date.today()
 
-                # Pull settlements from Postgres if available
-                # Confirmed NWS monthly actuals — sourced from official CLMSEA reports
-                # "last year" column cross-referenced with monthly CLM reports
-                CONFIRMED_ACTUALS = {
-                    "seattle": {
-                        "2024-10": 2.15,  # from Nov 2025 CLM "last year" column
-                        "2024-11": 4.86,  # from Nov 2025 CLM "last year" column
-                        "2024-12": 5.50,  # from Dec 2025 CLM "last year" column
-                        "2025-01": 1.92,  # confirmed multiple sources
-                        "2025-11": 5.71,  # NWS CLMSEA confirmed
-                        "2025-12": 7.37,  # NWS CLMSEA confirmed
-                        "2026-01": 3.19,  # NWS CLMSEA confirmed
-                        "2026-02": 2.92,  # NWS CLMSEA confirmed
-                    },
-                    "portland": {},
-                    "los_angeles": {},
-                    "san_francisco": {},
-                    "new_york": {},
-                    "chicago": {},
-                    "miami": {},
-                    "denver": {},
-                }
-                settlements = CONFIRMED_ACTUALS.get(city_key, {})
-                # Also try Postgres if available (adds any manually entered settlements)
+                # Fetch live NWS CLM actuals (cached 6h), merged with hardcoded fallbacks
+                settlements = fetch_nws_clm_actuals(city_key)
+
+                # Also merge any manually entered settlements from Postgres
                 conn = get_db()
                 if conn:
                     try:
@@ -1548,7 +1646,7 @@ class Handler(BaseHTTPRequestHandler):
                     days_in_month = cal_mod.monthrange(year, month)[1]
                     last_day = date(year, month, days_in_month)
                     month_key     = f"{city_key}-{year}-{month:02d}"  # for Postgres
-                    actual_key    = f"{year}-{month:02d}"              # for CONFIRMED_ACTUALS
+                    actual_key    = f"{year}-{month:02d}"
 
                     actual = settlements.get(actual_key) or settlements.get(month_key)
 
@@ -1624,6 +1722,27 @@ class Handler(BaseHTTPRequestHandler):
                     "note":    "sigma values can replace SIGMA_TABLE in analyze_value for calibrated probabilities"
                 })
 
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/backtest/actuals":
+            # Debug: show what CLM scraper found for a city
+            # ?city=chicago  → returns { "YYYY-MM": inches } + cache status
+            qs       = parse_qs(urlparse(self.path).query)
+            city_key = qs.get("city", ["seattle"])[0]
+            force    = qs.get("force", ["0"])[0] == "1"
+            if force:
+                _CLM_CACHE_TS[city_key] = 0  # bust cache
+            try:
+                actuals = fetch_nws_clm_actuals(city_key)
+                self.send_json({
+                    "ok":      True,
+                    "city":    city_key,
+                    "actuals": actuals,
+                    "count":   len(actuals),
+                    "cached":  not force,
+                    "note":    "Add ?force=1 to bypass 6h cache and re-scrape NWS CLM"
+                })
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
