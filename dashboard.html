@@ -1467,7 +1467,7 @@ loadData();
 <!-- BACKTEST TAB -->
 <div id="s-bt" class="section" style="display:none">
   <div style="max-width:900px;margin:0 auto;padding:0 16px">
-    <div style="display:flex;align-items:center;gap:16px;margin-bottom:24px;flex-wrap:wrap">
+    <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px;flex-wrap:wrap">
       <h2 style="font-size:13px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin:0">Forecast Backtest</h2>
       <select id="bt-city" style="font-family:'DM Mono',monospace;font-size:11px;background:var(--card);border:1px solid var(--border);color:var(--ink);padding:6px 10px;border-radius:4px">
         <option value="seattle">Seattle</option>
@@ -1480,7 +1480,17 @@ loadData();
         <option value="denver">Denver</option>
       </select>
       <button onclick="runBacktest()" style="font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:var(--rain);color:#fff;border:none;padding:8px 18px;border-radius:4px;cursor:pointer">Run Backtest</button>
+      <button onclick="testAllCitiesActuals()" style="font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:var(--card);color:var(--ink);border:1px solid var(--border);padding:8px 18px;border-radius:4px;cursor:pointer">Test All Cities</button>
       <span id="bt-status" style="font-size:11px;color:var(--muted)"></span>
+    </div>
+
+    <!-- All Cities Actuals Panel -->
+    <div id="all-cities-panel" style="display:none;margin-bottom:20px;background:var(--card);border:1px solid var(--border);border-radius:6px;overflow:hidden">
+      <div style="padding:10px 14px;border-bottom:0.5px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+        <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)">CLM Actuals Coverage — All 8 Cities</div>
+        <span id="all-cities-status" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+      <div id="all-cities-table" style="font-family:'DM Mono',monospace;font-size:11px"></div>
     </div>
 
     <!-- Summary sigma cards -->
@@ -1607,6 +1617,73 @@ async function runBiasCalibration(){
     result.style.display='block';
     status.textContent=Object.keys(bias).length+' horizons calibrated';
   }catch(e){status.textContent='Failed: '+e.message;}
+}
+
+async function testAllCitiesActuals(){
+  const CITIES = [
+    {key:'seattle',      label:'Seattle'},
+    {key:'portland',     label:'Portland'},
+    {key:'chicago',      label:'Chicago'},
+    {key:'los_angeles',  label:'Los Angeles'},
+    {key:'san_francisco',label:'San Francisco'},
+    {key:'miami',        label:'Miami'},
+    {key:'denver',       label:'Denver'},
+    {key:'new_york',     label:'New York'},
+  ];
+  const panel  = document.getElementById('all-cities-panel');
+  const table  = document.getElementById('all-cities-table');
+  const status = document.getElementById('all-cities-status');
+  panel.style.display = 'block';
+  status.textContent  = 'Fetching...';
+  table.innerHTML     = '<div style="padding:12px 14px;color:var(--muted)">Loading all cities...</div>';
+
+  const results = await Promise.all(CITIES.map(async c => {
+    try {
+      const r = await fetch(`${SERVER}/backtest/actuals?city=${c.key}&force=1`);
+      const d = await r.json();
+      return { ...c, ok: d.ok, count: d.count||0, actuals: d.actuals||{} };
+    } catch(e) {
+      return { ...c, ok: false, count: 0, actuals: {} };
+    }
+  }));
+
+  // Get all unique month keys across all cities, sorted descending
+  const allMonths = [...new Set(results.flatMap(r => Object.keys(r.actuals)))]
+    .sort().reverse().slice(0, 14);
+
+  // Build table
+  const headerCells = allMonths.map(m =>
+    `<th style="text-align:right;padding:6px 8px;color:var(--muted);font-weight:400;white-space:nowrap">${m.slice(2)}</th>`
+  ).join('');
+
+  const rows = results.map(r => {
+    const cells = allMonths.map(m => {
+      const v = r.actuals[m];
+      return v !== undefined
+        ? `<td style="text-align:right;padding:5px 8px">${v.toFixed(2)}"</td>`
+        : `<td style="text-align:right;padding:5px 8px;color:var(--border)">--</td>`;
+    }).join('');
+    const statusColor = r.count >= 12 ? 'var(--yes)' : r.count > 0 ? '#854F0B' : 'var(--no)';
+    return `<tr style="border-bottom:0.5px solid var(--border)">
+      <td style="padding:5px 12px;font-weight:500;white-space:nowrap">${r.label}</td>
+      <td style="padding:5px 8px;text-align:center;color:${statusColor}">${r.count}mo</td>
+      ${cells}
+    </tr>`;
+  }).join('');
+
+  table.innerHTML = `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:10px">
+    <thead><tr style="border-bottom:1px solid var(--border)">
+      <th style="text-align:left;padding:6px 12px;color:var(--muted);font-weight:400">City</th>
+      <th style="text-align:center;padding:6px 8px;color:var(--muted);font-weight:400">Cov</th>
+      ${headerCells}
+    </tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`;
+
+  const total = results.reduce((s,r) => s + r.count, 0);
+  const allGood = results.every(r => r.count >= 12);
+  status.textContent = `${total} total months · ${allGood ? 'All cities OK' : 'Some cities incomplete'}`;
+  status.style.color = allGood ? 'var(--yes)' : '#854F0B';
 }
 
 async function loadBacktest(){}  // called on tab switch, does nothing until user clicks Run
