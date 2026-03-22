@@ -1648,7 +1648,7 @@ class Handler(BaseHTTPRequestHandler):
                         try:
                             # Open-Meteo Previous Runs API
                             # past_days=N returns what was predicted N days ago
-                            _pvar = f"precipitation_sum_previous_day{min(lead, 7)}"
+                            _pvar = f"precipitation_previous_day{min(lead, 7)}"
                             r = requests.get(OM_PREV_URL, params={
                                 "latitude":      cfg["lat"],
                                 "longitude":     cfg["lon"],
@@ -2039,7 +2039,7 @@ class Handler(BaseHTTPRequestHandler):
                     days_in_month = cal_mod.monthrange(year, month)[1]
                     for lead in [1, 3, 5, 7, 10]:
                         try:
-                            _pvar = f"precipitation_sum_previous_day{min(lead, 7)}"
+                            _pvar = f"precipitation_previous_day{min(lead, 7)}"
                             r = requests.get(OM_PREV_URL, params={
                                 "latitude": cfg["lat"], "longitude": cfg["lon"],
                                 "hourly": _pvar, "timezone": cfg["tz"],
@@ -2068,31 +2068,32 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(e)})
 
         elif path == "/debug/om":
-            # Test Open-Meteo Previous Runs API - try different variable formats
-            results = {}
-            base_params = {
-                "latitude": 47.441, "longitude": -122.3,
-                "timezone": "America/Los_Angeles",
-                "past_days": 1, "forecast_days": 3,
-            }
-            # Test candidates based on docs example: temperature_2m_previous_day1
-            # So precipitation equivalent should be: precipitation_previous_day1
-            candidates = [
-                ("hourly", "precipitation_previous_day1"),
-                ("hourly", "rain_previous_day1"),
-                ("daily",  "precipitation_sum"),   # day 0 only, no previous day suffix for daily?
-                ("hourly", "precipitation"),        # just current data, no previous
-            ]
-            for param_key, var_name in candidates:
-                try:
-                    p = {**base_params, param_key: var_name}
-                    r = requests.get(OM_PREV_URL, params=p, timeout=8)
-                    ok = r.ok
-                    preview = r.text[:200] if not r.ok else f"OK - keys: {list(r.json().get(param_key,{}).keys())[:5]}"
-                    results[f"{param_key}={var_name}"] = {"ok": ok, "status": r.status_code, "preview": preview}
-                except Exception as e:
-                    results[f"{param_key}={var_name}"] = {"ok": False, "error": str(e)}
-            self.send_json({"ok": True, "tests": results})
+            # Test Open-Meteo Previous Runs API - confirmed working format
+            try:
+                var = "precipitation_previous_day1"
+                r = requests.get(OM_PREV_URL, params={
+                    "latitude": 47.441, "longitude": -122.3,
+                    "hourly": var,
+                    "timezone": "America/Los_Angeles",
+                    "past_days": 1, "forecast_days": 3,
+                }, timeout=8)
+                r.raise_for_status()
+                data = r.json()
+                hours  = data.get("hourly", {}).get("time", [])
+                precip = data.get("hourly", {}).get(var, [])
+                # Sum mm for first available day as sanity check
+                today = hours[0][:10] if hours else ""
+                day_mm = sum(float(p or 0) for h, p in zip(hours, precip) if h and h[:10] == today)
+                self.send_json({
+                    "ok": True, "variable": var,
+                    "hours_returned": len(hours),
+                    "sample_day": today,
+                    "sample_day_mm": round(day_mm, 2),
+                    "sample_day_inches": round(day_mm / 25.4, 3),
+                    "first_5_values_mm": precip[:5],
+                })
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
 
         elif path == "/calibrate/all":
             # Runs backtest (sigma) + bias calibration for all 8 cities in parallel.
@@ -2131,7 +2132,7 @@ class Handler(BaseHTTPRequestHandler):
                         om_errors = []
                         for lead in [1, 3, 5, 7, 10]:
                             try:
-                                _pvar = f"precipitation_sum_previous_day{min(lead, 7)}"
+                                _pvar = f"precipitation_previous_day{min(lead, 7)}"
                                 r = requests.get(OM_PREV_URL, params={
                                     "latitude":      cfg["lat"],
                                     "longitude":     cfg["lon"],
