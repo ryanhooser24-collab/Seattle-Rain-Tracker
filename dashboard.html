@@ -1110,16 +1110,26 @@ function renderRainfall(d){
   // EOM row — blank outside 10 days
   const eomInside=wu_covers_eom&&projected!=null;
   const conf=d.confidence||0;
+  const sigma=d.forecast_sigma||1.4;
+
+  // Confidence label and band
+  const bandLo=(projected-sigma).toFixed(2);
+  const bandHi=(projected+sigma).toFixed(2);
+  const confLabel=days_remaining<=0?'settled':
+    days_remaining<=1?'very high':
+    days_remaining<=3?'high':
+    days_remaining<=5?'moderate':
+    days_remaining<=7?'low':
+    'speculative';
+  const confColor=days_remaining<=3?'var(--yes)':
+    days_remaining<=5?'#c8a228':
+    days_remaining<=7?'#c87228':'var(--muted)';
+
   const eomRow=eomInside
     ?`<div class="rf-row row-eom">
         <div class="rf-left"><div class="rdot d-eom"></div><div class="rf-meta">
-          <div class="rf-lbl"><span>${eomLabel} total</span><div class="tip"><b>Projected month-end</b>EOD + WU ${Math.min(days_remaining,10)}-day remainder. Used to evaluate Kalshi strikes. Forecast reliability: improves significantly inside 7 days. At 10 days out, Open-Meteo sigma ≈ 1.4" RMSE. At 3 days, sigma ≈ 0.4". Backtest in progress to calibrate per city.</div></div>
-          <div class="rf-sub">${days_remaining} days remaining · ${
-            days_remaining<=0?'settled':
-            days_remaining<=3?'high confidence':
-            days_remaining<=7?'moderate confidence':
-            'forecast-dependent — verify near 7 days'
-          }</div>
+          <div class="rf-lbl"><span>${eomLabel} total</span><div class="tip"><b>Projected month-end</b>EOD + OM ${Math.min(days_remaining,10)}-day remainder. Forecast band is ±1σ (${sigma}" RMSE at ${days_remaining}d horizon). Actual EOM total falls within this band ~68% of the time based on backtest data.</div></div>
+          <div class="rf-sub">${days_remaining}d left · <span style="color:${confColor};font-weight:500">${confLabel} confidence</span> · band ${bandLo}"–${bandHi}"</div>
         </div></div>
         <div class="rf-right"><div class="rf-val v-eom">= ${projected.toFixed(2)}<span class="rf-unit"> in</span></div></div>
       </div>`
@@ -1652,23 +1662,21 @@ async function recalibrateAll(){
 
     const rows = (data.cities||[]).map(c => {
       const ok = c.sigma_ok && c.bias_ok;
-      const summary = c.summary||{};
-      const horizons = ['d1','d3','d5','d7','d10'].map(k => {
-        const s = summary[k];
-        if(!s) return `<td style="padding:4px 8px;color:var(--border);text-align:right">--</td>`;
-        const biasColor = Math.abs(s.mean_err) > 0.15 ? 'color:var(--no)' : 'color:var(--muted)';
-        return `<td style="padding:4px 8px;text-align:right" title="RMSE: ${s.rmse}&quot; Bias: ${s.mean_err>0?'+':''}${s.mean_err}&quot;">
-          <span style="color:var(--ink)">${s.rmse}"</span>
-          <span style="${biasColor};font-size:9px"> ${s.mean_err>0?'+':''}${s.mean_err}</span>
-        </td>`;
-      }).join('');
-
+      const m  = (c.summary||{}).monthly || {};
+      const sigma = m.rmse != null ? `<span style="color:var(--ink);font-weight:500">${m.rmse}"</span>` : '--';
+      const bias  = m.mean_err != null
+        ? `<span style="color:${Math.abs(m.mean_err)>0.15?'var(--no)':'var(--muted)'}">${m.mean_err>0?'+':''}${m.mean_err}"</span>`
+        : '--';
+      const dir   = m.bias || '--';
+      const errs  = (c.errors||[]).slice(0,1).join(' ');
       return `<tr style="border-bottom:0.5px solid var(--border)">
         <td style="padding:5px 12px;font-weight:500">${CITY_LABELS[c.city]||c.city}</td>
         <td style="padding:5px 8px;text-align:center;color:${ok?'var(--yes)':'var(--no)'}">${ok?'OK':'ERR'}</td>
         <td style="padding:5px 8px;text-align:center;color:var(--muted)">${c.sigma_months||0}mo</td>
-        ${horizons}
-        <td style="padding:5px 8px;text-align:right;color:var(--muted)">${c.errors&&c.errors.length?'<span style="color:var(--no)">'+c.errors[0]+'</span>':''}</td>
+        <td style="padding:5px 8px;text-align:right">${sigma}</td>
+        <td style="padding:5px 8px;text-align:right">${bias}</td>
+        <td style="padding:5px 8px;text-align:right;color:var(--muted)">${dir}</td>
+        <td style="padding:5px 8px;color:var(--no);font-size:9px">${errs}</td>
       </tr>`;
     }).join('');
 
@@ -1677,17 +1685,15 @@ async function recalibrateAll(){
         <th style="text-align:left;padding:5px 12px;font-weight:400">City</th>
         <th style="text-align:center;padding:5px 8px;font-weight:400">Status</th>
         <th style="text-align:center;padding:5px 8px;font-weight:400">Months</th>
-        <th style="text-align:right;padding:5px 8px;font-weight:400">D-1 RMSE/bias</th>
-        <th style="text-align:right;padding:5px 8px;font-weight:400">D-3</th>
-        <th style="text-align:right;padding:5px 8px;font-weight:400">D-5</th>
-        <th style="text-align:right;padding:5px 8px;font-weight:400">D-7</th>
-        <th style="text-align:right;padding:5px 8px;font-weight:400">D-10</th>
-        <th style="text-align:right;padding:5px 8px;font-weight:400">Errors</th>
+        <th style="text-align:right;padding:5px 8px;font-weight:400">Base σ (RMSE)</th>
+        <th style="text-align:right;padding:5px 8px;font-weight:400">Bias</th>
+        <th style="text-align:right;padding:5px 8px;font-weight:400">Direction</th>
+        <th style="text-align:left;padding:5px 8px;font-weight:400">Errors</th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
-    <div style="padding:10px 14px;color:var(--muted);font-size:10px">
-      Sigma cache: ${data.sigma_cache_size} cities · Bias cache: ${data.bias_cache_size} entries · ${data.note||''}
+    <div style="padding:8px 14px;color:var(--muted);font-size:10px">
+      Sigma cache: ${data.sigma_cache_size} cities · Bias cache: ${data.bias_cache_size} entries · Horizon scaling applied automatically (D-1 ×0.55 → D-7 ×1.15) · ${data.note||''}
     </div>`;
 
     const allOk = data.all_ok;

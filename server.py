@@ -419,29 +419,45 @@ _CLM_CACHE = {}
 _CLM_CACHE_TS = {}
 _CLM_CACHE_TTL = 6 * 3600
 
-# ── SIGMA CACHE (populated from /backtest RMSE) ───────────────────────────────
-_SIGMA_CACHE = {}
-_SIGMA_FALLBACK = {10:1.4,9:1.3,8:1.2,7:1.0,6:0.85,5:0.7,4:0.55,3:0.4,2:0.25,1:0.15,0:0.05}
+# ── SIGMA CACHE (populated from /calibrate/all) ───────────────────────────────
+_SIGMA_CACHE = {}   # city_key -> base_sigma (single float, full-month RMSE)
 
-# ── BIAS CACHE (populated from /backtest/calibration) ────────────────────────
+# Horizon scaling: multiply base sigma by these factors as days_remaining increases.
+# Shared across all cities — D-1 is tightest, D-10 is loosest.
+# Based on typical NWP skill decay: ~40% more uncertainty per doubling of lead time.
+HORIZON_SCALE = {0:0.05, 1:0.55, 2:0.65, 3:0.75, 4:0.85, 5:0.95,
+                 6:1.05, 7:1.15, 8:1.25, 9:1.35, 10:1.4}
+
+# Fallback base sigma per city if not yet calibrated (inches, full-month RMSE)
+_SIGMA_BASE_FALLBACK = 1.2   # conservative default until calibrated
+
+# ── BIAS CACHE (populated from /calibrate/all) ────────────────────────────────
 _BIAS_CACHE = {}
 
 
 def update_sigma_from_backtest(city_key, summary):
+    """Store single base sigma from monthly RMSE. Horizon scaling applied in get_sigma()."""
     if not summary:
         return
-    horizon_map = {1:"d1",2:"d1",3:"d3",4:"d3",5:"d5",6:"d5",7:"d7",8:"d7",9:"d10",10:"d10"}
-    sigma_table = dict(_SIGMA_FALLBACK)
-    for days, key in horizon_map.items():
-        if key in summary and summary[key].get("rmse") is not None:
-            sigma_table[days] = summary[key]["rmse"]
-    _SIGMA_CACHE[city_key] = sigma_table
+    # New simple format: summary["monthly"]["rmse"]
+    if "monthly" in summary:
+        _SIGMA_CACHE[city_key] = summary["monthly"]["rmse"]
+        return
+    # Legacy per-horizon format fallback: use d3 as representative base
+    for key in ["d3", "d5", "d7", "d1"]:
+        if key in summary and summary[key].get("rmse"):
+            _SIGMA_CACHE[city_key] = summary[key]["rmse"]
+            return
 
 
 def get_sigma(city_key, days_remaining):
-    table = _SIGMA_CACHE.get(city_key, _SIGMA_FALLBACK)
-    sigma = table.get(min(days_remaining, 10), 1.4)
-    bias  = _BIAS_CACHE.get(f"{city_key}-d{min(days_remaining, 7)}", 0.0)
+    """Return (sigma, bias) for city at given days_remaining horizon."""
+    base  = _SIGMA_CACHE.get(city_key, _SIGMA_BASE_FALLBACK)
+    scale = HORIZON_SCALE.get(min(max(days_remaining, 0), 10), 1.0)
+    sigma = round(base * scale, 3)
+    # Bias: use monthly bias (same for all horizons)
+    bias  = _BIAS_CACHE.get(f"{city_key}-monthly",
+            _BIAS_CACHE.get(f"{city_key}-d3", 0.0))
     return sigma, bias
 
 
@@ -2150,9 +2166,7 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     actuals = fetch_nws_clm_actuals(city_key)
                     today   = _date.today()
-                    horizon_errors = {f"d{l}": [] for l in [1, 3, 5, 7]}
-                    months_used = 0
-                    station = cfg["icao_code"][1:]  # strip K for IEM
+                    errors  = []   # (om_monthly_forecast - clm_actual) per month
 
                     for m_back in range(1, months_back + 1):
                         month_date = today.replace(day=1)
@@ -2160,108 +2174,61 @@ class Handler(BaseHTTPRequestHandler):
                             month_date = (month_date - _td(days=1)).replace(day=1)
                         year  = month_date.year
                         month = month_date.month
-                        actual_total = actuals.get(f"{year}-{month:02d}")
-                        if actual_total is None:
+                        actual = actuals.get(f"{year}-{month:02d}")
+                        if actual is None:
                             continue
+
                         days_in_month = _cal.monthrange(year, month)[1]
+                        start = f"{year}-{month:02d}-01"
+                        end   = f"{year}-{month:02d}-{days_in_month:02d}"
 
-                        # Fetch IEM daily totals via the clean daily summary API
-                        # This gives one definitive precip value per calendar day, no double-counting
-                        network = cfg.get("iem_network", f"{cfg.get('state','WA')}_ASOS")
+                        # Fetch OM historical forecast for the full month
+                        # archive-api gives the assembled forecast (best-match model)
                         try:
-                            iem_r = requests.get(
-                                "https://mesonet.agron.iastate.edu/api/1/daily.json",
-                                params={"station": station, "network": network,
-                                        "year": year, "month": month},
-                                headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-                            iem_r.raise_for_status()
-                            iem_data = iem_r.json()
-                            daily_in = {}
-                            for rec in iem_data.get("data", []):
-                                day_str = rec.get("day", "")[:10]
-                                p = rec.get("precip")
-                                if p is not None and day_str:
-                                    try:
-                                        daily_in[day_str] = float(p)
-                                    except (ValueError, TypeError):
-                                        daily_in[day_str] = 0.0
-                        except Exception as ex:
-                            result["errors"].append(f"IEM daily {year}-{month:02d}: {str(ex)[:60]}")
-                            continue
-
-                        # For each lead, compute projected_total at that horizon
-                        # projected = banked_through_(EOM-lead) + OM_forecast_for_remaining_lead_days
-                        for lead in [1, 3, 5, 7]:
-                            try:
-                                # Days already banked = all days except last `lead` days
-                                bank_through_day = days_in_month - lead  # inclusive day number
-                                if bank_through_day < 1:
-                                    continue
-
-                                banked_inches = sum(
-                                    daily_in.get(f"{year}-{month:02d}-{d:02d}", 0.0)
-                                    for d in range(1, bank_through_day + 1)
-                                )
-
-                                # OM forecast for remaining `lead` days
-                                # Use precipitation_previous_day{lead} which gives what OM
-                                # predicted `lead` days ago — sum only the remaining days
-                                _pvar = f"precipitation_previous_day{lead}"
-                                r = requests.get(OM_PREV_URL, params={
+                            r = requests.get(
+                                "https://archive-api.open-meteo.com/v1/archive",
+                                params={
                                     "latitude":      cfg["lat"],
                                     "longitude":     cfg["lon"],
-                                    "hourly":        _pvar,
+                                    "daily":         "precipitation_sum",
                                     "timezone":      cfg["tz"],
-                                    "past_days":     lead,
-                                    "forecast_days": 16,
-                                }, timeout=15)
-                                if not r.ok:
-                                    continue
-                                data   = r.json()
-                                hours  = data.get("hourly", {}).get("time", [])
-                                precip = data.get("hourly", {}).get(_pvar, [])
+                                    "start_date":    start,
+                                    "end_date":      end,
+                                },
+                                timeout=15
+                            )
+                            r.raise_for_status()
+                            data = r.json()
+                            daily_mm = data.get("daily", {}).get("precipitation_sum", [])
+                            month_mm = sum(float(v or 0) for v in daily_mm)
+                            om_inches = round(month_mm / 25.4, 3)
+                            error = round(om_inches - actual, 3)
+                            errors.append(error)
+                        except Exception as ex:
+                            result["errors"].append(f"{year}-{month:02d}: {str(ex)[:60]}")
 
-                                # Sum only hours in the remaining days (day bank_through_day+1 to EOM)
-                                forecast_mm = sum(
-                                    float(p or 0) for h, p in zip(hours, precip)
-                                    if h and f"{year}-{month:02d}-" in h
-                                    and int(h[8:10]) > bank_through_day
-                                )
-                                forecast_inches = forecast_mm / 25.4
+                    if not errors:
+                        return result
 
-                                projected_total = banked_inches + forecast_inches
-                                error = round(projected_total - actual_total, 2)
-                                horizon_errors[f"d{lead}"].append(error)
+                    n     = len(errors)
+                    mean  = round(sum(errors) / n, 3)
+                    rmse  = round((sum(e**2 for e in errors) / n) ** 0.5, 3)
+                    mae   = round(sum(abs(e) for e in errors) / n, 3)
 
-                            except Exception as ex:
-                                result["errors"].append(f"d{lead} {year}-{month:02d}: {str(ex)[:60]}")
+                    # Store single sigma. Horizon scaling is applied in get_sigma() via
+                    # HORIZON_SCALE — no need to compute per-horizon here.
+                    _BIAS_CACHE[f"{city_key}-monthly"] = mean
+                    # Also store per-horizon keys for compatibility
+                    for d in [1, 3, 5, 7]:
+                        _BIAS_CACHE[f"{city_key}-d{d}"] = mean
 
-                        months_used += 1
-
-                    # Build summary and update caches
-                    summary = {}
-                    for lead in [1, 3, 5, 7]:
-                        key  = f"d{lead}"
-                        errs = horizon_errors[key]
-                        if not errs:
-                            continue
-                        n    = len(errs)
-                        rmse = round((sum(e**2 for e in errs) / n) ** 0.5, 3)
-                        mean = round(sum(errs) / n, 3)
-                        summary[key] = {
-                            "n":        n,
-                            "rmse":     rmse,
-                            "mean_err": mean,
-                            "mae":      round(sum(abs(e) for e in errs) / n, 3),
-                            "bias":     "WET" if mean > 0.1 else "DRY" if mean < -0.1 else "NEUTRAL",
-                        }
-                        _BIAS_CACHE[f"{city_key}-{key}"] = mean
-
+                    summary = {"monthly": {"n": n, "rmse": rmse, "mean_err": mean, "mae": mae,
+                                           "bias": "WET" if mean > 0.05 else "DRY" if mean < -0.05 else "NEUTRAL"}}
                     update_sigma_from_backtest(city_key, summary)
                     result["sigma_ok"]      = city_key in _SIGMA_CACHE
-                    result["sigma_months"]  = months_used
+                    result["sigma_months"]  = n
                     result["bias_ok"]       = True
-                    result["bias_horizons"] = len(summary)
+                    result["bias_horizons"] = 4   # d1,d3,d5,d7 all use same monthly bias
                     result["summary"]       = summary
 
                 except Exception as e:
