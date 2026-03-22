@@ -103,6 +103,7 @@ CITIES = {
         "regime":        "frontal",
         "tradeable_months": list(range(1, 13)),
         "label":         "Seattle, WA",
+        "state": "WA", "iem_network": "WA_ASOS",
     },
     "portland": {
         "icao_code":     "KPDX",
@@ -113,16 +114,18 @@ CITIES = {
         "regime":        "frontal",
         "tradeable_months": list(range(1, 13)),
         "label":         "Portland, OR",
+        "state": "OR", "iem_network": "OR_ASOS",
     },
     "san_francisco": {
         "icao_code":     "KSFO",
         "nws_site":      "MTR",
         "nws_issuedby":  "SFO",
-        "kalshi_series": "KXRAINSFO",   # confirm — may not exist yet
+        "kalshi_series": "KXRAINSFO",
         "lat": 37.619, "lon": -122.375, "tz": "America/Los_Angeles",
         "regime":        "frontal_seasonal",
         "tradeable_months": [11, 12, 1, 2, 3, 4],
         "label":         "San Francisco, CA",
+        "state": "CA", "iem_network": "CA_ASOS",
     },
     "los_angeles": {
         "icao_code":     "KLAX",
@@ -133,6 +136,7 @@ CITIES = {
         "regime":        "mediterranean",
         "tradeable_months": [11, 12, 1, 2, 3, 4],
         "label":         "Los Angeles, CA",
+        "state": "CA", "iem_network": "CA_ASOS",
     },
     "new_york": {
         "icao_code":     "KNYC",
@@ -143,6 +147,7 @@ CITIES = {
         "regime":        "mixed",
         "tradeable_months": [10, 11, 12, 1, 2, 3, 4],
         "label":         "New York, NY",
+        "state": "NY", "iem_network": "NY_ASOS",
     },
     "chicago": {
         "icao_code":     "KMDW",          # Kalshi settles on Midway, NOT O'Hare
@@ -153,6 +158,7 @@ CITIES = {
         "regime":        "mixed",
         "tradeable_months": [10, 11, 12, 1, 2, 3, 4],
         "label":         "Chicago, IL",
+        "state": "IL", "iem_network": "IL_ASOS",
     },
     "miami": {
         "icao_code":     "KMIA",
@@ -163,6 +169,7 @@ CITIES = {
         "regime":        "convective",
         "tradeable_months": [11, 12, 1, 2, 3, 4],
         "label":         "Miami, FL",
+        "state": "FL", "iem_network": "FL_ASOS",
     },
     "denver": {
         "icao_code":     "KDEN",
@@ -173,6 +180,7 @@ CITIES = {
         "regime":        "mixed",
         "tradeable_months": list(range(1, 13)),
         "label":         "Denver, CO",
+        "state": "CO", "iem_network": "CO_ASOS",
     },
 }
 
@@ -1378,6 +1386,7 @@ class Handler(BaseHTTPRequestHandler):
                 "month":            datetime.now().strftime("%B %Y"),
                 "days_remaining":   days_remaining,
                 "confidence":       conf,
+                "forecast_sigma":   round(get_sigma(city_key, days_remaining)[0], 3),
                 "db_connected":     bool(DATABASE_URL and PSYCOPG2_AVAILABLE),
             }
 
@@ -1641,31 +1650,26 @@ class Handler(BaseHTTPRequestHandler):
 
                     actual = settlements.get(actual_key) or settlements.get(month_key)
 
-                    # Fetch IEM daily actuals for this month (used as banked portion)
+                    # Fetch IEM daily totals via daily summary API — clean calendar-day values
                     station = cfg["icao_code"][1:]
+                    network = cfg.get("iem_network", f"{cfg.get('state','WA')}_ASOS")
                     try:
                         iem_r = requests.get(
-                            "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py",
-                            params={"station": station, "data": "p01i",
-                                    "year1": year, "month1": month, "day1": 1,
-                                    "year2": year, "month2": month, "day2": days_in_month,
-                                    "tz": cfg["tz"], "format": "comma",
-                                    "latlon": "no", "direct": "no", "report_type": 3},
+                            "https://mesonet.agron.iastate.edu/api/1/daily.json",
+                            params={"station": station, "network": network,
+                                    "year": year, "month": month},
                             headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
+                        iem_r.raise_for_status()
+                        iem_data = iem_r.json()
                         daily_in = {}
-                        for line in iem_r.text.strip().split("\n"):
-                            if not line or line.startswith("#") or line.startswith("station"):
-                                continue
-                            parts = line.strip().split(",")
-                            if len(parts) < 3:
-                                continue
-                            day_str = parts[1][:10]
-                            val = parts[2].strip()
-                            try:
-                                v = 0.0 if val in ("M", "T", "") else float(val)
-                            except ValueError:
-                                v = 0.0
-                            daily_in[day_str] = daily_in.get(day_str, 0.0) + v
+                        for rec in iem_data.get("data", []):
+                            day_str = rec.get("day", "")[:10]
+                            p = rec.get("precip")
+                            if p is not None and day_str:
+                                try:
+                                    daily_in[day_str] = float(p)
+                                except (ValueError, TypeError):
+                                    daily_in[day_str] = 0.0
                     except Exception:
                         daily_in = {}
 
@@ -2161,39 +2165,28 @@ class Handler(BaseHTTPRequestHandler):
                             continue
                         days_in_month = _cal.monthrange(year, month)[1]
 
-                        # Fetch IEM daily actuals for this month to get banked totals
-                        # IEM daily report_type=3 gives daily summaries
-                        m_start = f"{year}-{month:02d}-01"
-                        m_end   = f"{year}-{month:02d}-{days_in_month:02d}"
+                        # Fetch IEM daily totals via the clean daily summary API
+                        # This gives one definitive precip value per calendar day, no double-counting
+                        network = cfg.get("iem_network", f"{cfg.get('state','WA')}_ASOS")
                         try:
                             iem_r = requests.get(
-                                "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py",
-                                params={"station": station, "data": "p01i",
-                                        "year1": year, "month1": month, "day1": 1,
-                                        "year2": year, "month2": month, "day2": days_in_month,
-                                        "tz": cfg["tz"], "format": "comma",
-                                        "latlon": "no", "direct": "no", "report_type": 3},
+                                "https://mesonet.agron.iastate.edu/api/1/daily.json",
+                                params={"station": station, "network": network,
+                                        "year": year, "month": month},
                                 headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-                            # Build daily totals: day_str -> inches
+                            iem_r.raise_for_status()
+                            iem_data = iem_r.json()
                             daily_in = {}
-                            for line in iem_r.text.strip().split("\n"):
-                                if not line or line.startswith("#") or line.startswith("station"):
-                                    continue
-                                parts = line.strip().split(",")
-                                if len(parts) < 3:
-                                    continue
-                                day_str = parts[1][:10]
-                                val = parts[2].strip()
-                                if val in ("M", "T", ""):
-                                    v = 0.0
-                                else:
+                            for rec in iem_data.get("data", []):
+                                day_str = rec.get("day", "")[:10]
+                                p = rec.get("precip")
+                                if p is not None and day_str:
                                     try:
-                                        v = float(val)
-                                    except ValueError:
-                                        v = 0.0
-                                daily_in[day_str] = daily_in.get(day_str, 0.0) + v
+                                        daily_in[day_str] = float(p)
+                                    except (ValueError, TypeError):
+                                        daily_in[day_str] = 0.0
                         except Exception as ex:
-                            result["errors"].append(f"IEM {year}-{month:02d}: {str(ex)[:60]}")
+                            result["errors"].append(f"IEM daily {year}-{month:02d}: {str(ex)[:60]}")
                             continue
 
                         # For each lead, compute projected_total at that horizon
