@@ -1481,7 +1481,17 @@ loadData();
       </select>
       <button onclick="runBacktest()" style="font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:var(--rain);color:#fff;border:none;padding:8px 18px;border-radius:4px;cursor:pointer">Run Backtest</button>
       <button onclick="testAllCitiesActuals()" style="font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:var(--card);color:var(--ink);border:1px solid var(--border);padding:8px 18px;border-radius:4px;cursor:pointer">Test All Cities</button>
+      <button onclick="recalibrateAll()" style="font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:var(--ink);color:var(--paper);border:none;padding:8px 18px;border-radius:4px;cursor:pointer">⚡ Recalibrate All</button>
       <span id="bt-status" style="font-size:11px;color:var(--muted)"></span>
+    </div>
+
+    <!-- Recalibrate status panel -->
+    <div id="recal-panel" style="display:none;margin-bottom:20px;background:var(--card);border:1px solid var(--border);border-radius:6px;overflow:hidden">
+      <div style="padding:10px 14px;border-bottom:0.5px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+        <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)">Calibration Status — All Cities</div>
+        <span id="recal-status" style="font-size:11px;color:var(--muted)"></span>
+      </div>
+      <div id="recal-results" style="font-family:'DM Mono',monospace;font-size:11px;padding:4px 0"></div>
     </div>
 
     <!-- All Cities Actuals Panel -->
@@ -1617,6 +1627,78 @@ async function runBiasCalibration(){
     result.style.display='block';
     status.textContent=Object.keys(bias).length+' horizons calibrated';
   }catch(e){status.textContent='Failed: '+e.message;}
+}
+
+async function recalibrateAll(){
+  const panel   = document.getElementById('recal-panel');
+  const results = document.getElementById('recal-results');
+  const status  = document.getElementById('recal-status');
+  panel.style.display  = 'block';
+  status.textContent   = 'Running... (~60s)';
+  status.style.color   = 'var(--muted)';
+  results.innerHTML    = '<div style="padding:12px 14px;color:var(--muted)">Calibrating all 8 cities in parallel — fetching Open-Meteo Previous Runs + CLM actuals...</div>';
+
+  try {
+    const res  = await fetch(`${SERVER}/calibrate/all?months=12`);
+    const data = await res.json();
+
+    if(!data.ok){ status.textContent='Error: '+(data.error||'unknown'); return; }
+
+    const CITY_LABELS = {
+      seattle:'Seattle', portland:'Portland', chicago:'Chicago',
+      los_angeles:'Los Angeles', san_francisco:'San Francisco',
+      miami:'Miami', denver:'Denver', new_york:'New York'
+    };
+
+    const rows = (data.cities||[]).map(c => {
+      const ok = c.sigma_ok && c.bias_ok;
+      const summary = c.summary||{};
+      const horizons = ['d1','d3','d5','d7','d10'].map(k => {
+        const s = summary[k];
+        if(!s) return `<td style="padding:4px 8px;color:var(--border);text-align:right">--</td>`;
+        const biasColor = Math.abs(s.mean_err) > 0.15 ? 'color:var(--no)' : 'color:var(--muted)';
+        return `<td style="padding:4px 8px;text-align:right" title="RMSE: ${s.rmse}&quot; Bias: ${s.mean_err>0?'+':''}${s.mean_err}&quot;">
+          <span style="color:var(--ink)">${s.rmse}"</span>
+          <span style="${biasColor};font-size:9px"> ${s.mean_err>0?'+':''}${s.mean_err}</span>
+        </td>`;
+      }).join('');
+
+      return `<tr style="border-bottom:0.5px solid var(--border)">
+        <td style="padding:5px 12px;font-weight:500">${CITY_LABELS[c.city]||c.city}</td>
+        <td style="padding:5px 8px;text-align:center;color:${ok?'var(--yes)':'var(--no)'}">${ok?'OK':'ERR'}</td>
+        <td style="padding:5px 8px;text-align:center;color:var(--muted)">${c.sigma_months||0}mo</td>
+        ${horizons}
+        <td style="padding:5px 8px;text-align:right;color:var(--muted)">${c.errors&&c.errors.length?'<span style="color:var(--no)">'+c.errors[0]+'</span>':''}</td>
+      </tr>`;
+    }).join('');
+
+    results.innerHTML = `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:10px;font-family:'DM Mono',monospace">
+      <thead><tr style="border-bottom:1px solid var(--border);color:var(--muted)">
+        <th style="text-align:left;padding:5px 12px;font-weight:400">City</th>
+        <th style="text-align:center;padding:5px 8px;font-weight:400">Status</th>
+        <th style="text-align:center;padding:5px 8px;font-weight:400">Months</th>
+        <th style="text-align:right;padding:5px 8px;font-weight:400">D-1 RMSE/bias</th>
+        <th style="text-align:right;padding:5px 8px;font-weight:400">D-3</th>
+        <th style="text-align:right;padding:5px 8px;font-weight:400">D-5</th>
+        <th style="text-align:right;padding:5px 8px;font-weight:400">D-7</th>
+        <th style="text-align:right;padding:5px 8px;font-weight:400">D-10</th>
+        <th style="text-align:right;padding:5px 8px;font-weight:400">Errors</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+    <div style="padding:10px 14px;color:var(--muted);font-size:10px">
+      Sigma cache: ${data.sigma_cache_size} cities · Bias cache: ${data.bias_cache_size} entries · ${data.note||''}
+    </div>`;
+
+    const allOk = data.all_ok;
+    status.textContent = allOk ? 'All cities calibrated' : 'Calibration complete with errors';
+    status.style.color = allOk ? 'var(--yes)' : 'var(--no)';
+    if(allOk) showToast('Model recalibrated for all 8 cities', 'success');
+
+  } catch(e) {
+    status.textContent = 'Failed: '+e.message;
+    status.style.color = 'var(--no)';
+  }
 }
 
 async function testAllCitiesActuals(){

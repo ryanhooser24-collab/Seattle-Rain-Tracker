@@ -2071,6 +2071,122 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
+        elif path == "/calibrate/all":
+            # Runs backtest (sigma) + bias calibration for all 8 cities in parallel.
+            # Call this once after every deploy to restore in-memory caches.
+            # ?months=N to control how many months of history to use (default 12)
+            import concurrent.futures as _cf
+            from datetime import date as _date, timedelta as _td
+            import calendar as _cal
+
+            qs          = parse_qs(urlparse(self.path).query)
+            months_back = int(qs.get("months", ["12"])[0])
+
+            def calibrate_city(city_key):
+                cfg = CITIES.get(city_key)
+                result = {"city": city_key, "sigma_ok": False, "bias_ok": False,
+                          "sigma_months": 0, "bias_horizons": 0, "errors": []}
+                try:
+                    # ── 1. Backtest → sigma ──────────────────────────────────
+                    actuals = fetch_nws_clm_actuals(city_key)
+                    today   = _date.today()
+                    horizon_data_all = {f"d{l}": [] for l in [1, 3, 5, 7, 10]}
+                    months_used = 0
+
+                    for m_back in range(1, months_back + 1):
+                        month_date = today.replace(day=1)
+                        for _ in range(m_back):
+                            month_date = (month_date - _td(days=1)).replace(day=1)
+                        year  = month_date.year
+                        month = month_date.month
+                        actual = actuals.get(f"{year}-{month:02d}")
+                        if actual is None:
+                            continue
+                        days_in_month = _cal.monthrange(year, month)[1]
+                        last_day = _date(year, month, days_in_month)
+
+                        for lead in [1, 3, 5, 7, 10]:
+                            try:
+                                r = requests.get(OM_PREV_URL, params={
+                                    "latitude":      cfg["lat"],
+                                    "longitude":     cfg["lon"],
+                                    "daily":         "precipitation_sum",
+                                    "timezone":      cfg["tz"],
+                                    "past_days":     lead,
+                                    "forecast_days": 16,
+                                    "models":        f"previous_day_{min(lead, 7)}",
+                                }, timeout=12)
+                                r.raise_for_status()
+                                data       = r.json()
+                                dates_list = data.get("daily", {}).get("time", [])
+                                precip     = data.get("daily", {}).get("precipitation_sum", [])
+                                month_mm   = sum(float(p or 0) for d, p in zip(dates_list, precip)
+                                               if d and d[:7] == f"{year}-{month:02d}")
+                                error = round(month_mm / 25.4 - actual, 2)
+                                horizon_data_all[f"d{lead}"].append(error)
+                            except Exception:
+                                pass
+                        months_used += 1
+
+                    # Build summary and update sigma cache
+                    summary = {}
+                    for lead in [1, 3, 5, 7, 10]:
+                        key  = f"d{lead}"
+                        errs = horizon_data_all[key]
+                        if not errs:
+                            continue
+                        n    = len(errs)
+                        rmse = round((sum(e**2 for e in errs) / n) ** 0.5, 3)
+                        mean = round(sum(errs) / n, 3)
+                        summary[key] = {
+                            "n":        n,
+                            "rmse":     rmse,
+                            "mean_err": mean,
+                            "mae":      round(sum(abs(e) for e in errs) / n, 3),
+                            "bias":     "WET" if mean > 0.1 else "DRY" if mean < -0.1 else "NEUTRAL",
+                        }
+                        # Update bias cache
+                        _BIAS_CACHE[f"{city_key}-{key}"] = mean
+
+                    update_sigma_from_backtest(city_key, summary)
+                    result["sigma_ok"]     = city_key in _SIGMA_CACHE
+                    result["sigma_months"] = months_used
+                    result["bias_ok"]      = True
+                    result["bias_horizons"] = len(summary)
+                    result["summary"]      = summary
+
+                except Exception as e:
+                    result["errors"].append(str(e))
+
+                return result
+
+            try:
+                city_keys = list(CITIES.keys())
+                ex = _cf.ThreadPoolExecutor(max_workers=8)
+                try:
+                    futures = {ex.submit(calibrate_city, ck): ck for ck in city_keys}
+                    results = []
+                    done, _ = _cf.wait(futures, timeout=120)
+                    for f in done:
+                        try:
+                            results.append(f.result())
+                        except Exception as e:
+                            results.append({"city": futures[f], "error": str(e)})
+                finally:
+                    ex.shutdown(wait=False)
+
+                all_ok = all(r.get("sigma_ok") and r.get("bias_ok") for r in results)
+                self.send_json({
+                    "ok":      True,
+                    "cities":  results,
+                    "all_ok":  all_ok,
+                    "sigma_cache_size": len(_SIGMA_CACHE),
+                    "bias_cache_size":  len(_BIAS_CACHE),
+                    "note":    "Sigma and bias caches updated for all cities. In-memory only — re-run after each deploy."
+                })
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
         elif path == "/portfolio":
             # Fetch live Kalshi balance and positions
             if not KALSHI_KEY_ID:
