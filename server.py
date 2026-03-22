@@ -1133,13 +1133,24 @@ class Handler(BaseHTTPRequestHandler):
 
             print(f"\n📡 Fetching data for {city_cfg['label']}...")
 
-            wu         = fetch_wu_forecast(city_cfg)
-            wu_hourly  = fetch_wu_hourly(city_cfg)
-            nws        = fetch_nws_mtd(city_cfg)
-            kalshi     = fetch_kalshi_markets(city_cfg)
-
-            # Fetch IEM gap fill — always from midnight/1AM today to now (DST-aware)
-            iem = fetch_iem_gap(nws.get("issued"), city_cfg)
+            import concurrent.futures as _cf
+            with _cf.ThreadPoolExecutor(max_workers=5) as _ex:
+                _f_wu      = _ex.submit(fetch_wu_forecast, city_cfg)
+                _f_hourly  = _ex.submit(fetch_wu_hourly,   city_cfg)
+                _f_nws     = _ex.submit(fetch_nws_mtd,     city_cfg)
+                _f_kalshi  = _ex.submit(fetch_kalshi_markets, city_cfg)
+                # NWS must finish before IEM (IEM needs nws.issued)
+                try:    nws = _f_nws.result(timeout=8)
+                except: nws = {"ok": False, "mtd": 0.0, "today": 0.0, "issued": None, "is_finalized": False}
+                _f_iem = _ex.submit(fetch_iem_gap, nws.get("issued"), city_cfg)
+                try:    wu        = _f_wu.result(timeout=8)
+                except: wu        = {"ok": False, "total_forecast": 0, "days": []}
+                try:    wu_hourly = _f_hourly.result(timeout=8)
+                except: wu_hourly = {"ok": False, "today_remaining": 0}
+                try:    kalshi    = _f_kalshi.result(timeout=8)
+                except: kalshi    = {"ok": False, "markets": []}
+                try:    iem       = _f_iem.result(timeout=8)
+                except: iem       = {"ok": False, "gap_total": 0}
 
             # True MTD assembly:
             # If NWS FINALIZED (issued 0-4 AM): MTD is through yesterday midnight, safe base.

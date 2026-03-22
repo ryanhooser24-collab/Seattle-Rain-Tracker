@@ -566,7 +566,7 @@ async function loadScanner(){
   // Try fast server-side scan first
   try{
     const ctrl=new AbortController();
-    setTimeout(()=>ctrl.abort(),20000);
+    setTimeout(()=>ctrl.abort(),35000);
     const res=await fetch(SERVER+'/scan',{signal:ctrl.signal});
     if(res.ok){
       const data=await res.json();
@@ -602,7 +602,7 @@ async function loadScanner(){
     let completed=0;
     function fetchWithTimeout(city){
       const ctrl=new AbortController();
-      const tid=setTimeout(()=>ctrl.abort(),10000);
+      const tid=setTimeout(()=>ctrl.abort(),30000);
       return fetch(SERVER+'/data?city='+city,{signal:ctrl.signal})
         .then(r=>r.ok?r.json():null)
         .then(d=>{clearTimeout(tid);return d?{city,d}:null;})
