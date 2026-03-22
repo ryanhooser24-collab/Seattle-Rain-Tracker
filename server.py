@@ -1648,27 +1648,22 @@ class Handler(BaseHTTPRequestHandler):
                         try:
                             # Open-Meteo Previous Runs API
                             # past_days=N returns what was predicted N days ago
-                            r = requests.get(
-                                OM_PREV_URL,
-                                params={
-                                    "latitude":      cfg["lat"],
-                                    "longitude":     cfg["lon"],
-                                    "daily":         "precipitation_sum",
-                                    "timezone":      cfg["tz"],
-                                    "past_days":     lead,
-                                    "forecast_days": 16,
-                                    "models":        f"previous_day_{min(lead, 7)}",
-                                },
-                                timeout=10
-                            )
+                            _pvar = f"precipitation_sum_previous_day{min(lead, 7)}"
+                            r = requests.get(OM_PREV_URL, params={
+                                "latitude":      cfg["lat"],
+                                "longitude":     cfg["lon"],
+                                "hourly":        _pvar,
+                                "timezone":      cfg["tz"],
+                                "past_days":     lead,
+                                "forecast_days": 16,
+                            }, timeout=12)
                             r.raise_for_status()
-                            data = r.json()
-                            dates_list = data.get("daily", {}).get("time", [])
-                            precip = data.get("daily", {}).get("precipitation_sum", [])
-                            # Sum for the full month
+                            data   = r.json()
+                            hours  = data.get("hourly", {}).get("time", [])
+                            precip = data.get("hourly", {}).get(_pvar, [])
                             month_total_mm = sum(
-                                float(p or 0) for d, p in zip(dates_list, precip)
-                                if d and d[:7] == f"{year}-{month:02d}"
+                                float(p or 0) for h, p in zip(hours, precip)
+                                if h and h[:7] == f"{year}-{month:02d}"
                             )
                             horizon_data[f"d{lead}"] = round(month_total_mm / 25.4, 2)
                         except Exception:
@@ -2044,16 +2039,17 @@ class Handler(BaseHTTPRequestHandler):
                     days_in_month = cal_mod.monthrange(year, month)[1]
                     for lead in [1, 3, 5, 7, 10]:
                         try:
+                            _pvar = f"precipitation_sum_previous_day{min(lead, 7)}"
                             r = requests.get(OM_PREV_URL, params={
                                 "latitude": cfg["lat"], "longitude": cfg["lon"],
-                                "daily": "precipitation_sum", "timezone": cfg["tz"],
+                                "hourly": _pvar, "timezone": cfg["tz"],
                                 "past_days": lead, "forecast_days": 16,
-                                "models": f"previous_day_{min(lead,7)}"}, timeout=10)
+                            }, timeout=12)
                             r.raise_for_status(); data = r.json()
-                            dates_list = data.get("daily", {}).get("time", [])
-                            precip     = data.get("daily", {}).get("precipitation_sum", [])
-                            month_mm   = sum(float(p or 0) for d, p in zip(dates_list, precip)
-                                           if d and d[:7] == f"{year}-{month:02d}")
+                            hours  = data.get("hourly", {}).get("time", [])
+                            precip = data.get("hourly", {}).get(_pvar, [])
+                            month_mm = sum(float(p or 0) for h, p in zip(hours, precip)
+                                         if h and h[:7] == f"{year}-{month:02d}")
                             error = round(month_mm / 25.4 - actual, 2)
                             horizon_errors[f"d{lead}"].append(error)
                         except Exception: continue
@@ -2076,16 +2072,17 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 r = requests.get(OM_PREV_URL, params={
                     "latitude": 47.441, "longitude": -122.3,
-                    "daily": "precipitation_sum",
+                    "hourly": "precipitation_sum_previous_day1",
                     "timezone": "America/Los_Angeles",
                     "past_days": 1, "forecast_days": 3,
-                    "models": "previous_day_1",
                 }, timeout=10)
+                resp_json = r.json() if r.ok else {}
                 self.send_json({
                     "ok": r.ok, "status": r.status_code,
                     "url": OM_PREV_URL,
                     "response_preview": r.text[:300] if not r.ok else "OK",
-                    "has_data": bool(r.ok and r.json().get("daily", {}).get("time")),
+                    "has_data": bool(r.ok and resp_json.get("hourly", {}).get("time")),
+                    "sample": resp_json.get("hourly", {}).get("precipitation_sum_previous_day1", [])[:5] if r.ok else [],
                 })
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e), "url": OM_PREV_URL})
@@ -2127,26 +2124,26 @@ class Handler(BaseHTTPRequestHandler):
                         om_errors = []
                         for lead in [1, 3, 5, 7, 10]:
                             try:
+                                _pvar = f"precipitation_sum_previous_day{min(lead, 7)}"
                                 r = requests.get(OM_PREV_URL, params={
                                     "latitude":      cfg["lat"],
                                     "longitude":     cfg["lon"],
-                                    "daily":         "precipitation_sum",
+                                    "hourly":        _pvar,
                                     "timezone":      cfg["tz"],
                                     "past_days":     lead,
                                     "forecast_days": 16,
-                                    "models":        f"previous_day_{min(lead, 7)}",
                                 }, timeout=15)
                                 if not r.ok:
                                     om_errors.append(f"d{lead}: HTTP {r.status_code} - {r.text[:100]}")
                                     continue
-                                data       = r.json()
+                                data = r.json()
                                 if "error" in data:
                                     om_errors.append(f"d{lead}: {data['error']}")
                                     continue
-                                dates_list = data.get("daily", {}).get("time", [])
-                                precip     = data.get("daily", {}).get("precipitation_sum", [])
-                                month_mm   = sum(float(p or 0) for d, p in zip(dates_list, precip)
-                                               if d and d[:7] == f"{year}-{month:02d}")
+                                hours  = data.get("hourly", {}).get("time", [])
+                                precip = data.get("hourly", {}).get(_pvar, [])
+                                month_mm = sum(float(p or 0) for h, p in zip(hours, precip)
+                                             if h and h[:7] == f"{year}-{month:02d}")
                                 error = round(month_mm / 25.4 - actual, 2)
                                 horizon_data_all[f"d{lead}"].append(error)
                             except Exception as ex:
