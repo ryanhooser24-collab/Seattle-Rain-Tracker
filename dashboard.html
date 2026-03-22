@@ -1052,7 +1052,8 @@ function renderRainfall(d){
   const iem_hours=(iem.hours||[]);
   const wu_hours=(wu_hourly&&wu_hourly.hours||[]).filter(h=>h.qpf>0);
   const wuDays=wu.days||[];
-  const usable=wuDays.slice(0,Math.min(days_remaining,10));
+  const monthPrefix=new Date().toISOString().slice(0,7); // "2026-03"
+  const usable=wuDays.filter(d=>d.date&&d.date.startsWith(monthPrefix));
   const wuSum=Math.round(usable.reduce((s,x)=>s+(x.qpf||0),0)*100)/100;
   const wuRain=usable.filter(x=>(x.qpf||0)>0).length;
 
@@ -1179,9 +1180,10 @@ function renderChart(d){
   const cityIcao=ALL_CITIES[city]?.icao||'KSEA';
   const icao=cityIcao;
   const wuDays=wu.days||[];
+  const monthPrefix=new Date().toISOString().slice(0,7);
   const allDays=[{d:'Today',q:today_eod||0,today:true},...wuDays.map(x=>({d:x.date||'',q:x.qpf||0,today:false}))];
   const maxQ=Math.max(...allDays.map(x=>x.q),0.01);
-  const usable=wuDays.slice(0,Math.min(days_remaining,10));
+  const usable=wuDays.filter(d=>d.date&&d.date.startsWith(monthPrefix));
   const wuSum=Math.round(usable.reduce((s,x)=>s+(x.qpf||0),0)*100)/100;
 
   const bars=allDays.map((day,i)=>{
