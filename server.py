@@ -14,8 +14,13 @@ import json
 import os
 import re
 import traceback
+import socketserver
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
+
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    """Handle each HTTP request in a separate thread."""
+    daemon_threads = True
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime, date
@@ -1417,19 +1422,24 @@ class Handler(BaseHTTPRequestHandler):
                     return {"city": city_key, "ok": False, "error": str(e), "markets": []}
 
             # Hard 25s wall-clock timeout on entire scan — Railway kills at 60s
-            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            ex = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+            try:
                 futures = {ex.submit(fetch_city, ck): ck for ck in CITIES.keys()}
                 city_results = []
-                done, _ = concurrent.futures.wait(futures, timeout=25)
+                done, not_done = concurrent.futures.wait(futures, timeout=25)
                 for f in done:
-                    result = f.result()
-                    if result:
-                        city_results.append(result)
-                # Any city that timed out gets a placeholder
+                    try:
+                        result = f.result()
+                        if result:
+                            city_results.append(result)
+                    except Exception:
+                        pass
                 for f, ck in futures.items():
                     if f not in done:
                         city_results.append({"city": ck, "ok": False,
                                              "error": "timeout", "markets": []})
+            finally:
+                ex.shutdown(wait=False)  # Don't block on timed-out threads
 
             self.send_json({
                 "ok": True,
@@ -1894,5 +1904,5 @@ if __name__ == "__main__":
   Open dashboard.html in your browser.
   Press Ctrl+C to stop.
 """)
-    server = HTTPServer(("0.0.0.0", PORT), Handler)
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     server.serve_forever()
