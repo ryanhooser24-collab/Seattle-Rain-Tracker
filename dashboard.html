@@ -700,12 +700,11 @@ function renderScanner(results){
     // "bet with the forecast" — never show a probabilistic play against our own model
     const projClearsStrike = r.proj >= r.strike;
     if(scanFilter==='all'){
-      if(r.mode==='probabilistic'&&!projClearsStrike) return false;
       return net>=5;
     }
     if(scanFilter==='settled')return r.mode==='settled'&&net>=3;
     if(scanFilter==='near-certain')return r.mode==='near-certain'&&net>=3;
-    if(scanFilter==='probabilistic')return r.mode==='probabilistic'&&net>=5&&projClearsStrike;
+    if(scanFilter==='probabilistic')return r.mode==='probabilistic'&&net>=5;
     return true;
   });
 
@@ -1033,10 +1032,7 @@ function render(d){
     notice.innerHTML=`<b>${days_remaining} days remaining in ${month}.</b> Check back when ${days_remaining-10} fewer days remain — signals activate when WU 10-day covers month-end.`;
   }else{
     notice.className='notice live';
-    const nwsWarn = (nws_is_finalized===false)
-      ? ' <span style="color:var(--warn);font-weight:600">⚠ NWS reading is preliminary — MTD may shift overnight. Settled/near-certain confidence reduced.</span>'
-      : '';
-    notice.innerHTML=`<b>${days_remaining} days remaining — trading window active.</b> Open-Meteo forecast covers full month remainder. Signals live.${nwsWarn}`;
+    notice.innerHTML=`<b>${days_remaining} days remaining — trading window active.</b> Open-Meteo forecast covers full month remainder. Signals live.`;
   }
 
   renderRainfall(d);
@@ -1115,19 +1111,15 @@ function renderRainfall(d){
         <div class="rf-left"><div class="rdot d-nws"></div><div class="rf-meta">
           <div class="rf-lbl">
             <span>NWS official</span>
-            ${d.nws_is_finalized===false
-              ? '<span style="margin-left:6px;font-size:9px;padding:2px 6px;border-radius:3px;background:rgba(255,180,0,0.15);color:var(--warn);letter-spacing:0.5px">PRELIMINARY</span>'
-              : '<span style="margin-left:6px;font-size:9px;padding:2px 6px;border-radius:3px;background:rgba(80,200,120,0.15);color:var(--gain);letter-spacing:0.5px">FINALIZED</span>'}
+
             <div class="tip"><b>NWS CLI report</b>
-              ${d.nws_is_finalized===false
-                ? '<b style=\'color:#ffb400\'>⚠ PRELIMINARY:</b> Issued after 4 AM — intraday reading, not yet quality-controlled. MTD can be revised overnight by up to 0.5"+. Settled threshold tightened to 0.50" cushion.'
-                : '<b style=\'color:#50c878\'>✓ FINALIZED:</b> Issued between midnight–4 AM. This is the official daily summary from the ASOS DSM — most reliable reading. Settled threshold = 0.10" cushion.'}
+              <b>NWS CLI:</b> MTD base adjusted for today's reading. IEM gap fill completes today's total.
               <br>Settlement source for all Kalshi rain contracts.
             </div>
           </div>
-          <div class="rf-sub">Through ${nws_time} · ${d.nws_is_finalized===false ? 'preliminary · ' : 'finalized daily · '}settlement source</div>
+          <div class="rf-sub">Through ${nws_time} · settlement source</div>
         </div></div>
-        <div class="rf-right"><div class="rf-val v-nws" style="${d.nws_is_finalized===false ? 'opacity:0.8' : ''}">${nws_mtd.toFixed(2)}<span class="rf-unit"> in</span></div></div>
+        <div class="rf-right"><div class="rf-val v-nws">${nws_mtd.toFixed(2)}<span class="rf-unit"> in</span></div></div>
       </div>
       <div class="rf-row">
         <div class="rf-left"><div class="rdot d-iem"></div><div class="rf-meta">

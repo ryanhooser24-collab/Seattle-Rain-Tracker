@@ -1789,7 +1789,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
-
+        elif path == "/portfolio":
             # Fetch live Kalshi balance and positions
             if not KALSHI_KEY_ID:
                 self.send_json({"ok": False, "error": "No Kalshi API key"})
