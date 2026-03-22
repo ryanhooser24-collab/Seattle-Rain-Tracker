@@ -1373,7 +1373,8 @@ class Handler(BaseHTTPRequestHandler):
                     cfg = CITIES.get(city_key)
                     if not cfg: return None
                     # Fetch all 5 sources in parallel within the city
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as inner:
+                    inner = concurrent.futures.ThreadPoolExecutor(max_workers=5)
+                    try:
                         f_wu      = inner.submit(fetch_wu_forecast, cfg)
                         f_hourly  = inner.submit(fetch_wu_hourly, cfg)
                         f_nws     = inner.submit(fetch_nws_mtd, cfg)
@@ -1392,6 +1393,8 @@ class Handler(BaseHTTPRequestHandler):
                         except Exception: kalshi = {"ok": False, "markets": []}
                         try: iem      = f_iem.result(timeout=5)
                         except Exception: iem = {"ok": False, "gap_total": 0}
+                    finally:
+                        inner.shutdown(wait=False)
 
                     # Same double-count fix: preliminary NWS includes today's rain already
                     _nws_fin    = nws.get("is_finalized", False)
