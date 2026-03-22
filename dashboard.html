@@ -1374,64 +1374,87 @@ function renderMarkets(d){
   const icao=ALL_CITIES[d.city]?.icao||d.city?.toUpperCase()||'KSEA';
 
   const cards=kalshi.markets.filter(m=>{
-    // City detail shows ALL open markets — including fully priced ones
-    // so you can track positions and see the full picture
     const yes_ask=Math.round((m.yes_ask||0)*100);
-    return yes_ask > 0;  // only hide markets with no price at all
+    return yes_ask > 0;
   }).map(m=>{
     const strike=m.inches||0;
     const yes_ask=Math.round((m.yes_ask||0)*100);
     const no_ask=Math.round((m.no_ask||0)*100);
     const decision=m.decision||'HOLD';
     const netGap=m.net_gap_c||0;
+    const noNetGap=m.no_net_gap_c||0;
+    const noGapC=m.no_gap_c||0;
     const liq=m.liquidity||{};
     const grade=liq.grade||'?';
     const maxDeploy=liq.max_deploy||500;
     const mm=liq.market_maker||false;
-    const mode=m.mode||'forecast';
+    const mode=m.mode||'probabilistic';
     const cushion=m.cushion;
     const modelP=Math.round((m.model_prob||0)*100);
+    const modelNoP=100-modelP;
+    const ticker=m.ticker||'';
 
-    const isBuy=decision==='BUY YES';
+    const isBuyYes=decision==='BUY YES';
+    const isBuyNo=decision==='BUY NO';
     const isSkip=decision.startsWith('SKIP')||grade==='D';
-    const cardBorder=mode==='settled'?'var(--yes-border)':mode==='near_certain'?'#a8d4b8':'#e8c49a';
+    const isSettled=mode==='settled';
 
-    const why=mode==='settled'
-      ?`MTD already <b>+${cushion}"</b> above ${strike}" — functionally settled`
-      :mode==='near_certain'
+    // Border color by best signal
+    const cardBorder=isSettled?'var(--yes-border)':isBuyNo?'var(--no)':mode==='near-certain'?'#a8d4b8':'var(--border)';
+
+    // Settled threshold display
+    const settledMinDisp=days_remaining>=15?0.02:days_remaining>=8?0.05:days_remaining>=3?0.10:0.15;
+
+    const why=isSettled
+      ?`MTD <b>+${cushion}"</b> above ${strike}" strike (threshold: ${settledMinDisp}" · ${days_remaining}d left)`
+      :mode==='near-certain'
       ?`MTD at ${strike}" strike — minimal forecast risk`
-      :`Proj ${proj.toFixed(2)}" vs ${strike}" strike`;
+      :`Proj <b>${proj.toFixed(2)}"</b> vs <b>${strike}"</b> strike · ${days_remaining}d left`;
 
-    const holdNote=mode==='settled'
-      ? (mm
-          ?`Hold to settlement (~99¢). Exit early only if market reprices above 93¢ and you want to redeploy capital.`
-          :`Hold to settlement (~99¢). Thin exit depth — plan to hold full term.`)
-      : mode==='near-certain'
-      ? (mm
-          ?`Hold to settlement or exit if market reprices above ${yes_ask+8}¢ before month end.`
-          :`Hold to settlement — thin exit depth, expect to hold full term.`)
-      : (mm
-          ?`Forecast-dependent — exit above ${yes_ask+8}¢ or if forecast shifts against you.`
-          :`Forecast-dependent — thin exit depth. Watch forecast daily.`);
+    const holdNote=isSettled
+      ?(mm?`Hold to settlement (~99¢). Exit early if reprices above 93¢.`:`Hold to settlement — plan to hold full term.`)
+      :mode==='near-certain'
+      ?(mm?`Hold or exit above ${yes_ask+8}¢.`:`Hold full term — thin exit depth.`)
+      :(mm?`Forecast-dependent — exit above ${yes_ask+8}¢ if forecast shifts.`:`Watch forecast daily.`);
+
+    // YES button — auto-execute if settled, manual otherwise
+    const yesBtnStyle=`flex:1;padding:7px;font-size:10px;border-radius:4px;font-family:inherit;border:0.5px solid ${isBuyYes&&!isSkip?'var(--yes-border)':'var(--border)'};background:${isBuyYes&&!isSkip?'var(--yes-lt)':'var(--bg)'};color:${isBuyYes&&!isSkip?'var(--yes)':'var(--muted)'};cursor:${isSkip?'not-allowed':'pointer'}`;
+    const yesBtnLabel=isSkip?'Skip':(isSettled?`⚡ YES $${maxDeploy}`:(isBuyYes?`Buy YES $${maxDeploy} (+${netGap}¢)`:`YES ${yes_ask}¢`));
+    const yesBtnClick=isSettled
+      ?`autoExecuteSettled('${ticker}','${d.city}','${strike}','yes')`
+      :`addBet('${ticker}','YES',${maxDeploy})`;
+
+    // NO button — show value if noNetGap >= 5, auto-execute if strong
+    const hasNoValue=noNetGap>=5;
+    const noBtnStyle=`flex:1;padding:7px;font-size:10px;border-radius:4px;font-family:inherit;border:0.5px solid ${hasNoValue?'var(--no)':'var(--border)'};background:${hasNoValue?'#fef2f2':'var(--bg)'};color:${hasNoValue?'var(--no)':'var(--muted)'};cursor:pointer`;
+    const noBtnLabel=hasNoValue
+      ?(isBuyNo?`⚡ NO $${maxDeploy} (+${noNetGap}¢)`:`Buy NO $${maxDeploy} (+${noNetGap}¢)`)
+      :`NO ${no_ask}¢`;
+    const noBtnClick=hasNoValue
+      ?`autoExecuteSettled('${ticker}','${d.city}','${strike}','no')`
+      :`addBet('${ticker}','NO',50)`;
 
     return `<div class="mcard" style="border-left:3px solid ${cardBorder}">
       <div style="padding:10px 12px;border-bottom:0.5px solid var(--border);">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-          <div style="font-size:13px;font-weight:500;color:${isSkip?'var(--muted)':isBuy?'var(--yes)':'#854F0B'}">${decision} · Above ${strike}"</div>
-          <div style="font-size:10px;font-weight:500;color:${netGap>=10?'var(--yes)':netGap>=5?'#854F0B':'var(--muted)'};font-size:16px">+${netGap}¢</div>
+          <div style="font-size:13px;font-weight:500;color:${isSkip?'var(--muted)':isBuyNo?'var(--no)':isBuyYes?'var(--yes)':'var(--ink)'}">${decision} · Above ${strike}"</div>
+          <div style="font-size:15px;font-weight:600;color:${isBuyYes&&netGap>=10?'var(--yes)':isBuyNo&&noNetGap>=10?'var(--no)':'var(--muted)'}">
+            ${isBuyYes?'+'+netGap+'¢':isBuyNo?'+'+noNetGap+'¢ NO':'—'}
+          </div>
         </div>
         <div style="font-size:11px;color:var(--muted);line-height:1.5">${why}</div>
         <div style="font-size:10px;color:var(--muted);margin-top:2px">${isSkip?'⚠ Illiquid — skip':holdNote}</div>
       </div>
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:0.5px solid var(--border);">
-        <div style="font-size:11px;color:var(--muted)">Model <b style="color:var(--ink)">${modelP}%</b> · Kalshi <b style="color:var(--ink)">${yes_ask}¢</b> · Grade <b style="color:var(--ink)">${grade}</b> · Max <b style="color:var(--ink)">$${maxDeploy}</b></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 12px;border-bottom:0.5px solid var(--border);gap:12px">
+        <div style="font-size:11px;color:var(--muted)">Model <b style="color:var(--ink)">${modelP}%</b> YES · <b style="color:var(--ink)">${modelNoP}%</b> NO</div>
+        <div style="font-size:11px;color:var(--muted)">Kalshi <b style="color:var(--ink)">${yes_ask}¢</b> YES · <b style="color:var(--ink)">${no_ask}¢</b> NO · Grade <b style="color:var(--ink)">${grade}</b></div>
       </div>
       <div style="display:flex;gap:6px;padding:8px 12px;">
-        <button style="flex:1;padding:7px;font-size:10px;cursor:${isSkip?'not-allowed':'pointer'};border-radius:4px;font-family:inherit;background:${isBuy&&!isSkip?'var(--yes-lt)':'var(--bg)'};color:${isBuy&&!isSkip?'var(--yes)':'var(--muted)'};border:0.5px solid ${isBuy&&!isSkip?'var(--yes-border)':'var(--border)'};" onclick="addBet('${m.ticker||strike}','YES',${maxDeploy})" ${isSkip?'disabled':''}>
-          ${isSkip?'Skip':'Buy YES $'+maxDeploy}
+        <button style="${yesBtnStyle}" onclick="${yesBtnClick}" ${isSkip?'disabled':''}>
+          ${yesBtnLabel}
         </button>
-        <button style="flex:1;padding:7px;font-size:10px;cursor:pointer;border-radius:4px;font-family:inherit;background:var(--bg);color:var(--muted);border:0.5px solid var(--border);" onclick="addBet('${m.ticker||strike}','NO',50)">
-          No 50 contracts
+        <button style="${noBtnStyle}" onclick="${noBtnClick}">
+          ${noBtnLabel}
         </button>
       </div>
     </div>`;
