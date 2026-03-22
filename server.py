@@ -1240,7 +1240,7 @@ class Handler(BaseHTTPRequestHandler):
                 "nws":              nws,
                 "iem":              iem,
                 "kalshi":           kalshi,
-                "mtd":              mtd,
+                "mtd":              true_mtd,
                 "gap_total":        gap_total,
                 "true_mtd":         true_mtd,
                     "nws_is_finalized":  nws.get("is_finalized", True),
@@ -1257,7 +1257,7 @@ class Handler(BaseHTTPRequestHandler):
                 "db_connected":     bool(DATABASE_URL and PSYCOPG2_AVAILABLE),
             }
 
-            print(f"  ✅ NWS: {mtd}\" | IEM gap: +{gap_total}\" | True MTD: {true_mtd}\" | EOD proj: {today_eod}\" | WU 10-day: {wu_remaining}\" | conf: {conf}")
+            print(f"  ✅ NWS: {true_mtd}\" | IEM gap: +{gap_total}\" | True MTD: {true_mtd}\" | EOD proj: {today_eod}\" | WU 10-day: {wu_remaining}\" | conf: {conf}")
             self.send_json(result)
 
         elif path == "/snapshots":
