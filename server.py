@@ -1832,13 +1832,12 @@ class Handler(BaseHTTPRequestHandler):
 
                     positions = []
                     for p in pos_data.get("market_positions", []):
-                        # Kalshi API returns monetary values in CENTS (integers)
-                        # Field names have no _dollars suffix
-                        qty     = int(p.get("position", 0) or 0)
-                        cost    = float(p.get("total_traded", 0) or 0) / 100
-                        r_pnl   = float(p.get("realized_pnl", 0) or 0) / 100
-                        mkt_exp = float(p.get("market_exposure", 0) or 0) / 100
-                        fees    = float(p.get("fees_paid", 0) or 0) / 100
+                        # Kalshi API returns _dollars fields already in dollars (strings), position_fp for contracts
+                        qty     = float(p.get("position_fp", 0) or 0)
+                        cost    = float(p.get("total_traded_dollars", 0) or 0)
+                        r_pnl   = float(p.get("realized_pnl_dollars", 0) or 0)
+                        mkt_exp = float(p.get("market_exposure_dollars", 0) or 0)
+                        fees    = float(p.get("fees_paid_dollars", 0) or 0)
                         ur_pnl  = mkt_exp - cost  # unrealized = current exposure - cost basis
                         positions.append({
                             "ticker":        p.get("ticker", ""),

@@ -895,16 +895,16 @@ function renderPortfolio(port,pnl){
     <div class="section-lbl" style="margin-bottom:8px">Open positions</div>
     <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">
       ${positions.map(p=>{
-        const upnl=p.unrealized_pnl||0;
         const isRain=p.ticker?.includes('RAIN')||p.market_title?.toLowerCase().includes('rain');
-        return `<div class="opp ${upnl>=0?'settled':'probabilistic'}" style="cursor:default">
+        const avgPrice=p.avg_yes_price||0;
+        return `<div class="opp near-certain" style="cursor:default">
           <div class="opp-inner">
             <div class="opp-left">
-              <div class="opp-decision" style="font-size:12px">${p.market_title||p.ticker}</div>
-              <div class="opp-context">${Math.abs(p.yes_contracts)} contracts · cost $${(p.total_cost||0).toFixed(2)} · value $${(p.market_value||0).toFixed(2)}</div>
+              <div class="opp-decision" style="font-size:12px">${p.ticker}</div>
+              <div class="opp-context">${Math.abs(p.yes_contracts)} contracts · avg ${avgPrice.toFixed(0)}¢ · cost $${(p.total_cost||0).toFixed(2)}</div>
             </div>
             <div class="opp-right">
-              <div class="opp-net-gap" style="font-size:18px;color:${upnl>=0?'var(--yes)':'var(--no)'}">${upnl>=0?'+':''}$${upnl.toFixed(2)}</div>
+              <div class="opp-net-gap" style="font-size:13px;color:var(--muted)">Open</div>
               <div class="opp-meta-right">${isRain?'🌧 Rain market':''}</div>
             </div>
           </div>
