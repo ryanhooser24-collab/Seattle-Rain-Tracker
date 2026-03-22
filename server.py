@@ -1641,14 +1641,47 @@ class Handler(BaseHTTPRequestHandler):
 
                     actual = settlements.get(actual_key) or settlements.get(month_key)
 
-                    # Fetch at each lead time
+                    # Fetch IEM daily actuals for this month (used as banked portion)
+                    station = cfg["icao_code"][1:]
+                    try:
+                        iem_r = requests.get(
+                            "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py",
+                            params={"station": station, "data": "p01i",
+                                    "year1": year, "month1": month, "day1": 1,
+                                    "year2": year, "month2": month, "day2": days_in_month,
+                                    "tz": cfg["tz"], "format": "comma",
+                                    "latlon": "no", "direct": "no", "report_type": 3},
+                            headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
+                        daily_in = {}
+                        for line in iem_r.text.strip().split("\n"):
+                            if not line or line.startswith("#") or line.startswith("station"):
+                                continue
+                            parts = line.strip().split(",")
+                            if len(parts) < 3:
+                                continue
+                            day_str = parts[1][:10]
+                            val = parts[2].strip()
+                            try:
+                                v = 0.0 if val in ("M", "T", "") else float(val)
+                            except ValueError:
+                                v = 0.0
+                            daily_in[day_str] = daily_in.get(day_str, 0.0) + v
+                    except Exception:
+                        daily_in = {}
+
+                    # Fetch at each lead time: banked_inches + OM_forecast_remaining
                     horizon_data = {}
-                    for lead in [1, 3, 5, 7, 10]:
-                        target_date = last_day - timedelta(days=lead)
+                    for lead in [1, 3, 5, 7]:
+                        bank_through_day = days_in_month - lead
+                        if bank_through_day < 1:
+                            horizon_data[f"d{lead}"] = None
+                            continue
+                        banked_inches = sum(
+                            daily_in.get(f"{year}-{month:02d}-{d:02d}", 0.0)
+                            for d in range(1, bank_through_day + 1)
+                        )
                         try:
-                            # Open-Meteo Previous Runs API
-                            # past_days=N returns what was predicted N days ago
-                            _pvar = f"precipitation_previous_day{min(lead, 7)}"
+                            _pvar = f"precipitation_previous_day{lead}"
                             r = requests.get(OM_PREV_URL, params={
                                 "latitude":      cfg["lat"],
                                 "longitude":     cfg["lon"],
@@ -1661,11 +1694,12 @@ class Handler(BaseHTTPRequestHandler):
                             data   = r.json()
                             hours  = data.get("hourly", {}).get("time", [])
                             precip = data.get("hourly", {}).get(_pvar, [])
-                            month_total_mm = sum(
+                            forecast_mm = sum(
                                 float(p or 0) for h, p in zip(hours, precip)
-                                if h and h[:7] == f"{year}-{month:02d}"
+                                if h and f"{year}-{month:02d}-" in h
+                                and int(h[8:10]) > bank_through_day
                             )
-                            horizon_data[f"d{lead}"] = round(month_total_mm / 25.4, 2)
+                            horizon_data[f"d{lead}"] = round(banked_inches + forecast_mm / 25.4, 2)
                         except Exception:
                             horizon_data[f"d{lead}"] = None
 
@@ -1678,13 +1712,13 @@ class Handler(BaseHTTPRequestHandler):
                             f"d{lead}": round(horizon_data.get(f"d{lead}",0) - actual, 2)
                             if actual is not None and horizon_data.get(f"d{lead}") is not None
                             else None
-                            for lead in [1, 3, 5, 7, 10]
+                            for lead in [1, 3, 5, 7]
                         } if actual is not None else {}
                     })
 
                 # Compute summary stats per horizon
                 summary = {}
-                for lead in [1, 3, 5, 7, 10]:
+                for lead in [1, 3, 5, 7]:
                     key = f"d{lead}"
                     errs = [r["errors"].get(key) for r in results if r.get("errors") and r["errors"].get(key) is not None]
                     if errs:
@@ -1695,7 +1729,6 @@ class Handler(BaseHTTPRequestHandler):
                             "mae":       round(sum(abs(e) for e in errs)/n, 3),
                             "rmse":      round((sum(e**2 for e in errs)/n)**0.5, 3),
                             "bias":      "WET" if sum(errs)/n > 0.1 else "DRY" if sum(errs)/n < -0.1 else "NEUTRAL",
-                            # This is the empirical sigma — replace hardcoded table with this
                             "sigma":     round((sum(e**2 for e in errs)/n)**0.5, 3),
                         }
 
@@ -2027,7 +2060,7 @@ class Handler(BaseHTTPRequestHandler):
                 import calendar as cal_mod
                 actuals = fetch_nws_clm_actuals(city_key)
                 today   = date.today()
-                horizon_errors = {f"d{l}": [] for l in [1, 3, 5, 7, 10]}
+                horizon_errors = {f"d{l}": [] for l in [1, 3, 5, 7]}
                 for m_back in range(1, months_back + 1):
                     month_date = today.replace(day=1)
                     for _ in range(m_back):
@@ -2111,11 +2144,11 @@ class Handler(BaseHTTPRequestHandler):
                 result = {"city": city_key, "sigma_ok": False, "bias_ok": False,
                           "sigma_months": 0, "bias_horizons": 0, "errors": []}
                 try:
-                    # ── 1. Backtest → sigma ──────────────────────────────────
                     actuals = fetch_nws_clm_actuals(city_key)
                     today   = _date.today()
-                    horizon_data_all = {f"d{l}": [] for l in [1, 3, 5, 7, 10]}
+                    horizon_errors = {f"d{l}": [] for l in [1, 3, 5, 7]}
                     months_used = 0
+                    station = cfg["icao_code"][1:]  # strip K for IEM
 
                     for m_back in range(1, months_back + 1):
                         month_date = today.replace(day=1)
@@ -2123,16 +2156,64 @@ class Handler(BaseHTTPRequestHandler):
                             month_date = (month_date - _td(days=1)).replace(day=1)
                         year  = month_date.year
                         month = month_date.month
-                        actual = actuals.get(f"{year}-{month:02d}")
-                        if actual is None:
+                        actual_total = actuals.get(f"{year}-{month:02d}")
+                        if actual_total is None:
                             continue
                         days_in_month = _cal.monthrange(year, month)[1]
-                        last_day = _date(year, month, days_in_month)
 
-                        om_errors = []
-                        for lead in [1, 3, 5, 7, 10]:
+                        # Fetch IEM daily actuals for this month to get banked totals
+                        # IEM daily report_type=3 gives daily summaries
+                        m_start = f"{year}-{month:02d}-01"
+                        m_end   = f"{year}-{month:02d}-{days_in_month:02d}"
+                        try:
+                            iem_r = requests.get(
+                                "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py",
+                                params={"station": station, "data": "p01i",
+                                        "year1": year, "month1": month, "day1": 1,
+                                        "year2": year, "month2": month, "day2": days_in_month,
+                                        "tz": cfg["tz"], "format": "comma",
+                                        "latlon": "no", "direct": "no", "report_type": 3},
+                                headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+                            # Build daily totals: day_str -> inches
+                            daily_in = {}
+                            for line in iem_r.text.strip().split("\n"):
+                                if not line or line.startswith("#") or line.startswith("station"):
+                                    continue
+                                parts = line.strip().split(",")
+                                if len(parts) < 3:
+                                    continue
+                                day_str = parts[1][:10]
+                                val = parts[2].strip()
+                                if val in ("M", "T", ""):
+                                    v = 0.0
+                                else:
+                                    try:
+                                        v = float(val)
+                                    except ValueError:
+                                        v = 0.0
+                                daily_in[day_str] = daily_in.get(day_str, 0.0) + v
+                        except Exception as ex:
+                            result["errors"].append(f"IEM {year}-{month:02d}: {str(ex)[:60]}")
+                            continue
+
+                        # For each lead, compute projected_total at that horizon
+                        # projected = banked_through_(EOM-lead) + OM_forecast_for_remaining_lead_days
+                        for lead in [1, 3, 5, 7]:
                             try:
-                                _pvar = f"precipitation_previous_day{min(lead, 7)}"
+                                # Days already banked = all days except last `lead` days
+                                bank_through_day = days_in_month - lead  # inclusive day number
+                                if bank_through_day < 1:
+                                    continue
+
+                                banked_inches = sum(
+                                    daily_in.get(f"{year}-{month:02d}-{d:02d}", 0.0)
+                                    for d in range(1, bank_through_day + 1)
+                                )
+
+                                # OM forecast for remaining `lead` days
+                                # Use precipitation_previous_day{lead} which gives what OM
+                                # predicted `lead` days ago — sum only the remaining days
+                                _pvar = f"precipitation_previous_day{lead}"
                                 r = requests.get(OM_PREV_URL, params={
                                     "latitude":      cfg["lat"],
                                     "longitude":     cfg["lon"],
@@ -2142,30 +2223,33 @@ class Handler(BaseHTTPRequestHandler):
                                     "forecast_days": 16,
                                 }, timeout=15)
                                 if not r.ok:
-                                    om_errors.append(f"d{lead}: HTTP {r.status_code} - {r.text[:100]}")
                                     continue
-                                data = r.json()
-                                if "error" in data:
-                                    om_errors.append(f"d{lead}: {data['error']}")
-                                    continue
+                                data   = r.json()
                                 hours  = data.get("hourly", {}).get("time", [])
                                 precip = data.get("hourly", {}).get(_pvar, [])
-                                month_mm = sum(float(p or 0) for h, p in zip(hours, precip)
-                                             if h and h[:7] == f"{year}-{month:02d}")
-                                error = round(month_mm / 25.4 - actual, 2)
-                                horizon_data_all[f"d{lead}"].append(error)
+
+                                # Sum only hours in the remaining days (day bank_through_day+1 to EOM)
+                                forecast_mm = sum(
+                                    float(p or 0) for h, p in zip(hours, precip)
+                                    if h and f"{year}-{month:02d}-" in h
+                                    and int(h[8:10]) > bank_through_day
+                                )
+                                forecast_inches = forecast_mm / 25.4
+
+                                projected_total = banked_inches + forecast_inches
+                                error = round(projected_total - actual_total, 2)
+                                horizon_errors[f"d{lead}"].append(error)
+
                             except Exception as ex:
-                                om_errors.append(f"d{lead}: {str(ex)[:80]}")
-                        if om_errors and months_used == 0:
-                            # Surface first OM error so it's visible in UI
-                            result["errors"].extend(om_errors[:2])
+                                result["errors"].append(f"d{lead} {year}-{month:02d}: {str(ex)[:60]}")
+
                         months_used += 1
 
-                    # Build summary and update sigma cache
+                    # Build summary and update caches
                     summary = {}
-                    for lead in [1, 3, 5, 7, 10]:
+                    for lead in [1, 3, 5, 7]:
                         key  = f"d{lead}"
-                        errs = horizon_data_all[key]
+                        errs = horizon_errors[key]
                         if not errs:
                             continue
                         n    = len(errs)
@@ -2178,15 +2262,14 @@ class Handler(BaseHTTPRequestHandler):
                             "mae":      round(sum(abs(e) for e in errs) / n, 3),
                             "bias":     "WET" if mean > 0.1 else "DRY" if mean < -0.1 else "NEUTRAL",
                         }
-                        # Update bias cache
                         _BIAS_CACHE[f"{city_key}-{key}"] = mean
 
                     update_sigma_from_backtest(city_key, summary)
-                    result["sigma_ok"]     = city_key in _SIGMA_CACHE
-                    result["sigma_months"] = months_used
-                    result["bias_ok"]      = True
+                    result["sigma_ok"]      = city_key in _SIGMA_CACHE
+                    result["sigma_months"]  = months_used
+                    result["bias_ok"]       = True
                     result["bias_horizons"] = len(summary)
-                    result["summary"]      = summary
+                    result["summary"]       = summary
 
                 except Exception as e:
                     result["errors"].append(str(e))
