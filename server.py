@@ -882,7 +882,7 @@ def get_db():
     if not PSYCOPG2_AVAILABLE or not DATABASE_URL:
         return None
     try:
-        return psycopg2.connect(DATABASE_URL, sslmode="require")
+        return psycopg2.connect(DATABASE_URL, sslmode="require", connect_timeout=5)
     except Exception as e:
         print(f"  ⚠️  DB connect failed: {e}")
         return None
@@ -1134,7 +1134,8 @@ class Handler(BaseHTTPRequestHandler):
             print(f"\n📡 Fetching data for {city_cfg['label']}...")
 
             import concurrent.futures as _cf
-            with _cf.ThreadPoolExecutor(max_workers=5) as _ex:
+            _ex = _cf.ThreadPoolExecutor(max_workers=5)
+            try:
                 _f_wu      = _ex.submit(fetch_wu_forecast, city_cfg)
                 _f_hourly  = _ex.submit(fetch_wu_hourly,   city_cfg)
                 _f_nws     = _ex.submit(fetch_nws_mtd,     city_cfg)
@@ -1151,6 +1152,8 @@ class Handler(BaseHTTPRequestHandler):
                 except: kalshi    = {"ok": False, "markets": []}
                 try:    iem       = _f_iem.result(timeout=8)
                 except: iem       = {"ok": False, "gap_total": 0}
+            finally:
+                _ex.shutdown(wait=False)  # Never block — stalled threads die in background
 
             # True MTD assembly:
             # If NWS FINALIZED (issued 0-4 AM): MTD is through yesterday midnight, safe base.
