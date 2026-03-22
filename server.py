@@ -416,9 +416,11 @@ _CLM_CACHE_TTL = 6 * 3600  # 6 hours
 def fetch_nws_clm_actuals(city_key):
     """
     Fetch historical monthly precipitation actuals from NWS CLM product.
-    CLM = Monthly Weather Summary — issued once per month, contains
-    'TOTAL PRECIPITATION' table with daily values + monthly total.
-    Returns { "YYYY-MM": inches } for the last ~14 months.
+    CLM = Monthly Climate Summary — issued once per month the day after month end.
+    Actual NWS CLM format:
+      Header:  "...THE CHICAGO-MIDWAY CLIMATE SUMMARY FOR THE MONTH OF JUNE 2023..."
+      Precip:  "TOTALS 2.08 4.01 -1.93 1.58"  (observed | normal | depart | last year)
+    Returns { "YYYY-MM": inches } for available months.
     """
     cfg = CITIES.get(city_key)
     if not cfg:
@@ -431,7 +433,10 @@ def fetch_nws_clm_actuals(city_key):
     actuals = {}
     headers = {"User-Agent": "Mozilla/5.0"}
 
-    # Fetch last 14 CLM versions (1 per month usually, some offices issue corrections)
+    MONTH_MAP = {"JANUARY":1,"FEBRUARY":2,"MARCH":3,"APRIL":4,
+                 "MAY":5,"JUNE":6,"JULY":7,"AUGUST":8,
+                 "SEPTEMBER":9,"OCTOBER":10,"NOVEMBER":11,"DECEMBER":12}
+
     clm_url = (f"https://forecast.weather.gov/product.php"
                f"?site={cfg['nws_site']}"
                f"&issuedby={cfg['nws_issuedby']}"
@@ -447,17 +452,16 @@ def fetch_nws_clm_actuals(city_key):
             pre  = soup.find("pre")
             raw  = pre.get_text() if pre else r.text
 
-            # Extract month/year from header e.g. "CLIMATE REPORT FOR FEBRUARY 2026"
+            # Real CLM header: "...THE <CITY> CLIMATE SUMMARY FOR THE MONTH OF JUNE 2023..."
             month_match = re.search(
-                r"(?:CLIMATE REPORT FOR|MONTHLY SUMMARY FOR|SUMMARY FOR)\s+"
-                r"([A-Z]+)\s+(\d{4})",
+                r"FOR THE MONTH OF\s+([A-Z]+)\s+(\d{4})",
                 raw, re.IGNORECASE
             )
             if not month_match:
-                # Try alternate: "MONTHLY WEATHER SUMMARY...JANUARY 2026"
+                # Some offices omit "THE MONTH OF", try bare month+year in header
                 month_match = re.search(
-                    r"\b(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|"
-                    r"SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+(\d{4})\b",
+                    r"CLIMATE SUMMARY[^.]*?\s+(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|"
+                    r"JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+(\d{4})",
                     raw, re.IGNORECASE
                 )
             if not month_match:
@@ -465,39 +469,29 @@ def fetch_nws_clm_actuals(city_key):
 
             month_name = month_match.group(1).upper()
             year       = int(month_match.group(2))
-            month_map  = {"JANUARY":1,"FEBRUARY":2,"MARCH":3,"APRIL":4,
-                          "MAY":5,"JUNE":6,"JULY":7,"AUGUST":8,
-                          "SEPTEMBER":9,"OCTOBER":10,"NOVEMBER":11,"DECEMBER":12}
-            month_num  = month_map.get(month_name)
+            month_num  = MONTH_MAP.get(month_name)
             if not month_num:
                 continue
             month_key = f"{year}-{month_num:02d}"
 
-            # Extract monthly total precipitation
-            # Pattern 1: "TOTAL PRECIPITATION  X.XX" or "MONTHLY PRECIP  X.XX"
+            # Real CLM precip line: "TOTALS 2.08 4.01 -1.93 1.58"
+            # First number after TOTALS is the observed monthly total
+            # Must be under the PRECIPITATION (INCHES) section
+            precip_section = re.search(
+                r"PRECIPITATION \(INCHES\)(.*?)(?:SNOWFALL|DEGREE DAYS|WIND|$)",
+                raw, re.IGNORECASE | re.DOTALL
+            )
+            section_text = precip_section.group(1) if precip_section else raw
+
             total_match = re.search(
-                r"(?:TOTAL PRECIP(?:ITATION)?|MONTHLY PRECIP(?:ITATION)?)"
-                r"\s+([\d\.]+|T)\b",
-                raw, re.IGNORECASE
+                r"^[ \t]*TOTALS?\s+([\d\.]+|T)\b",
+                section_text, re.IGNORECASE | re.MULTILINE
             )
             if not total_match:
-                # Pattern 2: look for precipitation summary line
-                # e.g. "PRECIPITATION   3.14   ..."
-                total_match = re.search(
-                    r"^PRECIPITATION\s+([\d\.]+|T)",
-                    raw, re.IGNORECASE | re.MULTILINE
-                )
-            if not total_match:
-                # Pattern 3: sum daily precip values from the table
-                # Find lines like " 1   0.00   0.00 ..." under PRECIPITATION section
-                # Fallback: skip this version
                 continue
 
             val_str = total_match.group(1).strip()
-            if val_str == "T":
-                actuals[month_key] = 0.0
-            else:
-                actuals[month_key] = float(val_str)
+            actuals[month_key] = 0.0 if val_str == "T" else float(val_str)
 
         except Exception:
             continue
