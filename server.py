@@ -1657,7 +1657,7 @@ class Handler(BaseHTTPRequestHandler):
                                     "timezone":      cfg["tz"],
                                     "past_days":     lead,
                                     "forecast_days": 16,
-                                    "models":        f"previous_day_{lead}",
+                                    "models":        f"previous_day_{min(lead, 7)}",
                                 },
                                 timeout=10
                             )
@@ -2071,6 +2071,25 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
+        elif path == "/debug/om":
+            # Test Open-Meteo Previous Runs API connectivity
+            try:
+                r = requests.get(OM_PREV_URL, params={
+                    "latitude": 47.441, "longitude": -122.3,
+                    "daily": "precipitation_sum",
+                    "timezone": "America/Los_Angeles",
+                    "past_days": 1, "forecast_days": 3,
+                    "models": "previous_day_1",
+                }, timeout=10)
+                self.send_json({
+                    "ok": r.ok, "status": r.status_code,
+                    "url": OM_PREV_URL,
+                    "response_preview": r.text[:300] if not r.ok else "OK",
+                    "has_data": bool(r.ok and r.json().get("daily", {}).get("time")),
+                })
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e), "url": OM_PREV_URL})
+
         elif path == "/calibrate/all":
             # Runs backtest (sigma) + bias calibration for all 8 cities in parallel.
             # Call this once after every deploy to restore in-memory caches.
@@ -2105,6 +2124,7 @@ class Handler(BaseHTTPRequestHandler):
                         days_in_month = _cal.monthrange(year, month)[1]
                         last_day = _date(year, month, days_in_month)
 
+                        om_errors = []
                         for lead in [1, 3, 5, 7, 10]:
                             try:
                                 r = requests.get(OM_PREV_URL, params={
@@ -2115,17 +2135,25 @@ class Handler(BaseHTTPRequestHandler):
                                     "past_days":     lead,
                                     "forecast_days": 16,
                                     "models":        f"previous_day_{min(lead, 7)}",
-                                }, timeout=12)
-                                r.raise_for_status()
+                                }, timeout=15)
+                                if not r.ok:
+                                    om_errors.append(f"d{lead}: HTTP {r.status_code} - {r.text[:100]}")
+                                    continue
                                 data       = r.json()
+                                if "error" in data:
+                                    om_errors.append(f"d{lead}: {data['error']}")
+                                    continue
                                 dates_list = data.get("daily", {}).get("time", [])
                                 precip     = data.get("daily", {}).get("precipitation_sum", [])
                                 month_mm   = sum(float(p or 0) for d, p in zip(dates_list, precip)
                                                if d and d[:7] == f"{year}-{month:02d}")
                                 error = round(month_mm / 25.4 - actual, 2)
                                 horizon_data_all[f"d{lead}"].append(error)
-                            except Exception:
-                                pass
+                            except Exception as ex:
+                                om_errors.append(f"d{lead}: {str(ex)[:80]}")
+                        if om_errors and months_used == 0:
+                            # Surface first OM error so it's visible in UI
+                            result["errors"].extend(om_errors[:2])
                         months_used += 1
 
                     # Build summary and update sigma cache
