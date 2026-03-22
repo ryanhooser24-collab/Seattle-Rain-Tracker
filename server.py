@@ -1133,13 +1133,20 @@ class Handler(BaseHTTPRequestHandler):
             nws        = fetch_nws_mtd(city_cfg)
             kalshi     = fetch_kalshi_markets(city_cfg)
 
-            # Fetch IEM gap fill — from NWS report time to now
+            # Fetch IEM gap fill — always from midnight/1AM today to now (DST-aware)
             iem = fetch_iem_gap(nws.get("issued"), city_cfg)
 
-            # True MTD = NWS MTD + IEM gap
-            mtd           = nws.get("mtd", 0)
+            # True MTD assembly:
+            # If NWS FINALIZED (issued 0-4 AM): MTD is through yesterday midnight, safe base.
+            # If NWS PRELIMINARY (intraday): MTD includes today's rain so far.
+            #   Subtract today_val to get through-yesterday base; IEM fills today's gap.
+            #   This avoids double-counting today's rain in both NWS MTD and IEM gap.
+            nws_is_fin    = nws.get("is_finalized", False)
+            nws_today_val = nws.get("today", 0) or 0
+            mtd_raw       = nws.get("mtd", 0)
+            nws_base_mtd  = mtd_raw if nws_is_fin else round(mtd_raw - nws_today_val, 2)
             gap_total     = iem.get("gap_total", 0) if iem.get("ok") else 0
-            true_mtd      = round(mtd + gap_total, 2)
+            true_mtd      = round(nws_base_mtd + gap_total, 2)
 
             # Today's projected EOD = true MTD + WU hourly remainder tonight
             today_remaining = wu_hourly.get("today_remaining", 0) if wu_hourly.get("ok") else 0
@@ -1367,9 +1374,13 @@ class Handler(BaseHTTPRequestHandler):
                         try: iem      = f_iem.result(timeout=5)
                         except Exception: iem = {"ok": False, "gap_total": 0}
 
-                    mtd       = nws.get("mtd", 0)
-                    gap       = iem.get("gap_total", 0) if iem.get("ok") else 0
-                    true_mtd  = round(mtd + gap, 2)
+                    # Same double-count fix: preliminary NWS includes today's rain already
+                    _nws_fin    = nws.get("is_finalized", False)
+                    _nws_today  = nws.get("today", 0) or 0
+                    _mtd_raw    = nws.get("mtd", 0)
+                    _base_mtd   = _mtd_raw if _nws_fin else round(_mtd_raw - _nws_today, 2)
+                    gap         = iem.get("gap_total", 0) if iem.get("ok") else 0
+                    true_mtd    = round(_base_mtd + gap, 2)
                     today_rem = wu_hourly.get("today_remaining", 0) if wu_hourly.get("ok") else 0
                     today_eod = round(true_mtd + today_rem, 2)
                     # Cap to days within current month only — OM returns 16 days including next month

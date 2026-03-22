@@ -752,9 +752,17 @@ function renderScanner(results){
       :`Projection <b>${r.proj.toFixed(2)}"</b> clears ${r.strike}" by ${(r.proj-r.strike).toFixed(2)}" but ${r.daysLeft} days of forecast risk remain. Check again at 7 days.`;
 
     // Hold/exit guidance
-    const holdNote=mm
-      ?`Hold to settlement or exit when market reprices above ${r.kalshiP+8}¢.`
-      :`Hold to settlement — thin exit depth (${exitDepth} contracts), expect to hold full term.`;
+    const holdNote=r.mode==='settled'
+      ? (mm
+          ?`Hold to settlement (~99¢). Exit early only if market reprices above 93¢ and you want to redeploy capital.`
+          :`Hold to settlement (~99¢). Thin exit depth — plan to hold full term.`)
+      : r.mode==='near-certain'
+      ? (mm
+          ?`Hold to settlement or exit if market reprices above ${r.kalshiP+8}¢ before month end.`
+          :`Hold to settlement — thin exit depth, expect to hold full term.`)
+      : (mm
+          ?`Forecast-dependent — exit above ${r.kalshiP+8}¢ or if forecast shifts against you.`
+          :`Forecast-dependent — thin exit depth. Watch forecast daily.`);
 
     return `<div class="opp ${cardCls}" onclick="goToCity('${r.city}')">
       <div class="opp-inner">
@@ -838,12 +846,26 @@ async function loadPortfolio(){
   if(!wrap)return;
   wrap.innerHTML='<div class="scan-loading">Loading portfolio...</div>';
   try{
+    // Fetch both in parallel but don't let pnl failure kill portfolio display
     const[portRes,pnlRes]=await Promise.all([
       fetch(SERVER+'/portfolio'),
-      fetch(SERVER+'/pnl?limit=200')
+      fetch(SERVER+'/pnl?limit=200').catch(()=>null)
     ]);
+    if(!portRes.ok){
+      const err=await portRes.json().catch(()=>({error:portRes.statusText}));
+      wrap.innerHTML=`<div class="err-msg">Portfolio error: ${err.error||portRes.statusText}</div>`;
+      return;
+    }
     const port=await portRes.json();
-    const pnl=await pnlRes.json();
+    if(!port.ok){
+      wrap.innerHTML=`<div class="err-msg">Portfolio error: ${port.error}</div>`;
+      return;
+    }
+    // PnL is optional — show portfolio even if it fails
+    let pnl={ok:false,trades:[],total_pnl:0};
+    if(pnlRes&&pnlRes.ok){
+      try{ pnl=await pnlRes.json(); }catch(e){}
+    }
     renderPortfolio(port,pnl);
   }catch(e){
     wrap.innerHTML=`<div class="err-msg">Could not load portfolio: ${e.message}</div>`;
@@ -1040,6 +1062,9 @@ function renderRainfall(d){
         projected,wu_covers_eom,days_remaining,month}=d;
   const nws_mtd=nws.mtd||0;
   const nws_time=nws.issued||'—';
+  const nws_is_fin = d.nws_is_finalized !== false;
+  // IEM always anchors at midnight (standard time) or 1AM (DST) — independent of NWS issued time
+  const iem_anchor_label = d.iem_gap_start || (nws_is_fin ? 'midnight' : 'midnight today');
   const iem_hours=(iem.hours||[]);
   const wu_hours=(wu_hourly&&wu_hourly.hours||[]).filter(h=>h.qpf>0);
   const wuDays=wu.days||[];
@@ -1264,8 +1289,17 @@ function renderMarkets(d){
       ?`MTD at ${strike}" strike — minimal forecast risk`
       :`Proj ${proj.toFixed(2)}" vs ${strike}" strike`;
 
-    const holdNote=mm
-      ?`Hold to settlement or sell above ${yes_ask+8}¢`
+    const holdNote=mode==='settled'
+      ? (mm
+          ?`Hold to settlement (~99¢). Exit early only if market reprices above 93¢ and you want to redeploy capital.`
+          :`Hold to settlement (~99¢). Thin exit depth — plan to hold full term.`)
+      : mode==='near-certain'
+      ? (mm
+          ?`Hold to settlement or exit if market reprices above ${yes_ask+8}¢ before month end.`
+          :`Hold to settlement — thin exit depth, expect to hold full term.`)
+      : (mm
+          ?`Forecast-dependent — exit above ${yes_ask+8}¢ or if forecast shifts against you.`
+          :`Forecast-dependent — thin exit depth. Watch forecast daily.`);
       :`Hold to settlement (thin exit depth)`;
 
     return `<div class="mcard" style="border-left:3px solid ${cardBorder}">
