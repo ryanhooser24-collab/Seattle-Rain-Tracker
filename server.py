@@ -145,9 +145,9 @@ CITIES = {
         "label":         "New York, NY",
     },
     "chicago": {
-        "icao_code":     "KMDW",          # Kalshi settles on Midway (KMDW), NOT O'Hare (KORD)
+        "icao_code":     "KMDW",          # Kalshi settles on Midway, NOT O'Hare
         "nws_site":      "LOT",
-        "nws_issuedby":  "MDW",           # Midway CLI report, not ORD
+        "nws_issuedby":  "MDW",           # Midway CLI, not ORD
         "kalshi_series": "KXRAINCHIM",
         "lat": 41.786, "lon": -87.752,  "tz": "America/Chicago",
         "regime":        "mixed",
@@ -213,7 +213,7 @@ def validate_forecast_data(data, days, total, city_cfg=None):
                 delta = abs((today - forecast_date).days)
                 if delta > 2:
                     warnings.append(f"Forecast appears stale - first date is {first_date}")
-            except:
+            except Exception:
                 pass
 
     # 3. Zero-rain sanity check during expected wet season for this city
@@ -401,44 +401,59 @@ def fetch_nws_mtd(city_cfg=None):
         }
 
     except Exception as e:
+
         return {"ok": False, "error": str(e), "mtd": 0.0, "today": 0.0, "date": "", "source": "NWS CLI"}
 
 
-
 # ── CLM ACTUALS CACHE ─────────────────────────────────────────────────────────
-# Keyed by city_key → { "YYYY-MM": inches, ... }
-# Populated on first backtest request, refreshed if > 6 hours old
 import time as _time
-_CLM_CACHE = {}          # { city_key: { "YYYY-MM": float } }
-_CLM_CACHE_TS = {}       # { city_key: float (unix ts) }
-_CLM_CACHE_TTL = 6 * 3600  # 6 hours
+_CLM_CACHE = {}
+_CLM_CACHE_TS = {}
+_CLM_CACHE_TTL = 6 * 3600
+
+# ── SIGMA CACHE (populated from /backtest RMSE) ───────────────────────────────
+_SIGMA_CACHE = {}
+_SIGMA_FALLBACK = {10:1.4,9:1.3,8:1.2,7:1.0,6:0.85,5:0.7,4:0.55,3:0.4,2:0.25,1:0.15,0:0.05}
+
+# ── BIAS CACHE (populated from /backtest/calibration) ────────────────────────
+_BIAS_CACHE = {}
+
+
+def update_sigma_from_backtest(city_key, summary):
+    if not summary:
+        return
+    horizon_map = {1:"d1",2:"d1",3:"d3",4:"d3",5:"d5",6:"d5",7:"d7",8:"d7",9:"d10",10:"d10"}
+    sigma_table = dict(_SIGMA_FALLBACK)
+    for days, key in horizon_map.items():
+        if key in summary and summary[key].get("rmse") is not None:
+            sigma_table[days] = summary[key]["rmse"]
+    _SIGMA_CACHE[city_key] = sigma_table
+
+
+def get_sigma(city_key, days_remaining):
+    table = _SIGMA_CACHE.get(city_key, _SIGMA_FALLBACK)
+    sigma = table.get(min(days_remaining, 10), 1.4)
+    bias  = _BIAS_CACHE.get(f"{city_key}-d{min(days_remaining, 7)}", 0.0)
+    return sigma, bias
+
 
 def fetch_nws_clm_actuals(city_key):
-    """
-    Fetch historical monthly precipitation actuals from NWS CLM product.
-    CLM = Monthly Climate Summary — issued once per month the day after month end.
-    Actual NWS CLM format:
-      Header:  "...THE CHICAGO-MIDWAY CLIMATE SUMMARY FOR THE MONTH OF JUNE 2023..."
-      Precip:  "TOTALS 2.08 4.01 -1.93 1.58"  (observed | normal | depart | last year)
-    Returns { "YYYY-MM": inches } for available months.
-    """
+    """Fetch historical monthly precipitation actuals from NWS CLM product."""
     cfg = CITIES.get(city_key)
     if not cfg:
         return {}
-
     now = _time.time()
     if city_key in _CLM_CACHE and (now - _CLM_CACHE_TS.get(city_key, 0)) < _CLM_CACHE_TTL:
         return _CLM_CACHE[city_key]
 
     actuals = {}
     headers = {"User-Agent": "Mozilla/5.0"}
+    MONTH_MAP = {"JANUARY":1,"FEBRUARY":2,"MARCH":3,"APRIL":4,"MAY":5,"JUNE":6,
+                 "JULY":7,"AUGUST":8,"SEPTEMBER":9,"OCTOBER":10,"NOVEMBER":11,"DECEMBER":12}
 
-    MONTH_MAP = {"JANUARY":1,"FEBRUARY":2,"MARCH":3,"APRIL":4,
-                 "MAY":5,"JUNE":6,"JULY":7,"AUGUST":8,
-                 "SEPTEMBER":9,"OCTOBER":10,"NOVEMBER":11,"DECEMBER":12}
-
+    # CLM uses site=NWS (unlike CLI which uses site=<office>)
     clm_url = (f"https://forecast.weather.gov/product.php"
-               f"?site={cfg['nws_site']}"
+               f"?site=NWS"
                f"&issuedby={cfg['nws_issuedby']}"
                f"&product=CLM&format=txt")
 
@@ -452,18 +467,12 @@ def fetch_nws_clm_actuals(city_key):
             pre  = soup.find("pre")
             raw  = pre.get_text() if pre else r.text
 
-            # Real CLM header: "...THE <CITY> CLIMATE SUMMARY FOR THE MONTH OF JUNE 2023..."
-            month_match = re.search(
-                r"FOR THE MONTH OF\s+([A-Z]+)\s+(\d{4})",
-                raw, re.IGNORECASE
-            )
+            month_match = re.search(r"FOR THE MONTH OF\s+([A-Z]+)\s+(\d{4})", raw, re.IGNORECASE)
             if not month_match:
-                # Some offices omit "THE MONTH OF", try bare month+year in header
                 month_match = re.search(
                     r"CLIMATE SUMMARY[^.]*?\s+(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|"
                     r"JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\s+(\d{4})",
-                    raw, re.IGNORECASE
-                )
+                    raw, re.IGNORECASE)
             if not month_match:
                 continue
 
@@ -474,43 +483,30 @@ def fetch_nws_clm_actuals(city_key):
                 continue
             month_key = f"{year}-{month_num:02d}"
 
-            # Real CLM precip line: "TOTALS 2.08 4.01 -1.93 1.58"
-            # First number after TOTALS is the observed monthly total
-            # Must be under the PRECIPITATION (INCHES) section
             precip_section = re.search(
                 r"PRECIPITATION \(INCHES\)(.*?)(?:SNOWFALL|DEGREE DAYS|WIND|$)",
-                raw, re.IGNORECASE | re.DOTALL
-            )
+                raw, re.IGNORECASE | re.DOTALL)
             section_text = precip_section.group(1) if precip_section else raw
 
             total_match = re.search(
                 r"^[ \t]*TOTALS?\s+([\d\.]+|T)\b",
-                section_text, re.IGNORECASE | re.MULTILINE
-            )
+                section_text, re.IGNORECASE | re.MULTILINE)
             if not total_match:
                 continue
 
             val_str = total_match.group(1).strip()
             actuals[month_key] = 0.0 if val_str == "T" else float(val_str)
-
         except Exception:
             continue
 
-    # Merge with hardcoded Seattle values so we never lose confirmed data
     HARDCODED = {
         "seattle": {
-            "2024-10": 2.15,
-            "2024-11": 4.86,
-            "2024-12": 5.50,
-            "2025-01": 1.92,
-            "2025-11": 5.71,
-            "2025-12": 7.37,
-            "2026-01": 3.19,
-            "2026-02": 2.92,
+            "2024-10": 2.15, "2024-11": 4.86, "2024-12": 5.50,
+            "2025-01": 1.92, "2025-11": 5.71, "2025-12": 7.37,
+            "2026-01": 3.19, "2026-02": 2.92,
         }
     }
-    merged = {**HARDCODED.get(city_key, {}), **actuals}  # live data wins on conflict
-
+    merged = {**HARDCODED.get(city_key, {}), **actuals}
     _CLM_CACHE[city_key]    = merged
     _CLM_CACHE_TS[city_key] = now
     return merged
@@ -730,7 +726,7 @@ def fetch_kalshi_markets(city_cfg=None):
                     try:
                         inches = float(val)
                         break
-                    except:
+                    except Exception:
                         pass
 
             # Try functional_strike string e.g. "> 4.00" or "Above 4"
@@ -872,23 +868,22 @@ def liquidity_score(market):
     }
 
 
-def analyze_value(markets, projected_total, days_remaining=10, true_mtd=None, nws_is_finalized=True):
+def analyze_value(markets, projected_total, days_remaining=10, true_mtd=None,
+                  nws_is_finalized=True, city_key="seattle", month_num=None):
     """
     Three-mode probability + liquidity scoring.
-
-    Mode 1 — SETTLED:    true_mtd >= strike + 0.10"  → prob = 0.99
-    Mode 2 — NEAR_CERT:  true_mtd >= strike - 0.20"  → prob = high, low forecast risk
-    Mode 3 — FORECAST:   true_mtd < strike            → normal distribution with sigma
-
-    Gap = model_prob - kalshi_yes_ask
-    Net gap = gap - spread (friction cost)
+    Sigma comes from backtest RMSE cache (falls back to hardcoded table).
+    Bias correction applied when calibration data is available.
     """
+    import datetime as _dt
     from math import erf, sqrt
     def normcdf(x):
         return 0.5 * (1 + erf(x / sqrt(2)))
 
-    SIGMA_TABLE = {10:1.4,9:1.3,8:1.2,7:1.0,6:.85,5:.7,4:.55,3:.4,2:.25,1:.15,0:.0}
-    sigma = SIGMA_TABLE.get(min(days_remaining, 10), 1.5)
+    if month_num is None:
+        month_num = _dt.date.today().month
+    sigma, bias = get_sigma(city_key, days_remaining)
+    adjusted_proj = projected_total - bias
     conf  = confidence_weight(days_remaining)
     analyzed = []
 
@@ -913,18 +908,16 @@ def analyze_value(markets, projected_total, days_remaining=10, true_mtd=None, nw
             analyzed.append(m); continue
 
         # Three-mode probability
-        # Dynamic settled cushion — earlier in month = tighter threshold because:
-        #   - IEM gap fill is the edge (real-time vs stale NWS CLI)
-        #   - More days remaining = more runway to absorb any IEM/NWS measurement delta
-        #   - Speed of entry matters: earlier signal = lower ask price
+        # Pipeline already corrects for preliminary NWS: base = MTD - today + IEM gap fill.
+        # Result is equally reliable regardless of report timing, so threshold is always 0.10".
         if days_remaining >= 15:
-            settled_min = 0.02   # very early, maximum aggression
+            settled_min = 0.02
         elif days_remaining >= 8:
-            settled_min = 0.05   # mid-month, moderate confidence
+            settled_min = 0.05
         elif days_remaining >= 3:
-            settled_min = 0.10   # late month, current threshold
+            settled_min = 0.10
         else:
-            settled_min = 0.15   # final days, must be certain
+            settled_min = 0.15
 
         if cushion is not None and cushion >= settled_min:
             mode = "settled"
@@ -935,7 +928,7 @@ def analyze_value(markets, projected_total, days_remaining=10, true_mtd=None, nw
         else:
             mode = "probabilistic"
             if sigma > 0:
-                model_prob = round(normcdf((projected_total - inches) / sigma), 3)
+                model_prob = round(normcdf((adjusted_proj - inches) / sigma), 3)
             else:
                 model_prob = 1.0 if projected_total >= inches else 0.0
 
@@ -973,9 +966,9 @@ def analyze_value(markets, projected_total, days_remaining=10, true_mtd=None, nw
         else:
             decision = "HOLD"
 
-        no_ask     = m.get("no_ask", 0)
-        no_gap     = round((1 - model_prob) - no_ask, 3)   # NO prob gap
-        no_gap_c   = round(no_gap * 100)
+        no_ask       = m.get("no_ask", 0)
+        no_gap       = round((1 - model_prob) - no_ask, 3)
+        no_gap_c     = round(no_gap * 100)
         no_net_gap_c = max(0, no_gap_c - friction_c)
 
         m["edge"]          = edge
@@ -988,14 +981,17 @@ def analyze_value(markets, projected_total, days_remaining=10, true_mtd=None, nw
         m["margin"]        = margin
         m["confidence"]    = conf
         m["weighted_edge"] = weighted_edge
-        m["sigma"]         = sigma
+        m["sigma"]         = round(sigma, 3)
+        m["bias"]          = round(bias, 3)
+        m["adj_proj"]      = round(adjusted_proj, 2)
         m["liquidity"]     = liq
         m["net_gap_c"]     = net_gap_c
         m["actionable"]    = actionable
         m["decision"]      = decision
         m["edge_detail"]   = (
-            f"{mode} · model {int(model_prob*100)}% vs {int(yes_ask*100)}¢ "
-            f"= {gap_c:+d}¢ gap · {net_gap_c}¢ net · liq {liq['grade']}"
+            f"{mode} · model {int(model_prob*100)}% YES / {int((1-model_prob)*100)}% NO"
+            f" vs {int(yes_ask*100)}¢ YES / {int(no_ask*100)}¢ NO"
+            f" · sigma={sigma:.2f} bias={bias:+.2f} · {net_gap_c}¢ net · liq {liq['grade']}"
         )
         analyzed.append(m)
 
@@ -1269,16 +1265,16 @@ class Handler(BaseHTTPRequestHandler):
                 _f_kalshi  = _ex.submit(fetch_kalshi_markets, city_cfg)
                 # NWS must finish before IEM (IEM needs nws.issued)
                 try:    nws = _f_nws.result(timeout=8)
-                except: nws = {"ok": False, "mtd": 0.0, "today": 0.0, "issued": None, "is_finalized": False}
+                except Exception: nws = {"ok": False, "mtd": 0.0, "today": 0.0, "issued": None, "is_finalized": False}
                 _f_iem = _ex.submit(fetch_iem_gap, nws.get("issued"), city_cfg)
                 try:    wu        = _f_wu.result(timeout=8)
-                except: wu        = {"ok": False, "total_forecast": 0, "days": []}
+                except Exception: wu        = {"ok": False, "total_forecast": 0, "days": []}
                 try:    wu_hourly = _f_hourly.result(timeout=8)
-                except: wu_hourly = {"ok": False, "today_remaining": 0}
+                except Exception: wu_hourly = {"ok": False, "today_remaining": 0}
                 try:    kalshi    = _f_kalshi.result(timeout=8)
-                except: kalshi    = {"ok": False, "markets": []}
+                except Exception: kalshi    = {"ok": False, "markets": []}
                 try:    iem       = _f_iem.result(timeout=8)
-                except: iem       = {"ok": False, "gap_total": 0}
+                except Exception: iem       = {"ok": False, "gap_total": 0}
             finally:
                 _ex.shutdown(wait=False)  # Never block — stalled threads die in background
 
@@ -1333,7 +1329,7 @@ class Handler(BaseHTTPRequestHandler):
                 proj_for_signal = projected if wu_covers_eom else round(true_mtd + wu_remaining, 2)
                 kalshi["markets"] = analyze_value(
                     kalshi["markets"], proj_for_signal, days_remaining,
-                    true_mtd=true_mtd
+                    true_mtd=true_mtd, city_key=city_key, month_num=now_dt.month,
                 )
 
             # Sigma estimates by days remaining (calibrated via Open-Meteo backtest)
@@ -1465,22 +1461,6 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"error": str(e)})
 
-        elif path == "/debug/positions":
-            # Raw Kalshi position response — use to verify field names / units
-            try:
-                pos_r = requests.get(
-                    f"{KALSHI_BASE}/portfolio/positions",
-                    headers=kalshi_auth_headers("GET", "/trade-api/v2/portfolio/positions"),
-                    timeout=10,
-                    params={"limit": 10, "count_filter": "position"}
-                )
-                pos_r.raise_for_status()
-                raw = pos_r.json()
-                sample = raw.get("market_positions", [])[:3]
-                self.send_json({"ok": True, "raw_positions": sample, "count": len(raw.get("market_positions", []))})
-            except Exception as e:
-                self.send_json({"ok": False, "error": str(e)})
-
         elif path == "/ping":
             # Diagnostic: time each external source for one city
             import time
@@ -1562,7 +1542,9 @@ class Handler(BaseHTTPRequestHandler):
                         kalshi["markets"] = analyze_value(
                             kalshi["markets"], proj_signal, days_remaining,
                             true_mtd=true_mtd,
-                            nws_is_finalized=nws.get("is_finalized", True)
+                            nws_is_finalized=nws.get("is_finalized", True),
+                            city_key=city_key,
+                            month_num=datetime.now().month,
                         )
                     return {
                         "city":           city_key,
@@ -1626,10 +1608,9 @@ class Handler(BaseHTTPRequestHandler):
                 results = []
                 today = date.today()
 
-                # Fetch live NWS CLM actuals (cached 6h), merged with hardcoded fallbacks
+                # Fetch live NWS CLM actuals (cached 6h)
                 settlements = fetch_nws_clm_actuals(city_key)
-
-                # Also merge any manually entered settlements from Postgres
+                # Also try Postgres if available (adds any manually entered settlements)
                 conn = get_db()
                 if conn:
                     try:
@@ -1641,7 +1622,7 @@ class Handler(BaseHTTPRequestHandler):
                             for row in cur.fetchall():
                                 settlements[row[0]] = float(row[1])
                         conn.close()
-                    except:
+                    except Exception:
                         pass
 
                 # For each past complete month, fetch Previous Runs at D-1..D-7
@@ -1662,7 +1643,7 @@ class Handler(BaseHTTPRequestHandler):
 
                     # Fetch at each lead time
                     horizon_data = {}
-                    for lead in [1, 3, 5, 7]:
+                    for lead in [1, 3, 5, 7, 10]:
                         target_date = last_day - timedelta(days=lead)
                         try:
                             # Open-Meteo Previous Runs API
@@ -1690,7 +1671,7 @@ class Handler(BaseHTTPRequestHandler):
                                 if d and d[:7] == f"{year}-{month:02d}"
                             )
                             horizon_data[f"d{lead}"] = round(month_total_mm / 25.4, 2)
-                        except:
+                        except Exception:
                             horizon_data[f"d{lead}"] = None
 
                     results.append({
@@ -1702,13 +1683,13 @@ class Handler(BaseHTTPRequestHandler):
                             f"d{lead}": round(horizon_data.get(f"d{lead}",0) - actual, 2)
                             if actual is not None and horizon_data.get(f"d{lead}") is not None
                             else None
-                            for lead in [1, 3, 5, 7]
+                            for lead in [1, 3, 5, 7, 10]
                         } if actual is not None else {}
                     })
 
                 # Compute summary stats per horizon
                 summary = {}
-                for lead in [1, 3, 5, 7]:
+                for lead in [1, 3, 5, 7, 10]:
                     key = f"d{lead}"
                     errs = [r["errors"].get(key) for r in results if r.get("errors") and r["errors"].get(key) is not None]
                     if errs:
@@ -1723,36 +1704,19 @@ class Handler(BaseHTTPRequestHandler):
                             "sigma":     round((sum(e**2 for e in errs)/n)**0.5, 3),
                         }
 
+                # Auto-update sigma cache from RMSE
+                update_sigma_from_backtest(city_key, summary)
+
                 self.send_json({
-                    "ok":      True,
-                    "city":    city_key,
-                    "months":  months_back,
-                    "results": results,
-                    "summary": summary,
-                    "note":    "sigma values can replace SIGMA_TABLE in analyze_value for calibrated probabilities"
+                    "ok":            True,
+                    "city":          city_key,
+                    "months":        months_back,
+                    "results":       results,
+                    "summary":       summary,
+                    "sigma_updated": city_key in _SIGMA_CACHE,
+                    "note":          "RMSE values now used as sigma in live probability model"
                 })
 
-            except Exception as e:
-                self.send_json({"ok": False, "error": str(e)})
-
-        elif path == "/backtest/actuals":
-            # Debug: show what CLM scraper found for a city
-            # ?city=chicago  → returns { "YYYY-MM": inches } + cache status
-            qs       = parse_qs(urlparse(self.path).query)
-            city_key = qs.get("city", ["seattle"])[0]
-            force    = qs.get("force", ["0"])[0] == "1"
-            if force:
-                _CLM_CACHE_TS[city_key] = 0  # bust cache
-            try:
-                actuals = fetch_nws_clm_actuals(city_key)
-                self.send_json({
-                    "ok":      True,
-                    "city":    city_key,
-                    "actuals": actuals,
-                    "count":   len(actuals),
-                    "cached":  not force,
-                    "note":    "Add ?force=1 to bypass 6h cache and re-scrape NWS CLM"
-                })
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
@@ -1799,7 +1763,7 @@ class Handler(BaseHTTPRequestHandler):
                         try:
                             date_str = t[:10]
                             daily_totals[date_str] += float(p)
-                        except:
+                        except Exception:
                             pass
 
                 # Also fetch NWS CLI archive via IEM API for the same period
@@ -1815,7 +1779,7 @@ class Handler(BaseHTTPRequestHandler):
                         p = entry.get("precip", None)
                         if d and p is not None:
                             try: nws_data[d] = float(p)
-                            except: pass
+                            except Exception: pass
 
                 # Compare: IEM daily sum vs NWS official for same day
                 errors = []
@@ -1902,7 +1866,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "issued": issued_m.group(1).strip() if issued_m else None,
                                 "is_correction": cca,
                             })
-                    except:
+                    except Exception:
                         break
 
                 # Find corrections: MTD changed between versions
@@ -1935,7 +1899,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(e)})
 
         elif path.startswith("/orderbook/"):
-            # GET /orderbook/{ticker} — fetch Kalshi order book for sizing
             ticker = path.split("/orderbook/")[1].strip("/")
             if not ticker:
                 self.send_json({"ok": False, "error": "No ticker"})
@@ -1944,46 +1907,66 @@ class Handler(BaseHTTPRequestHandler):
                     ob_path = f"/trade-api/v2/markets/{ticker}/orderbook"
                     r = requests.get(
                         f"{KALSHI_BASE}/markets/{ticker}/orderbook",
-                        headers=kalshi_auth_headers("GET", ob_path),
-                        timeout=8
-                    )
+                        headers=kalshi_auth_headers("GET", ob_path), timeout=8)
                     r.raise_for_status()
                     ob = r.json().get("orderbook", {})
-
-                    # YES asks: [[price_cents, size], ...] sorted ascending
-                    yes_asks = ob.get("yes", [])  # [[price, size], ...]
-
-                    # Compute available depth below edge_ceiling (97¢ for settled plays)
                     EDGE_CEILING = 97
-                    depth = []
-                    total_contracts = 0
-                    total_cost = 0.0
-                    for level in yes_asks:
-                        price_c = int(level[0])
-                        size    = int(level[1])
-                        if price_c > EDGE_CEILING:
-                            break
+                    depth, total_contracts, total_cost = [], 0, 0.0
+                    for level in ob.get("yes", []):
+                        price_c, size = int(level[0]), int(level[1])
+                        if price_c > EDGE_CEILING: break
                         cost = round(price_c / 100 * size, 2)
                         depth.append({"price_c": price_c, "size": size, "cost": cost})
-                        total_contracts += size
-                        total_cost += cost
+                        total_contracts += size; total_cost += cost
+                    self.send_json({"ok": True, "ticker": ticker, "depth": depth,
+                        "total_contracts": total_contracts, "total_cost": round(total_cost, 2),
+                        "edge_ceiling_c": EDGE_CEILING})
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)})
 
-                    self.send_json({
-                        "ok":              True,
-                        "ticker":          ticker,
-                        "depth":           depth,
-                        "total_contracts": total_contracts,
-                        "total_cost":      round(total_cost, 2),
-                        "edge_ceiling_c":  EDGE_CEILING,
-                        "levels":          len(depth),
-                    })
+        elif path == "/orders/auto":
+            qs = parse_qs(urlparse(self.path).query)
+            ticker = qs.get("ticker", [""])[0]
+            side   = qs.get("side", ["yes"])[0].lower()
+            if not ticker or not KALSHI_KEY_ID:
+                self.send_json({"ok": False, "error": "ticker and API key required"})
+            else:
+                try:
+                    EDGE_CEILING = 97; MAX_PCT = 0.40
+                    bal_r = requests.get(f"{KALSHI_BASE}/portfolio/balance",
+                        headers=kalshi_auth_headers("GET", "/trade-api/v2/portfolio/balance"), timeout=8)
+                    bal_r.raise_for_status(); bal = bal_r.json()
+                    cash    = float(bal.get("balance", 0) or 0) / 100
+                    port    = float(bal.get("portfolio_value", 0) or 0) / 100
+                    budget  = min(cash, port * MAX_PCT)
+                    ob_r = requests.get(f"{KALSHI_BASE}/markets/{ticker}/orderbook",
+                        headers=kalshi_auth_headers("GET", f"/trade-api/v2/markets/{ticker}/orderbook"), timeout=8)
+                    ob_r.raise_for_status()
+                    asks = ob_r.json().get("orderbook", {}).get(side, [])
+                    orders, spent = [], 0.0
+                    for level in asks:
+                        price_c, size = int(level[0]), int(level[1])
+                        if price_c > EDGE_CEILING: break
+                        level_cost = price_c / 100 * size
+                        if spent + level_cost > budget:
+                            partial = int((budget - spent) / (price_c / 100))
+                            if partial > 0:
+                                orders.append({"price_c": price_c, "count": partial,
+                                    "cost": round(partial * price_c / 100, 2)})
+                                spent += partial * price_c / 100
+                            break
+                        orders.append({"price_c": price_c, "count": size,
+                            "cost": round(level_cost, 2)})
+                        spent += level_cost
+                    self.send_json({"ok": True, "ticker": ticker, "side": side,
+                        "cash": round(cash, 2), "portfolio": round(port, 2),
+                        "budget": round(budget, 2), "orders": orders,
+                        "total_contracts": sum(o["count"] for o in orders),
+                        "total_cost": round(spent, 2)})
                 except Exception as e:
                     self.send_json({"ok": False, "error": str(e)})
 
         elif path == "/orders" and self.command == "POST":
-            # POST /orders — execute a settled-play buy order
-            # Body: { "ticker": "KXRAINCHIM-26APR-4", "yes_price_c": 67, "count": 100 }
-            # Sweeps orderbook level by level up to edge_ceiling, respects cash balance
             if not KALSHI_KEY_ID:
                 self.send_json({"ok": False, "error": "No Kalshi API key"})
             else:
@@ -1994,123 +1977,99 @@ class Handler(BaseHTTPRequestHandler):
                     side        = body.get("side", "yes").lower()
                     count       = int(body.get("count", 0))
                     yes_price_c = int(body.get("yes_price_c", 0))
-
                     if not ticker or count <= 0 or yes_price_c <= 0:
-                        self.send_json({"ok": False, "error": "ticker, count, yes_price_c required"})
-                        return
-
+                        self.send_json({"ok": False, "error": "ticker, count, yes_price_c required"}); return
                     if yes_price_c > 97:
-                        self.send_json({"ok": False, "error": "yes_price_c exceeds edge ceiling (97¢)"})
-                        return
-
-                    order_path = "/trade-api/v2/orders"
-                    payload = {
-                        "ticker":    ticker,
-                        "side":      side,        # "yes" or "no"
-                        "action":    "buy",
-                        "type":      "limit",
-                        "count":     count,
-                        "yes_price": yes_price_c,
-                    }
-                    r = requests.post(
-                        f"{KALSHI_BASE}/orders",
-                        headers=kalshi_auth_headers("POST", order_path),
-                        json=payload,
-                        timeout=10
-                    )
+                        self.send_json({"ok": False, "error": "yes_price_c exceeds 97c ceiling"}); return
+                    payload = {"ticker": ticker, "side": side, "action": "buy",
+                               "type": "limit", "count": count, "yes_price": yes_price_c}
+                    r = requests.post(f"{KALSHI_BASE}/orders",
+                        headers=kalshi_auth_headers("POST", "/trade-api/v2/orders"),
+                        json=payload, timeout=10)
                     resp = r.json()
                     if r.ok:
-                        self.send_json({
-                            "ok":     True,
-                            "ticker": ticker,
-                            "side":   side,
-                            "count":  count,
-                            "price_c": yes_price_c,
-                            "order":  resp,
-                        })
+                        self.send_json({"ok": True, "ticker": ticker, "side": side,
+                            "count": count, "price_c": yes_price_c, "order": resp})
                     else:
                         self.send_json({"ok": False, "error": resp, "status": r.status_code})
                 except Exception as e:
                     self.send_json({"ok": False, "error": str(e)})
 
-        elif path == "/orders/auto":
-            # GET /orders/auto?ticker=X — compute auto-size for a settled play
-            # Fetches orderbook + cash balance, returns recommended order list
-            # One order per price level, sweeping up to edge_ceiling
-            qs     = parse_qs(urlparse(self.path).query)
-            ticker = qs.get("ticker", [""])[0]
-            side   = qs.get("side", ["yes"])[0].lower()  # "yes" or "no"
-            if not ticker or not KALSHI_KEY_ID:
-                self.send_json({"ok": False, "error": "ticker and API key required"})
-            else:
-                try:
-                    EDGE_CEILING    = 97   # max price to buy (cents) — same for YES and NO
-                    MAX_POSITION_PCT = 0.40
+        elif path == "/debug/positions":
+            try:
+                pos_r = requests.get(f"{KALSHI_BASE}/portfolio/positions",
+                    headers=kalshi_auth_headers("GET", "/trade-api/v2/portfolio/positions"),
+                    timeout=10, params={"limit": 10, "count_filter": "position"})
+                pos_r.raise_for_status()
+                raw = pos_r.json()
+                self.send_json({"ok": True, "raw_positions": raw.get("market_positions", [])[:3],
+                    "count": len(raw.get("market_positions", []))})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
 
-                    # Fetch cash balance
-                    bal_r = requests.get(
-                        f"{KALSHI_BASE}/portfolio/balance",
-                        headers=kalshi_auth_headers("GET", "/trade-api/v2/portfolio/balance"),
-                        timeout=8
-                    )
-                    bal_r.raise_for_status()
-                    bal       = bal_r.json()
-                    cash_c    = int(bal.get("balance", 0))
-                    port_c    = int(bal.get("portfolio_value", 0))
-                    cash_dollars  = cash_c / 100
-                    port_dollars  = port_c / 100
+        elif path == "/backtest/actuals":
+            qs       = parse_qs(urlparse(self.path).query)
+            city_key = qs.get("city", ["seattle"])[0]
+            force    = qs.get("force", ["0"])[0] == "1"
+            if force:
+                _CLM_CACHE_TS[city_key] = 0
+            try:
+                actuals = fetch_nws_clm_actuals(city_key)
+                cfg = CITIES.get(city_key, {})
+                self.send_json({"ok": True, "city": city_key, "actuals": actuals,
+                    "count": len(actuals), "cached": not force,
+                    "clm_url": f"https://forecast.weather.gov/product.php?site=NWS&issuedby={cfg.get('nws_issuedby','?')}&product=CLM&format=txt&version=1"})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
 
-                    # Fetch orderbook
-                    ob_path = f"/trade-api/v2/markets/{ticker}/orderbook"
-                    ob_r = requests.get(
-                        f"{KALSHI_BASE}/markets/{ticker}/orderbook",
-                        headers=kalshi_auth_headers("GET", ob_path),
-                        timeout=8
-                    )
-                    ob_r.raise_for_status()
-                    ob = ob_r.json().get("orderbook", {})
-
-                    # YES asks are in "yes" key; NO asks are in "no" key
-                    # Both sorted ascending by price
-                    asks = ob.get(side, [])
-
-                    budget = min(cash_dollars, port_dollars * MAX_POSITION_PCT)
-
-                    orders    = []
-                    spent     = 0.0
-                    for level in asks:
-                        price_c = int(level[0])
-                        size    = int(level[1])
-                        if price_c > EDGE_CEILING:
-                            break
-                        level_cost = price_c / 100 * size
-                        if spent + level_cost > budget:
-                            remaining = budget - spent
-                            partial   = int(remaining / (price_c / 100))
-                            if partial > 0:
-                                orders.append({"price_c": price_c, "count": partial,
-                                               "cost": round(partial * price_c / 100, 2)})
-                                spent += partial * price_c / 100
-                            break
-                        orders.append({"price_c": price_c, "count": size,
-                                       "cost": round(level_cost, 2)})
-                        spent += level_cost
-
-                    self.send_json({
-                        "ok":           True,
-                        "ticker":       ticker,
-                        "side":         side,
-                        "cash":         round(cash_dollars, 2),
-                        "portfolio":    round(port_dollars, 2),
-                        "budget":       round(budget, 2),
-                        "orders":       orders,
-                        "total_contracts": sum(o["count"] for o in orders),
-                        "total_cost":   round(spent, 2),
-                        "edge_ceiling_c": EDGE_CEILING,
-                        "max_position_pct": MAX_POSITION_PCT,
-                    })
-                except Exception as e:
-                    self.send_json({"ok": False, "error": str(e)})
+        elif path == "/backtest/calibration":
+            qs          = parse_qs(urlparse(self.path).query)
+            city_key    = qs.get("city", ["seattle"])[0]
+            months_back = int(qs.get("months", ["6"])[0])
+            cfg         = CITIES.get(city_key, CITIES["seattle"])
+            try:
+                from datetime import date, timedelta
+                import calendar as cal_mod
+                actuals = fetch_nws_clm_actuals(city_key)
+                today   = date.today()
+                horizon_errors = {f"d{l}": [] for l in [1, 3, 5, 7, 10]}
+                for m_back in range(1, months_back + 1):
+                    month_date = today.replace(day=1)
+                    for _ in range(m_back):
+                        month_date = (month_date - timedelta(days=1)).replace(day=1)
+                    year = month_date.year; month = month_date.month
+                    actual_key = f"{year}-{month:02d}"
+                    actual = actuals.get(actual_key)
+                    if actual is None: continue
+                    days_in_month = cal_mod.monthrange(year, month)[1]
+                    for lead in [1, 3, 5, 7, 10]:
+                        try:
+                            r = requests.get(OM_PREV_URL, params={
+                                "latitude": cfg["lat"], "longitude": cfg["lon"],
+                                "daily": "precipitation_sum", "timezone": cfg["tz"],
+                                "past_days": lead, "forecast_days": 16,
+                                "models": f"previous_day_{min(lead,7)}"}, timeout=10)
+                            r.raise_for_status(); data = r.json()
+                            dates_list = data.get("daily", {}).get("time", [])
+                            precip     = data.get("daily", {}).get("precipitation_sum", [])
+                            month_mm   = sum(float(p or 0) for d, p in zip(dates_list, precip)
+                                           if d and d[:7] == f"{year}-{month:02d}")
+                            error = round(month_mm / 25.4 - actual, 2)
+                            horizon_errors[f"d{lead}"].append(error)
+                        except Exception: continue
+                bias_summary = {}
+                for key, errs in horizon_errors.items():
+                    if not errs: continue
+                    n = len(errs); mean = sum(errs)/n
+                    bias_summary[key] = {"n": n, "mean_err": round(mean, 3),
+                        "mae": round(sum(abs(e) for e in errs)/n, 3),
+                        "rmse": round((sum(e**2 for e in errs)/n)**0.5, 3),
+                        "bias_dir": "OVER" if mean > 0.05 else "UNDER" if mean < -0.05 else "NEUTRAL"}
+                    _BIAS_CACHE[f"{city_key}-{key}"] = round(mean, 3)
+                self.send_json({"ok": True, "city": city_key, "bias": bias_summary,
+                    "bias_cache_updated": True})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
 
         elif path == "/portfolio":
             # Fetch live Kalshi balance and positions
@@ -2139,13 +2098,12 @@ class Handler(BaseHTTPRequestHandler):
 
                     positions = []
                     for p in pos_data.get("market_positions", []):
-                        # Kalshi API returns _dollars fields already in dollars (strings), position_fp for contracts
+                        # Kalshi returns _dollars fields already in dollars (strings)
                         qty     = float(p.get("position_fp", 0) or 0)
                         cost    = float(p.get("total_traded_dollars", 0) or 0)
                         r_pnl   = float(p.get("realized_pnl_dollars", 0) or 0)
                         mkt_exp = float(p.get("market_exposure_dollars", 0) or 0)
                         fees    = float(p.get("fees_paid_dollars", 0) or 0)
-                        ur_pnl  = mkt_exp - cost  # unrealized = current exposure - cost basis
                         positions.append({
                             "ticker":        p.get("ticker", ""),
                             "market_title":  p.get("market_title", "") or p.get("ticker", ""),
@@ -2153,7 +2111,7 @@ class Handler(BaseHTTPRequestHandler):
                             "avg_yes_price": round(cost / max(qty, 1), 2),
                             "market_value":  round(mkt_exp, 2),
                             "realized_pnl":  round(r_pnl, 2),
-                            "unrealized_pnl":round(ur_pnl, 2),
+                            "unrealized_pnl": 0.0,  # calculated from settled trades only
                             "total_cost":    round(cost, 2),
                             "payout":        round(fees, 2),
                         })
@@ -2218,7 +2176,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
                 self.wfile.write(content_html)
-            except:
+            except Exception:
                 self.send_response(404)
                 self.end_headers()
 
