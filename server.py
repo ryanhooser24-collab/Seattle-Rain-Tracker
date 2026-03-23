@@ -1356,12 +1356,8 @@ class Handler(BaseHTTPRequestHandler):
                     true_mtd=true_mtd, city_key=city_key, month_num=now_dt.month,
                 )
 
-            # Sigma estimates by days remaining (calibrated via Open-Meteo backtest)
-            SIGMA_TABLE = {
-                10:1.4, 9:1.3, 8:1.2, 7:1.0, 6:0.85, 5:0.7,
-                4:0.55, 3:0.4, 2:0.25, 1:0.15, 0:0.0
-            }
-            sigma_est = SIGMA_TABLE.get(min(days_remaining, 10), 1.5)
+            # Use calibrated sigma from cache (falls back to base × horizon scale)
+            sigma_est, _ = get_sigma(city_key, days_remaining)
 
             # Write snapshot — always inside 10-day window (intraday too)
             if wu_covers_eom and projected is not None:
