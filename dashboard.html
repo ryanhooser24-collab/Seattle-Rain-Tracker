@@ -1080,6 +1080,12 @@ function renderRainfall(d){
   const nws_mtd=nws.mtd||0;
   const nws_time=nws.issued||'—';
   const nws_is_fin = d.nws_is_finalized !== false;
+  // When preliminary: true_mtd = nws.mtd - nws_today + iem_gap (server already computed this)
+  // Display true_mtd in NWS row so user sees the corrected number, not the raw CLI MTD
+  const nws_display_val = true_mtd - gap_total; // = nws_base_mtd (before IEM gap)
+  const nws_sub = nws_is_fin
+    ? `Through ${nws_time} · settlement source`
+    : `Through midnight (corrected from ${nws_time} · today's NWS projection stripped)`;
   // IEM always anchors at midnight (standard time) or 1AM (DST) — independent of NWS issued time
   const iem_anchor_label = d.iem_gap_start || (nws_is_fin ? 'midnight' : 'midnight today');
   const iem_hours=(iem.hours||[]);
@@ -1142,8 +1148,8 @@ function renderRainfall(d){
       </div>`;
 
   const hdrVal=eomInside
-    ?`${projected.toFixed(2)}" projected ${eomLabel} <span>· ${nws_mtd.toFixed(2)}" NWS official</span>`
-    :`${today_eod.toFixed(2)}" projected EOD <span>· ${nws_mtd.toFixed(2)}" NWS official</span>`;
+    ?`${projected.toFixed(2)}" projected ${eomLabel} <span>· ${nws_display_val.toFixed(2)}" ${nws_is_fin?'NWS official':'NWS corrected MTD'}</span>`
+    :`${today_eod.toFixed(2)}" projected EOD <span>· ${nws_display_val.toFixed(2)}" ${nws_is_fin?'NWS official':'NWS corrected MTD'}</span>`;
 
   document.getElementById('rf-wrap').innerHTML=`
     <div class="rf-card">
@@ -1161,9 +1167,9 @@ function renderRainfall(d){
               <br>Settlement source for all Kalshi rain contracts.
             </div>
           </div>
-          <div class="rf-sub">Through ${nws_time} · settlement source</div>
+          <div class="rf-sub">${nws_sub}</div>
         </div></div>
-        <div class="rf-right"><div class="rf-val v-nws">${nws_mtd.toFixed(2)}<span class="rf-unit"> in</span></div></div>
+        <div class="rf-right"><div class="rf-val v-nws">${nws_display_val.toFixed(2)}<span class="rf-unit"> in</span></div></div>
       </div>
       <div class="rf-row">
         <div class="rf-left"><div class="rdot d-iem"></div><div class="rf-meta">
@@ -1545,46 +1551,45 @@ loadData();
     </div>
 
     <!-- IEM Accuracy Section -->
-    <div style="margin-top:28px">
-      <div style="display:flex;align-items:center;gap:16px;margin-bottom:12px;flex-wrap:wrap">
-        <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)">IEM Gap Fill Accuracy</div>
-        <button onclick="runIEMBacktest()" style="font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:var(--card);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:4px;cursor:pointer">Run IEM Test</button>
-        <span id="iem-bt-status" style="font-size:11px;color:var(--muted)"></span>
-      </div>
-      <div id="iem-bt-result" style="display:none;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:11px;line-height:1.8"></div>
-      <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.6">
-        Compares IEM ASOS daily totals vs NWS official for the same day. Measures the error you carry when using IEM to fill the gap between overnight NWS reports.
-      </div>
+    <!-- Explanation box -->
+    <div style="margin-top:28px;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:11px;color:var(--muted);line-height:1.8">
+      <strong style="color:var(--ink)">Calibration columns explained</strong><br>
+      <b style="color:var(--ink)">Base σ (RMSE)</b> — how far off OM's full-month forecast typically is from the NWS CLM actual, in inches. Computed over 12 months of history. This is the uncertainty radius around any EOM projection. Smaller = more predictable city.<br>
+      <b style="color:var(--ink)">Bias</b> — the mean error (OM forecast minus actual). Negative means OM systematically under-forecasts. The model adds this back to every projection silently before computing probabilities.<br>
+      <b style="color:var(--ink)">Direction</b> — WET means OM over-forecasts (positive bias), DRY means it under-forecasts (negative bias). All 8 cities are currently DRY — OM tends to underestimate monthly totals.<br><br>
+      <strong style="color:var(--ink)">Workflow</strong> — <b>⚡ Recalibrate All</b> is the only button you need to run, once after every deploy. Everything else is automatic.
     </div>
 
-    <!-- Bias Calibration Section -->
-    <div style="margin-top:24px">
-      <div style="display:flex;align-items:center;gap:16px;margin-bottom:12px;flex-wrap:wrap">
-        <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)">Forecast Bias Calibration</div>
-        <button onclick="runBiasCalibration()" style="font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:var(--card);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:4px;cursor:pointer">Calibrate Bias</button>
-        <span id="bias-cal-status" style="font-size:11px;color:var(--muted)"></span>
+    <!-- Diagnostics (collapsed) -->
+    <div style="margin-top:16px">
+      <div onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'"
+           style="cursor:pointer;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);display:flex;align-items:center;gap:8px;user-select:none">
+        <span>▸ Diagnostics</span>
+        <span style="font-size:9px;font-weight:400;letter-spacing:0;text-transform:none">(IEM accuracy, NWS correction history — informational only)</span>
       </div>
-      <div id="bias-cal-result" style="display:none;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:11px;line-height:1.8"></div>
-      <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.6">
-        Measures systematic OM over/under-forecast using CLM actuals vs OM historical archive. Updates live model bias correction immediately.
-      </div>
-    </div>
+      <div style="display:none;margin-top:16px">
 
-    <!-- NWS Corrections Section -->
-    <div style="margin-top:24px">
-      <div style="display:flex;align-items:center;gap:16px;margin-bottom:12px;flex-wrap:wrap">
-        <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)">NWS Correction History</div>
-        <button onclick="runCorrectionsBacktest()" style="font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:var(--card);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:4px;cursor:pointer">Check Corrections</button>
-        <span id="corr-bt-status" style="font-size:11px;color:var(--muted)"></span>
-      </div>
-      <div id="corr-bt-result" style="display:none;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:11px;line-height:1.8"></div>
-      <div style="font-size:11px;color:var(--muted);margin-top:8px;line-height:1.6">
-        Scans the last 10 CLI versions for this city to detect MTD revisions >= 0.05". Answers: how often does NWS correct its figures, by how much, and in which direction?
-      </div>
-    </div>
+        <div style="margin-bottom:20px">
+          <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px;flex-wrap:wrap">
+            <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)">IEM Gap Fill Accuracy</div>
+            <button onclick="runIEMBacktest()" style="font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:var(--card);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:4px;cursor:pointer">Run IEM Test</button>
+            <span id="iem-bt-status" style="font-size:11px;color:var(--muted)"></span>
+          </div>
+          <div id="iem-bt-result" style="display:none;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:11px;line-height:1.8;margin-bottom:8px"></div>
+          <div style="font-size:11px;color:var(--muted);line-height:1.6">Compares IEM ASOS daily totals vs NWS CLI official. Measures the gap-fill error carried in true_mtd — does not feed the model, informational only.</div>
+        </div>
 
-    <div style="margin-top:28px;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:11px;color:var(--muted);line-height:1.7">
-      <strong style="color:var(--ink)">How this works:</strong> <b>⚡ Recalibrate All</b> is the primary tool — run it after every deploy. It fetches 12 months of OM historical forecasts vs NWS CLM actuals for all 8 cities, computes per-city base sigma (monthly RMSE) and bias (mean error), and stores both in the live model. Horizon scaling is applied automatically. <b>Run Backtest</b> shows month-by-month detail for a single city. <b>Calibrate Bias</b> can re-run bias-only for a single city mid-session.
+        <div>
+          <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px;flex-wrap:wrap">
+            <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)">NWS Correction History</div>
+            <button onclick="runCorrectionsBacktest()" style="font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:var(--card);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:4px;cursor:pointer">Check Corrections</button>
+            <span id="corr-bt-status" style="font-size:11px;color:var(--muted)"></span>
+          </div>
+          <div id="corr-bt-result" style="display:none;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:11px;line-height:1.8;margin-bottom:8px"></div>
+          <div style="font-size:11px;color:var(--muted);line-height:1.6">Scans last 10 CLI versions for MTD revisions ≥ 0.05". Shows how often NWS corrects figures and by how much — does not feed the model.</div>
+        </div>
+
+      </div>
     </div>
   </div>
 </div>
