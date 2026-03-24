@@ -603,14 +603,12 @@ def fetch_wu_hourly(city_cfg=None):
 
 def fetch_iem_gap(nws_issued_str, city_cfg=None):
     """
-    Fetch IEM ASOS precipitation from midnight (local) to now.
+    Fetch IEM ASOS precipitation from the NWS CLI issued time to now.
 
-    NWS MTD covers midnight-to-midnight in LOCAL STANDARD TIME.
-    During DST the ASOS DSM day runs 1AM-to-1AM local time (clock-wall).
-    So the IEM anchor is:
-      - Standard time (Nov-Mar approx): midnight (00:00 local)
-      - Daylight time (Mar-Nov approx): 1:00 AM local (DST shift)
-    We detect DST by checking if the city timezone is currently observing DST.
+    The NWS CLI is issued shortly after the ASOS DSM closes (midnight LST).
+    During DST this is around 1:00-1:30 AM local wall-clock time.
+    We anchor the IEM gap at the actual NWS issued time rather than a
+    hardcoded hour, so we never double-count rain already in the NWS MTD.
     """
     cfg = city_cfg or CITY_CFG
     iem_station = cfg["icao_code"][1:]
@@ -622,19 +620,42 @@ def fetch_iem_gap(nws_issued_str, city_cfg=None):
         local_tz  = pytz.timezone(tz_name)
         now_utc   = dt_cls.utcnow().replace(tzinfo=pytz.utc)
         now_local = now_utc.astimezone(local_tz)
+        is_dst    = bool(now_local.dst())
 
-        # Detect DST: ASOS DSM counts midnight-to-midnight in standard time.
-        # During DST, wall-clock midnight = standard time 11 PM the night before,
-        # so the DSM day starts at wall-clock 1:00 AM.
-        is_dst = bool(now_local.dst())
+        # Determine gap start from actual NWS issued time when available.
+        # NWS CLI issued_str format: "126 AM PDT TUE MAR 24 2026" or similar.
+        # Fall back to DST-aware default (1 AM DST / midnight ST) if not parseable.
         gap_start_hour = 1 if is_dst else 0
-        gap_start_str  = "01:00" if is_dst else "00:00"
+        gap_start_minute = 0
 
-        today_str = now_local.strftime("%Y-%m-%d")
+        if nws_issued_str:
+            try:
+                # Parse "126 AM PDT TUE MAR 24 2026" → hour=1, minute=26
+                parts = nws_issued_str.strip().split()
+                time_str = parts[0]  # e.g. "126" or "100" or "53"
+                ampm     = parts[1].upper() if len(parts) > 1 else "AM"
+                if len(time_str) <= 2:
+                    h, m = int(time_str), 0
+                else:
+                    h, m = int(time_str[:-2]), int(time_str[-2:])
+                if ampm == "PM" and h != 12:
+                    h += 12
+                elif ampm == "AM" and h == 12:
+                    h = 0
+                # Only use if it looks like an overnight/early-morning issue time
+                if 0 <= h <= 5:
+                    gap_start_hour   = h
+                    gap_start_minute = m
+            except Exception:
+                pass  # fall back to default
 
-        # Sanity: if current time is before gap_start_hour (e.g. 12:30 AM during DST)
-        # IEM gap would be negative — return zero gracefully
-        if now_local.hour < gap_start_hour:
+        gap_start_str = f"{gap_start_hour:02d}:{gap_start_minute:02d}"
+        today_str     = now_local.strftime("%Y-%m-%d")
+
+        # Sanity: if current time is before gap start, return zero
+        now_minutes = now_local.hour * 60 + now_local.minute
+        gap_minutes = gap_start_hour * 60 + gap_start_minute
+        if now_minutes < gap_minutes:
             return {
                 "ok": True, "gap_total": 0.0, "readings": [],
                 "gap_start": gap_start_str,
@@ -647,7 +668,7 @@ def fetch_iem_gap(nws_issued_str, city_cfg=None):
             f"?station={iem_station}"
             f"&data=p01i"
             f"&year1={now_local.year}&month1={now_local.month:02d}&day1={now_local.day:02d}"
-            f"&hour1={gap_start_hour}&min1=0"
+            f"&hour1={gap_start_hour}&min1={gap_start_minute}"
             f"&year2={now_local.year}&month2={now_local.month:02d}&day2={now_local.day:02d}"
             f"&hour2={now_local.hour}&min2={now_local.minute}"
             f"&tz={tz_name}"
@@ -2149,6 +2170,37 @@ class Handler(BaseHTTPRequestHandler):
                     _BIAS_CACHE[f"{city_key}-{key}"] = round(mean, 3)
                 self.send_json({"ok": True, "city": city_key, "bias": bias_summary,
                     "bias_cache_updated": True})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/debug/iem":
+            # Expose raw IEM hourly readings so gap fill can be cross-validated
+            # Compare against: weather.gov/wrh/timeseries?site=ksea
+            qs       = parse_qs(urlparse(self.path).query)
+            city_key = qs.get("city", [ACTIVE_CITY])[0]
+            cfg      = CITIES.get(city_key, CITY_CFG)
+            try:
+                iem = fetch_iem_gap(None, city_cfg=cfg)
+                # Also fetch NWS CLI for today's official reading as cross-check
+                nws = fetch_nws_cli(city_cfg=cfg)
+                self.send_json({
+                    "ok":          True,
+                    "city":        city_key,
+                    "iem_gap_total": iem.get("gap_total", 0),
+                    "iem_gap_start": iem.get("gap_start"),
+                    "iem_gap_end":   iem.get("gap_end"),
+                    "iem_readings":  iem.get("readings", []),  # last 20 hourly obs
+                    "iem_ok":        iem.get("ok"),
+                    "iem_error":     iem.get("error"),
+                    "nws_mtd":       nws.get("mtd"),
+                    "nws_today":     nws.get("today"),
+                    "nws_issued":    nws.get("issued"),
+                    "nws_finalized": nws.get("is_finalized"),
+                    "true_mtd":      round((nws.get("mtd", 0) if nws.get("is_finalized") else
+                                     nws.get("mtd", 0) - (nws.get("today") or 0)) +
+                                     iem.get("gap_total", 0), 2),
+                    "cross_check":   "Compare iem_gap_total against weather.gov/wrh/timeseries?site=ksea hourly precip column"
+                })
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
