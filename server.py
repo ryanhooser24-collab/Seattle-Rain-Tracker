@@ -2009,12 +2009,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "ticker and API key required"})
             else:
                 try:
-                    EDGE_CEILING = 97; MAX_PCT = 0.40
+                    EDGE_CEILING = 97; MAX_PCT = float(qs.get("cap", ["0.70"])[0])
                     bal_r = requests.get(f"{KALSHI_BASE}/portfolio/balance",
                         headers=kalshi_auth_headers("GET", "/trade-api/v2/portfolio/balance"), timeout=8)
                     bal_r.raise_for_status(); bal = bal_r.json()
                     cash    = float(bal.get("balance", 0) or 0) / 100
-                    port    = float(bal.get("portfolio_value", 0) or 0) / 100
+                    port    = float(bal.get("portfolio_value", 0) or 0)  # already in dollars
                     budget  = min(cash, port * MAX_PCT)
                     ob_r = requests.get(f"{KALSHI_BASE}/markets/{ticker}/orderbook",
                         headers=kalshi_auth_headers("GET", f"/trade-api/v2/markets/{ticker}/orderbook"), timeout=8)
@@ -2377,28 +2377,30 @@ class Handler(BaseHTTPRequestHandler):
 
                     positions = []
                     for p in pos_data.get("market_positions", []):
-                        # Kalshi returns _dollars fields already in dollars (strings)
                         qty     = float(p.get("position_fp", 0) or 0)
                         cost    = float(p.get("total_traded_dollars", 0) or 0)
                         r_pnl   = float(p.get("realized_pnl_dollars", 0) or 0)
                         mkt_exp = float(p.get("market_exposure_dollars", 0) or 0)
                         fees    = float(p.get("fees_paid_dollars", 0) or 0)
+                        avg_c   = round((cost / max(qty, 1)) * 100, 1)  # dollars → cents
                         positions.append({
                             "ticker":        p.get("ticker", ""),
                             "market_title":  p.get("market_title", "") or p.get("ticker", ""),
                             "yes_contracts": qty,
-                            "avg_yes_price": round(cost / max(qty, 1), 2),
+                            "avg_yes_price_c": avg_c,     # in cents for display
+                            "avg_yes_price": round(cost / max(qty, 1), 4),  # in dollars
                             "market_value":  round(mkt_exp, 2),
                             "realized_pnl":  round(r_pnl, 2),
-                            "unrealized_pnl": 0.0,  # calculated from settled trades only
+                            "unrealized_pnl": 0.0,
                             "total_cost":    round(cost, 2),
-                            "payout":        round(fees, 2),
+                            "payout_if_right": round(qty * 1.0, 2),  # $1 per contract
+                            "fees":          round(fees, 2),
                         })
 
                     self.send_json({
                         "ok": True,
                         "balance":    float(bal.get("balance", 0) or 0) / 100,
-                        "portfolio_value": float(bal.get("portfolio_value", 0) or 0) / 100,
+                        "portfolio_value": float(bal.get("portfolio_value", 0) or 0),  # already in dollars
                         "positions":  positions,
                         "count":      len(positions),
                     })

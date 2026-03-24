@@ -785,7 +785,8 @@ function renderScanner(results){
       ?(mm?`Hold or exit above ${r.kalshiP+8}c before month end.`:`Hold full term — thin exit depth.`)
       :(mm?`Exit above ${r.kalshiP+8}c if forecast shifts.`:`Watch forecast daily.`);
 
-    const btnLabel=illiquid?'Skip':isSettled?'⚡ Auto-buy $'+maxDeploy:'Buy $'+maxDeploy;
+    const btnLabel=illiquid?'Skip':isSettled?'⚡ Auto-buy ...':'Buy $'+maxDeploy;
+    const btnId=isSettled?`autobtn-${r.ticker||''}`:null;
     const btnClick=isSettled
       ?`autoExecuteSettled('${r.ticker||''}','${r.city}','${r.strike}','yes')`
       :`addScanBet('${r.city}','${r.strike}',${r.kalshiP})`;
@@ -806,15 +807,29 @@ function renderScanner(results){
             ${r.kalshiP}c YES
             <span class="opp-grade-badge grade-${grade}" title="A=tight spread+deep book, B=tradeable, C=thin, D=avoid">Grade ${grade}</span>
             <br>${rawGap}c gap - ${spread}c spread = ${netGap}c net
-            <br>$${maxDeploy} max · ${mm?'market maker active':'maker only'}
+            <br><span id="maxlabel-${r.ticker||''}">est. $${maxDeploy} max</span> · ${mm?'market maker active':'maker only'}
           </div>
-          <button class="opp-size-btn" ${illiquid?'disabled':''} onclick="event.stopPropagation();${btnClick}">
+          <button class="opp-size-btn" ${illiquid?'disabled':''} ${btnId?`id="${btnId}"`:''} onclick="event.stopPropagation();${btnClick}">
             ${btnLabel}
           </button>
         </div>
       </div>
     </div>`;
   }).join('');
+
+  // Async: update settled buttons with live orderbook sizing
+  results.filter(r=>r.mode==='settled'&&r.ticker).forEach(r=>{
+    fetch(`${SERVER}/orders/auto?ticker=${r.ticker}&side=yes&cap=0.70`)
+      .then(res=>res.json())
+      .then(data=>{
+        if(!data.ok) return;
+        const btn=document.getElementById(`autobtn-${r.ticker}`);
+        const lbl=document.getElementById(`maxlabel-${r.ticker}`);
+        if(btn) btn.textContent=`⚡ Auto-buy $${data.total_cost.toFixed(0)}`;
+        if(lbl) lbl.textContent=`$${data.total_cost.toFixed(0)} available · ${data.total_contracts} contracts`;
+      })
+      .catch(()=>{});
+  });
 }
 
 function goToCity(city){
@@ -934,7 +949,7 @@ function renderPortfolio(port,pnl){
           <div class="opp-inner">
             <div class="opp-left">
               <div class="opp-decision" style="font-size:12px">${p.market_title||p.ticker}</div>
-              <div class="opp-context">${Math.abs(p.yes_contracts)} contracts · cost $${(p.total_cost||0).toFixed(2)} · value $${(p.market_value||0).toFixed(2)}</div>
+              <div class="opp-context">${Math.abs(p.yes_contracts)} contracts · avg ${(p.avg_yes_price_c||0).toFixed(1)}¢ · cost $${(p.total_cost||0).toFixed(2)} · payout $${(p.payout_if_right||0).toFixed(2)}</div>
             </div>
             <div class="opp-right">
               <div class="opp-net-gap" style="font-size:18px;color:${upnl>=0?'var(--yes)':'var(--no)'}">${upnl>=0?'+':''}$${upnl.toFixed(2)}</div>
@@ -1176,20 +1191,22 @@ function renderRainfall(d){
           <div class="rf-lbl"><span>IEM actual</span><div class="tip"><b>IEM ASOS Gap Fill</b><br>Source: mesonet.agron.iastate.edu · ASOS tipping bucket gauge<br>Records: since last overnight NWS DCR (1–2 AM local)<br>Precision: 0.01" per tip · updates hourly<br><b>⚠ Warning:</b> IEM data is preliminary — same gauge as NWS but not yet quality-controlled. Generally within 2–3% of final NWS total. Potential 0.05–0.10" cumulative drift over 12+ hours.</div></div>
           <div class="rf-sub">Since ${nws_time} · ASOS gauge</div>
         </div></div>
-        <div class="rf-right"><button class="xbtn" onclick="togPanel()">↓ hourly</button><div class="rf-val v-iem">+${gap_total.toFixed(2)}<span class="rf-unit"> in</span></div></div>
+        <div class="rf-right"><button class="xbtn" onclick="togIEMPanel()">↓ hourly</button><div class="rf-val v-iem">+${gap_total.toFixed(2)}<span class="rf-unit"> in</span></div></div>
+      </div>
+      <div class="xpanel" id="iem-panel">
+        <div>
+          <div class="xp-title">IEM actuals — since last DCR</div>
+          ${iemRows}
+        </div>
       </div>
       <div class="rf-row">
         <div class="rf-left"><div class="rdot d-wuhr"></div><div class="rf-meta">
           <div class="rf-lbl"><span>OM hourly forecast</span><div class="tip"><b>Open-Meteo hourly QPF</b><br>Source: api.open-meteo.com · best_match model (GFS/ECMWF blend)<br>Updates: every 6 hours as models refresh<br>Purpose: fills remaining hours today from current time to midnight<br><b>⚠ Warning:</b> forecast accuracy degrades for convective rain (afternoon thunderstorms). Best for frontal/stratiform systems like Seattle/Portland.</div></div>
           <div class="rf-sub">Now → midnight · Open-Meteo hourly</div>
         </div></div>
-        <div class="rf-right"><button class="xbtn" style="color:var(--wu-hr)" onclick="togPanel()">↓ hourly</button><div class="rf-val v-wuhr">+${(today_remaining||0).toFixed(2)}<span class="rf-unit"> in</span></div></div>
+        <div class="rf-right"><button class="xbtn" style="color:var(--wu-hr)" onclick="togOMPanel()">↓ hourly</button><div class="rf-val v-wuhr">+${(today_remaining||0).toFixed(2)}<span class="rf-unit"> in</span></div></div>
       </div>
-      <div class="xpanel" id="xpanel">
-        <div>
-          <div class="xp-title">IEM actuals — since last DCR</div>
-          ${iemRows}
-        </div>
+      <div class="xpanel" id="om-panel">
         <div>
           <div class="xp-title">Open-Meteo hourly forecast — now → midnight</div>
           ${wuRows}
@@ -1213,14 +1230,23 @@ function renderRainfall(d){
     </div>`;
 }
 
-function togPanel(){
-  const p=document.getElementById('xpanel');
+function togIEMPanel(){
+  const p=document.getElementById('iem-panel');
+  if(!p) return;
   p.classList.toggle('open');
-  document.querySelectorAll('.xbtn').forEach(b=>{
-    b.textContent=p.classList.contains('open')
-      ?b.textContent.replace('↓','↑')
-      :b.textContent.replace('↑','↓');
-  });
+  const btn=event.target;
+  btn.textContent=p.classList.contains('open')?'↑ hourly':'↓ hourly';
+}
+function togOMPanel(){
+  const p=document.getElementById('om-panel');
+  if(!p) return;
+  p.classList.toggle('open');
+  const btn=event.target;
+  btn.textContent=p.classList.contains('open')?'↑ hourly':'↓ hourly';
+}
+function togPanel(){
+  // legacy — kept for compatibility
+  togIEMPanel();
 }
 
 // ── CHART ─────────────────────────────────────────────────────────────────────
@@ -1344,7 +1370,8 @@ function renderMarkets(d){
     const yesBtnBg=isBuyYes&&!isSkip?'var(--yes-lt)':'var(--bg)';
     const yesBtnColor=isBuyYes&&!isSkip?'var(--yes)':'var(--muted)';
     const yesBtnBorder=isBuyYes&&!isSkip?'var(--yes-border)':'var(--border)';
-    const yesBtnLabel=isSkip?'Skip':(isSettled?`Auto YES $${maxDeploy}`:(isBuyYes?`Buy YES $${maxDeploy} (+${netGap}c)`:` YES ${yes_ask}c`));
+    const yesBtnLabel=isSkip?'Skip':(isSettled?`Auto YES ...`:(isBuyYes?`Buy YES $${maxDeploy} (+${netGap}c)`:` YES ${yes_ask}c`));
+    const yesBtnId=isSettled?`autobtn-${ticker}`:null;
     const yesBtnClick=isSettled?`autoExecuteSettled('${ticker}','${d.city}','${strike}','yes')`:`addBet('${ticker}','YES',${maxDeploy})`;
 
     const noBtnBg=hasNoValue?'#fef2f2':'var(--bg)';
@@ -1395,10 +1422,10 @@ function renderMarkets(d){
         <span style="font-size:10px;color:var(--muted)">bias <b style="color:${m.bias&&Math.abs(m.bias||0)>0.05?'var(--no)':'var(--ink)'}">${biasDisp}"</b></span>
         <span style="font-size:10px;color:var(--muted)">adj <b style="color:var(--ink)">${adjProjDisp}"</b></span>
         <span style="font-size:10px;color:var(--muted)">grade <b style="color:var(--ink)">${grade}</b></span>
-        <span style="font-size:10px;color:var(--muted)">max <b style="color:var(--ink)">$${maxDeploy}</b></span>
+        <span style="font-size:10px;color:var(--muted)">est. max <b style="color:var(--ink)" id="maxlabel-${ticker}">$${maxDeploy}</b></span>
       </div>
       <div style="display:flex;gap:6px;padding:8px 12px">
-        <button style="flex:1;padding:7px;font-size:10px;border-radius:4px;font-family:inherit;background:${yesBtnBg};color:${yesBtnColor};border:0.5px solid ${yesBtnBorder};cursor:${isSkip?'not-allowed':'pointer'}" onclick="${yesBtnClick}" ${isSkip?'disabled':''}>
+        <button style="flex:1;padding:7px;font-size:10px;border-radius:4px;font-family:inherit;background:${yesBtnBg};color:${yesBtnColor};border:0.5px solid ${yesBtnBorder};cursor:${isSkip?'not-allowed':'pointer'}" onclick="${yesBtnClick}" ${isSkip?'disabled':''} ${yesBtnId?`id="${yesBtnId}"`:''}>
           ${yesBtnLabel}
         </button>
         <button style="flex:1;padding:7px;font-size:10px;border-radius:4px;font-family:inherit;background:${noBtnBg};color:${noBtnColor};border:0.5px solid ${noBtnBorder};cursor:pointer" onclick="${noBtnClick}">
@@ -1411,6 +1438,20 @@ function renderMarkets(d){
   wrap.innerHTML=cards
     ?`<div class="markets-grid">${cards}</div>`
     :`<div class="locked"><div class="locked-title">No actionable markets</div><div class="locked-sub">All open markets are fully priced or below the edge threshold.</div></div>`;
+
+  // Async: update settled YES buttons with live orderbook sizing
+  (d.kalshi?.markets||[]).filter(m=>m.mode==='settled'&&m.ticker).forEach(m=>{
+    fetch(`${SERVER}/orders/auto?ticker=${m.ticker}&side=yes&cap=0.70`)
+      .then(res=>res.json())
+      .then(data=>{
+        if(!data.ok) return;
+        const btn=document.getElementById(`autobtn-${m.ticker}`);
+        const lbl=document.getElementById(`maxlabel-${m.ticker}`);
+        if(btn) btn.textContent=`Auto YES $${data.total_cost.toFixed(0)}`;
+        if(lbl) lbl.textContent=`$${data.total_cost.toFixed(0)}`;
+      })
+      .catch(()=>{});
+  });
 }
 
 function addBet(ticker,side,amt){
@@ -1427,7 +1468,7 @@ async function autoExecuteSettled(ticker, city, strike, side='yes'){
   if(!ok)return;
   showToast(`Fetching orderbook for ${ticker}...`,'info');
   try{
-    const autoRes=await fetch(`${SERVER}/orders/auto?ticker=${ticker}&side=${side}`);
+    const autoRes=await fetch(`${SERVER}/orders/auto?ticker=${ticker}&side=${side}&cap=0.70`);
     const auto=await autoRes.json();
     if(!auto.ok){showToast('Auto-size failed: '+(auto.error||'unknown'),'error');return;}
     if(!auto.orders||!auto.orders.length){showToast('No depth below 97c','error');return;}
