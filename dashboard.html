@@ -1104,8 +1104,16 @@ function renderRainfall(d){
     ? `Through ${nws_time} · settlement source`
     : `Through midnight (corrected from ${nws_time} · today's NWS projection stripped)`;
   const iem_anchor_label = d.iem_gap_start || (nws_is_fin ? 'midnight' : 'midnight today');
-  // IEM sends readings:[{time, precip}] — map to display format
-  const iem_hours = (iem.readings||[]).map(r=>({time:r.time, qpf:r.precip||0}));
+  // Use hourly_summary (max per hour = correct total) for display
+  // Fall back to raw readings if hourly_summary not present (older server)
+  const iem_hourly = (iem.hourly_summary||[]).map(r=>({
+    time: r.hour + ':00',   // e.g. "2026-03-24 07:00"
+    label: (r.hour||'').slice(11,16) || r.hour,  // just "07:00"
+    qpf: r.precip||0
+  }));
+  const iem_hours = iem_hourly.length
+    ? iem_hourly
+    : (iem.readings||[]).map(r=>({time:r.time, label:(r.time||'').slice(11,16)||r.time, qpf:r.precip||0}));
   const wu_hours=(wu_hourly&&wu_hourly.hours||[]).filter(h=>h.qpf>0);
   const wuDays=wu.days||[];
   const monthPrefix=new Date().toISOString().slice(0,7); // "2026-03"
@@ -1123,7 +1131,7 @@ function renderRainfall(d){
   const wuMax=Math.max(...wu_hours.map(h=>h.qpf),0.01);
 
   const iemRows=iem_hours.length
-    ?iem_hours.map(h=>`<div class="xp-row"><div class="xp-time">${h.time||'—'}</div><div class="xp-bw"><div class="xp-bf xp-gap" style="width:${Math.round(h.qpf/iemMax*100)}%"></div></div><div class="xp-val xp-vgap">${h.qpf.toFixed(2)}"</div></div>`).join('')
+    ?iem_hours.map(h=>`<div class="xp-row"><div class="xp-time">${h.label||h.time||'—'}</div><div class="xp-bw"><div class="xp-bf xp-gap" style="width:${Math.round(h.qpf/iemMax*100)}%"></div></div><div class="xp-val xp-vgap">${h.qpf.toFixed(2)}"</div></div>`).join('')
     :'<div style="font-size:10px;color:var(--muted)">No gap — NWS report is current</div>';
 
   const wuRows=wu_hours.length
