@@ -720,10 +720,12 @@ def fetch_iem_gap(nws_issued_str, city_cfg=None):
         return {
             "ok":        True,
             "gap_total": gap_total,
-            "readings":  readings[-20:],  # last 20 readings for display
+            "readings":  readings,  # all readings for full auditability
+            "reading_count": len(readings),
+            "visible_sum": round(sum(r["precip"] for r in readings), 2),
             "gap_start": gap_start_str,
             "gap_end":   now_local.strftime("%I:%M %p"),
-            "source":    "IEM KSEA ASOS"
+            "source":    f"IEM {iem_station} ASOS"
         }
 
     except Exception as e:
@@ -2190,6 +2192,7 @@ class Handler(BaseHTTPRequestHandler):
                     "iem_gap_start": iem.get("gap_start"),
                     "iem_gap_end":   iem.get("gap_end"),
                     "iem_readings":  iem.get("readings", []),  # last 20 hourly obs
+                    "iem_reading_count": len(iem.get("readings", [])),
                     "iem_ok":        iem.get("ok"),
                     "iem_error":     iem.get("error"),
                     "nws_mtd":       nws.get("mtd"),
