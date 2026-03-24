@@ -1956,11 +1956,21 @@ class Handler(BaseHTTPRequestHandler):
                     ob = r.json().get("orderbook", {})
                     EDGE_CEILING = 97
                     depth, total_contracts, total_cost = [], 0, 0.0
-                    for level in ob.get("yes", []):
-                        price_c, size = int(level[0]), int(level[1])
-                        if price_c > EDGE_CEILING: break
-                        cost = round(price_c / 100 * size, 2)
-                        depth.append({"price_c": price_c, "size": size, "cost": cost})
+                    # YES asks are derived from NO bids: YES ask = 100 - no_bid
+                    # NO bids are sorted ascending (lowest first), so highest NO bid = best YES ask
+                    # Iterate descending to get best (lowest) YES ask first
+                    no_bids = sorted(ob.get("no", []), key=lambda x: int(x[0]), reverse=True)
+                    for level in no_bids:
+                        no_price_c = int(level[0])
+                        yes_ask_c  = 100 - no_price_c   # implied YES ask
+                        size       = int(level[1])
+                        if yes_ask_c > EDGE_CEILING:
+                            continue  # skip levels where YES ask exceeds ceiling
+                        if yes_ask_c <= 0:
+                            continue
+                        cost = round(yes_ask_c / 100 * size, 2)
+                        depth.append({"price_c": yes_ask_c, "size": size, "cost": cost,
+                                      "no_bid_c": no_price_c})
                         total_contracts += size; total_cost += cost
                     self.send_json({"ok": True, "ticker": ticker, "depth": depth,
                         "total_contracts": total_contracts, "total_cost": round(total_cost, 2),
@@ -1986,22 +1996,48 @@ class Handler(BaseHTTPRequestHandler):
                     ob_r = requests.get(f"{KALSHI_BASE}/markets/{ticker}/orderbook",
                         headers=kalshi_auth_headers("GET", f"/trade-api/v2/markets/{ticker}/orderbook"), timeout=8)
                     ob_r.raise_for_status()
-                    asks = ob_r.json().get("orderbook", {}).get(side, [])
+                    ob_data = ob_r.json().get("orderbook", {})
                     orders, spent = [], 0.0
-                    for level in asks:
-                        price_c, size = int(level[0]), int(level[1])
-                        if price_c > EDGE_CEILING: break
-                        level_cost = price_c / 100 * size
-                        if spent + level_cost > budget:
-                            partial = int((budget - spent) / (price_c / 100))
-                            if partial > 0:
-                                orders.append({"price_c": price_c, "count": partial,
-                                    "cost": round(partial * price_c / 100, 2)})
-                                spent += partial * price_c / 100
-                            break
-                        orders.append({"price_c": price_c, "count": size,
-                            "cost": round(level_cost, 2)})
-                        spent += level_cost
+                    if side == "yes":
+                        # YES asks = 100 - NO bids, sorted descending by NO bid = ascending YES ask
+                        no_bids = sorted(ob_data.get("no", []), key=lambda x: int(x[0]), reverse=True)
+                        for level in no_bids:
+                            no_price_c = int(level[0])
+                            price_c    = 100 - no_price_c  # implied YES ask
+                            size       = int(level[1])
+                            if price_c > EDGE_CEILING or price_c <= 0:
+                                continue
+                            level_cost = price_c / 100 * size
+                            if spent + level_cost > budget:
+                                partial = int((budget - spent) / (price_c / 100))
+                                if partial > 0:
+                                    orders.append({"price_c": price_c, "count": partial,
+                                        "cost": round(partial * price_c / 100, 2)})
+                                    spent += partial * price_c / 100
+                                break
+                            orders.append({"price_c": price_c, "count": size,
+                                "cost": round(level_cost, 2)})
+                            spent += level_cost
+                    else:
+                        # Buying NO: NO asks = 100 - YES bids
+                        yes_bids = sorted(ob_data.get("yes", []), key=lambda x: int(x[0]), reverse=True)
+                        for level in yes_bids:
+                            yes_price_c = int(level[0])
+                            price_c     = 100 - yes_price_c  # implied NO ask
+                            size        = int(level[1])
+                            if price_c > EDGE_CEILING or price_c <= 0:
+                                continue
+                            level_cost = price_c / 100 * size
+                            if spent + level_cost > budget:
+                                partial = int((budget - spent) / (price_c / 100))
+                                if partial > 0:
+                                    orders.append({"price_c": price_c, "count": partial,
+                                        "cost": round(partial * price_c / 100, 2)})
+                                    spent += partial * price_c / 100
+                                break
+                            orders.append({"price_c": price_c, "count": size,
+                                "cost": round(level_cost, 2)})
+                            spent += level_cost
                     self.send_json({"ok": True, "ticker": ticker, "side": side,
                         "cash": round(cash, 2), "portfolio": round(port, 2),
                         "budget": round(budget, 2), "orders": orders,
