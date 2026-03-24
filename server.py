@@ -684,48 +684,60 @@ def fetch_iem_gap(nws_issued_str, city_cfg=None):
         # Skip comment/header lines starting with #
         data_lines = [l for l in lines if l and not l.startswith("#") and l != "station,valid,p01i"]
 
+        # p01i is the accumulated precipitation since the last hourly reset.
+        # Within each hour it's cumulative (0.01, 0.02, 0.05... = still only 0.05" that hour).
+        # Correct approach: group by hour, take the MAX value per hour (= last before reset),
+        # then sum those hourly maxes for the true total.
+        hourly = {}  # hour_key -> max p01i seen in that hour
         readings = []
-        gap_total = 0.0
 
         for line in data_lines:
             parts = line.strip().split(",")
             if len(parts) < 3:
                 continue
             station, valid_time, precip = parts[0], parts[1], parts[2]
-            if precip == "M" or precip == "":
-                continue  # missing — skip
+            if precip in ("M", "T", ""):
+                continue
             try:
                 p = float(precip)
-                if p > 0:
-                    readings.append({"time": valid_time, "precip": round(p, 2)})
-                    gap_total += p
+                if p <= 0:
+                    continue
+                # hour_key = "YYYY-MM-DD HH" — group all readings in same hour
+                hour_key = valid_time[:13] if len(valid_time) >= 13 else valid_time[:10]
+                hourly[hour_key] = max(hourly.get(hour_key, 0.0), p)
+                readings.append({"time": valid_time, "precip": round(p, 2)})
             except ValueError:
                 continue
 
-        gap_total = round(gap_total, 2)
+        # Sum the per-hour maxes — this is the true accumulated precipitation
+        gap_total = round(sum(hourly.values()), 2)
 
-        # Sanity check — gap fill covers midnight→now, up to ~18 hours.
-        # 5" threshold: rare but possible during atmospheric rivers (Seattle Nov 2006: 15.63"/month)
-        # 3" was too low and would silently zero out heavy rain events.
-        if gap_total > 5.0:
+        # Also expose hourly breakdown for display
+        hourly_summary = [{"hour": k, "precip": round(v, 2)} for k, v in sorted(hourly.items())]
+
+        # Sanity check — corrected total should rarely exceed 3" in a partial day
+        # (Seattle record full-day is 5.02"; partial day gap should be well under that)
+        if gap_total > 4.0:
             return {
                 "ok": False,
-                "error": f"IEM returned unrealistic gap total {gap_total} - ignoring",
+                "error": f"IEM gap total {gap_total}\" exceeds sanity threshold after hourly correction — check data",
                 "gap_total": 0.0,
                 "readings": [],
+                "hourly_summary": hourly_summary,
                 "gap_start": gap_start_str,
                 "gap_end": now_local.strftime("%I:%M %p")
             }
 
         return {
-            "ok":        True,
-            "gap_total": gap_total,
-            "readings":  readings,  # all readings for full auditability
-            "reading_count": len(readings),
-            "visible_sum": round(sum(r["precip"] for r in readings), 2),
-            "gap_start": gap_start_str,
-            "gap_end":   now_local.strftime("%I:%M %p"),
-            "source":    f"IEM {iem_station} ASOS"
+            "ok":             True,
+            "gap_total":      gap_total,
+            "readings":       readings,       # raw 5-min observations for display
+            "hourly_summary": hourly_summary, # max per hour — what was actually summed
+            "reading_count":  len(readings),
+            "hour_count":     len(hourly),
+            "gap_start":      gap_start_str,
+            "gap_end":        now_local.strftime("%I:%M %p"),
+            "source":         f"IEM {iem_station} ASOS"
         }
 
     except Exception as e:
