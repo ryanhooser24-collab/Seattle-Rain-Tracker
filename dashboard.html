@@ -1095,15 +1095,17 @@ function renderRainfall(d){
   const nws_mtd=nws.mtd||0;
   const nws_time=nws.issued||'—';
   const nws_is_fin = d.nws_is_finalized !== false;
-  // When preliminary: true_mtd = nws.mtd - nws_today + iem_gap (server already computed this)
-  // Display true_mtd in NWS row so user sees the corrected number, not the raw CLI MTD
-  const nws_display_val = true_mtd - gap_total; // = nws_base_mtd (before IEM gap)
+  // NWS row shows the raw MTD when finalized (it's already the clean midnight number)
+  // When preliminary, show base_mtd = raw - today (today's projection stripped)
+  const nws_display_val = nws_is_fin
+    ? nws_mtd
+    : Math.max(0, nws_mtd - (nws.today || 0));
   const nws_sub = nws_is_fin
     ? `Through ${nws_time} · settlement source`
     : `Through midnight (corrected from ${nws_time} · today's NWS projection stripped)`;
-  // IEM always anchors at midnight (standard time) or 1AM (DST) — independent of NWS issued time
   const iem_anchor_label = d.iem_gap_start || (nws_is_fin ? 'midnight' : 'midnight today');
-  const iem_hours=(iem.hours||[]);
+  // IEM sends readings:[{time, precip}] — map to display format
+  const iem_hours = (iem.readings||[]).map(r=>({time:r.time, qpf:r.precip||0}));
   const wu_hours=(wu_hourly&&wu_hourly.hours||[]).filter(h=>h.qpf>0);
   const wuDays=wu.days||[];
   const monthPrefix=new Date().toISOString().slice(0,7); // "2026-03"
