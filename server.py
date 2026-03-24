@@ -2182,7 +2182,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 iem = fetch_iem_gap(None, city_cfg=cfg)
                 # Also fetch NWS CLI for today's official reading as cross-check
-                nws = fetch_nws_cli(city_cfg=cfg)
+                nws = fetch_nws_mtd(city_cfg=cfg)
                 self.send_json({
                     "ok":          True,
                     "city":        city_key,
