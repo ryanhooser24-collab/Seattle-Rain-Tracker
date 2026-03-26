@@ -527,7 +527,7 @@ const ALL_CITIES={
   los_angeles: {label:'Los Angeles',kalshi:'KXRAINLAXM', icao:'KLAX', nws_site:'LOX', nws_by:'LAX', tz:'America/Los_Angeles', regime:'mediterranean'},
   san_francisco:{label:'San Francisco',kalshi:'KXRAINSFO',icao:'KSFO',nws_site:'MTR', nws_by:'SFO', tz:'America/Los_Angeles', regime:'frontal_seasonal'},
   new_york:    {label:'New York',   kalshi:'KXRAINNYCM', icao:'KNYC', nws_site:'OKX', nws_by:'NYC', tz:'America/New_York',    regime:'mixed'},
-  chicago:     {label:'Chicago',    kalshi:'KXRAINCHIM', icao:'KORD', nws_site:'LOT', nws_by:'ORD', tz:'America/Chicago',     regime:'mixed'},
+  chicago:     {label:'Chicago',    kalshi:'KXRAINCHIM', icao:'KMDW', nws_site:'LOT', nws_by:'MDW', tz:'America/Chicago',     regime:'mixed'},
   miami:       {label:'Miami',      kalshi:'KXRAINMIAM', icao:'KMIA', nws_site:'MFL', nws_by:'MIA', tz:'America/New_York',    regime:'convective'},
   denver:      {label:'Denver',     kalshi:'KXRAINDENM', icao:'KDEN', nws_site:'BOU', nws_by:'DEN', tz:'America/Denver',      regime:'mixed'},
 };
@@ -1067,11 +1067,13 @@ function render(d){
   const titleEl=document.getElementById('page-title');
   if(titleEl)titleEl.innerHTML=`${city_label||'Rain'} <em>Rain</em> Tracker`;
 
-  // Pills
-  const src=[['NWS',nws.ok],['OM',wu.ok],['IEM',iem.ok],['Kalshi',kalshi.ok]];
+  // Pills + WU station link
+  const cityIcaoForLink = ALL_CITIES[d.city]?.icao || 'KSEA';
+  const wuUrl = `https://www.wunderground.com/history/daily/${cityIcaoForLink}`;
   document.getElementById('status-pills').innerHTML=
     src.map(([n,ok])=>`<span class="pill ${ok?'pill-ok':'pill-err'}">${n} ${ok?'✓':'✗'}</span>`).join('')+
-    `<span class="upd">Updated ${new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}</span>`;
+    `<span class="upd">Updated ${new Date().toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}</span>`+
+    `<a href="${wuUrl}" target="_blank" rel="noopener" style="font-size:10px;color:var(--muted);text-decoration:none;border:0.5px solid var(--border);border-radius:3px;padding:2px 7px;margin-left:4px;font-family:'DM Mono',monospace">WU ${cityIcaoForLink} ↗</a>`;
 
   // Notice
   const notice=document.getElementById('notice');
@@ -1284,38 +1286,42 @@ function renderChart(d){
   const icao=cityIcao;
   const wuDays=wu.days||[];
   const monthPrefix=new Date().toISOString().slice(0,7);
-  const allDays=[{d:'Today',q:today_eod||0,today:true},...wuDays.map(x=>({d:x.date||'',q:x.qpf||0,today:false}))];
-  const maxQ=Math.max(...allDays.map(x=>x.q),0.01);
+  // Chart shows forward forecast only — today's EOD is already in the rainfall card above
+  // Skip today (index 0 from OM which is the current day forecast, already captured in today_eod)
+  const forecastDays=wuDays.filter(x=>x.date&&x.date>new Date().toISOString().slice(0,10));
   const usable=wuDays.filter(d=>d.date&&d.date.startsWith(monthPrefix));
   const wuSum=Math.round(usable.reduce((s,x)=>s+(x.qpf||0),0)*100)/100;
+  const maxQ=Math.max(...forecastDays.map(x=>x.qpf||0),0.01);
 
-  const bars=allDays.map((day,i)=>{
-    const inW=i===0||i<=days_remaining;
-    const cls=i===0?'bt':!inW?'bd':day.q===0?'bz':'bf';
+  const bars=forecastDays.map(day=>{
+    const inMonth=day.date&&day.date.startsWith(monthPrefix);
+    const cls=!inMonth?'bd':(day.qpf||0)===0?'bz':'bf';
+    const dimmed=!inMonth;
+    const label=day.date?(day.date.slice(5,7)+'-'+day.date.slice(8,10)):'';
+    const q=day.qpf||0;
     return `<div class="bc">
-      <div class="bv" style="${!inW?'color:var(--border)':''}">${day.q>0?day.q.toFixed(2):'—'}</div>
+      <div class="bv" style="${dimmed?'color:var(--border)':''}">${q>0?q.toFixed(2):'—'}</div>
       <div style="width:100%;flex:1;display:flex;align-items:flex-end;">
-        <div class="br ${cls}" style="height:${Math.max(day.q/maxQ*100,3)}%"></div>
+        <div class="br ${cls}" style="height:${Math.max(q/maxQ*100,3)}%"></div>
       </div>
-      <div class="bl" style="${!inW?'color:var(--border)':''}">${day.d}</div>
+      <div class="bl" style="${dimmed?'color:var(--border)':''}">${label}</div>
     </div>`;
   }).join('');
 
   document.getElementById('chart-wrap').innerHTML=`
     <div class="chart-card">
       <div class="chart-hdr">
-        <div class="chart-title">QPF — today + ${Math.min(days_remaining,10)}-day forecast</div>
-        <div class="chart-meta">WU · ${icao}</div>
+        <div class="chart-title">OM ${Math.min(days_remaining,10)}-day forecast · ${icao}</div>
+        <div class="chart-meta">through month-end</div>
       </div>
       <div class="bars">${bars}</div>
       <div class="chart-leg">
-        <span><span class="ls" style="background:var(--wu-hr);opacity:.85"></span>Today (IEM actual + OM hourly forecast)</span>
-        <span><span class="ls" style="background:var(--rain);opacity:.65"></span>WU forecast (used)</span>
-        <span><span class="ls" style="background:var(--border)"></span>Beyond days remaining</span>
+        <span><span class="ls" style="background:var(--rain);opacity:.65"></span>In-month forecast</span>
+        <span><span class="ls" style="background:var(--border)"></span>Beyond month-end</span>
       </div>
       <div class="chart-foot">
         <span>Today EOD: <b>${(today_eod||0).toFixed(2)}"</b></span>
-        <span>OM forecast (${Math.min(days_remaining,10)} days): <b>${wuSum.toFixed(2)}"</b></span>
+        <span>Remaining forecast: <b>${wuSum.toFixed(2)}"</b></span>
         <span>${days_remaining} days remaining</span>
       </div>
     </div>`;
