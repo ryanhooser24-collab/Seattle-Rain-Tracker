@@ -319,97 +319,82 @@ def fetch_wu_forecast(city_cfg=None):
 
 
 def fetch_nws_mtd(city_cfg=None):
-    """Scrape NWS Daily Climate Report for MTD precipitation."""
+    """Scrape NWS Daily Climate Report for MTD precipitation.
+    Only accepts overnight reports (issued 0-4 AM local).
+    If the latest version is an afternoon report, tries earlier versions.
+    """
     cfg = city_cfg or CITY_CFG
-    nws_url = (f"https://forecast.weather.gov/product.php"
-               f"?site={cfg['nws_site']}"
-               f"&issuedby={cfg['nws_issuedby']}"
-               f"&product=CLI&format=txt")
+    base_url = (f"https://forecast.weather.gov/product.php"
+                f"?site={cfg['nws_site']}"
+                f"&issuedby={cfg['nws_issuedby']}"
+                f"&product=CLI&format=txt")
+    issuedby = cfg.get("nws_issuedby", "SEA")
+    label    = cfg.get("label", "Seattle, WA")
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(nws_url, headers=headers, timeout=6)
-        r.raise_for_status()
-        text = r.text
+        last_err = "No versions tried"
+        for version in range(1, 6):
+            try:
+                url = base_url if version == 1 else f"{base_url}&version={version}"
+                r = requests.get(url, headers=headers, timeout=6)
+                r.raise_for_status()
+                text = r.text
 
-        # Extract the plain text product
-        soup = BeautifulSoup(text, "html.parser")
-        pre  = soup.find("pre")
-        if not pre:
-            # Try finding text between tags
-            raw = text
-        else:
-            raw = pre.get_text()
+                soup = BeautifulSoup(text, "html.parser")
+                pre  = soup.find("pre")
+                raw  = pre.get_text() if pre else text
 
-        # Look for MONTH TO DATE precipitation line
-        mtd_match = re.search(
-            r"MONTH TO DATE\s+([\d\.T]+)",
-            raw, re.IGNORECASE
-        )
-        today_match = re.search(
-            r"(?:YESTERDAY|TODAY)\s+([\d\.T]+)\s",
-            raw, re.IGNORECASE
-        )
-        date_match = re.search(
-            r"CLIMATE SUMMARY FOR\s+([\w\s]+\d{4})",
-            raw, re.IGNORECASE
-        )
+                mtd_match     = re.search(r"MONTH TO DATE\s+([\d\.T]+)", raw, re.IGNORECASE)
+                today_match   = re.search(r"(?:YESTERDAY|TODAY)\s+([\d\.T]+)\s", raw, re.IGNORECASE)
+                date_match    = re.search(r"CLIMATE SUMMARY FOR\s+([\w\s]+\d{4})", raw, re.IGNORECASE)
+                issued_match  = re.search(r"(\d{3,4}\s+(?:AM|PM)\s+\w+\s+\w+\s+\w+\s+\d+\s+\d{4})", raw, re.IGNORECASE)
+                valid_match   = re.search(r"VALID\s+\w+\s+AS\s+OF\s+([\d:]+\s*(?:AM|PM)?\s*\w+\s*TIME)", raw, re.IGNORECASE)
 
-        # Extract exact report issuance time e.g. "620 PM PDT SUN MAR 08 2026"
-        issued_match = re.search(
-            r"(\d{3,4}\s+(?:AM|PM)\s+\w+\s+\w+\s+\w+\s+\d+\s+\d{4})",
-            raw, re.IGNORECASE
-        )
-        issued_time = issued_match.group(1).strip() if issued_match else None
+                issued_time = issued_match.group(1).strip() if issued_match else None
+                valid_time  = valid_match.group(1).strip() if valid_match else None
+                mtd   = float(mtd_match.group(1))   if mtd_match   and mtd_match.group(1)   != "T" else 0.0
+                today = float(today_match.group(1)) if today_match and today_match.group(1) != "T" else 0.0
+                date  = date_match.group(1).strip() if date_match else "Unknown"
 
-        # "VALID TODAY AS OF 0500 PM LOCAL TIME"
-        valid_match = re.search(
-            r"VALID\s+\w+\s+AS\s+OF\s+([\d:]+\s*(?:AM|PM)?\s*\w+\s*TIME)",
-            raw, re.IGNORECASE
-        )
-        valid_time = valid_match.group(1).strip() if valid_match else None
+                is_finalized = False
+                issued_hour  = None
+                if issued_time:
+                    h_match = re.search(r"(\d{3,4})\s+(AM|PM)", issued_time, re.IGNORECASE)
+                    if h_match:
+                        raw_h = int(h_match.group(1))
+                        ampm  = h_match.group(2).upper()
+                        hour  = (raw_h // 100) % 12 + (12 if ampm == "PM" else 0)
+                        if ampm == "AM" and raw_h // 100 == 12:
+                            hour = 0
+                        issued_hour  = hour
+                        is_finalized = (0 <= hour <= 4)
 
-        mtd   = float(mtd_match.group(1)) if mtd_match and mtd_match.group(1) != "T" else 0.0
-        today = float(today_match.group(1)) if today_match and today_match.group(1) != "T" else 0.0
-        date  = date_match.group(1).strip() if date_match else "Unknown"
+                        # Skip afternoon/evening reports — unreliable today field
+                        if hour >= 6:
+                            last_err = f"v{version} is afternoon ({issued_time}), trying older"
+                            continue
 
-        issuedby = cfg.get("nws_issuedby", "SEA")
-        label    = cfg.get("label", "Seattle, WA")
+                return {
+                    "ok":           True,
+                    "mtd":          mtd,
+                    "today":        today,
+                    "date":         date,
+                    "issued":       issued_time,
+                    "issued_hour":  issued_hour,
+                    "is_finalized": is_finalized,
+                    "mtd_type":     "finalized" if is_finalized else "preliminary",
+                    "valid_as_of":  valid_time,
+                    "source":       f"NWS CLI {issuedby} ({label})",
+                    "version_used": version,
+                }
+            except Exception as ve:
+                last_err = str(ve)
+                continue
 
-        # Classify report as finalized (overnight 12AM-4AM) or preliminary (intraday)
-        # Finalized DSM fires at 00:15 AM; CLI follows ~1-2AM. Afternoon CLIs are intraday.
-        is_finalized = False
-        issued_hour = None
-        if issued_time:
-            import re as _re
-            h_match = _re.search(r"(\d{3,4})\s+(AM|PM)", issued_time, _re.IGNORECASE)
-            if h_match:
-                raw_h = int(h_match.group(1))
-                ampm  = h_match.group(2).upper()
-                hour  = (raw_h // 100) % 12 + (12 if ampm == "PM" else 0)
-                if ampm == "AM" and raw_h // 100 == 12:
-                    hour = 0
-                issued_hour = hour
-                # Finalized = issued between midnight and 4 AM local time
-                is_finalized = (0 <= hour <= 4)
-
-        # MTD reliability: finalized report is authoritative; intraday is preliminary
-        mtd_type = "finalized" if is_finalized else "preliminary"
-
-        return {
-            "ok":          True,
-            "mtd":         mtd,
-            "today":       today,
-            "date":        date,
-            "issued":      issued_time,
-            "issued_hour": issued_hour,
-            "is_finalized": is_finalized,
-            "mtd_type":    mtd_type,
-            "valid_as_of": valid_time,
-            "source":      "NWS CLI" + issuedby + " (" + label + ")",
-        }
+        return {"ok": False, "error": f"All CLI versions unusable: {last_err}",
+                "mtd": 0.0, "today": 0.0, "date": "", "source": "NWS CLI"}
 
     except Exception as e:
-
         return {"ok": False, "error": str(e), "mtd": 0.0, "today": 0.0, "date": "", "source": "NWS CLI"}
 
 
