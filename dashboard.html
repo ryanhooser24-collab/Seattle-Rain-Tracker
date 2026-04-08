@@ -585,8 +585,15 @@ async function loadScanner(){
             wu_covers_eom:c.wu_covers_eom,
             nws_is_finalized:c.nws_is_finalized,
             nws_mtd_type:c.nws_mtd_type||'unknown',
-            nws:{ok:true,mtd:c.true_mtd},
+            nws:{ok:true,mtd:c.true_mtd,issued:''},
+            wu:{ok:true,days:[],total_forecast:0},
+            wu_hourly:{ok:true,hours:[]},
+            iem:{ok:true,gap_total:0,readings:[],hourly_summary:[]},
             kalshi:{ok:c.kalshi_ok,markets:c.markets},
+            gap_total:c.gap_total||0,
+            confidence:c.confidence||0,
+            month:c.month||'',
+            forecast_sigma:c.forecast_sigma||1.2,
           }
         }));
         document.getElementById('scan-meta').textContent=
@@ -1068,7 +1075,7 @@ function render(d){
   if(titleEl)titleEl.innerHTML=`${city_label||'Rain'} <em>Rain</em> Tracker`;
 
   // Pills + WU station link
-  const src=[['NWS',nws.ok],['OM',wu.ok],['IEM',iem.ok],['Kalshi',kalshi.ok]];
+  const src=[['NWS',nws?.ok],['OM',wu?.ok],['IEM',iem?.ok],['Kalshi',kalshi?.ok]];
   const cityIcaoForLink = ALL_CITIES[d.city]?.icao || 'KSEA';
   const wuUrl = `https://www.wunderground.com/history/daily/${cityIcaoForLink}`;
   document.getElementById('status-pills').innerHTML=
