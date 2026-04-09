@@ -540,6 +540,7 @@ body{max-width:900px;margin:0 auto;}
 </div><!-- end p-temp -->
 
 <!-- SCANNER (rain) -->
+<div id="p-scan">
   <div class="scan-hdr">
     <div>
       <div class="scan-title">Opportunity scanner — all rain markets</div>
@@ -1060,11 +1061,11 @@ function sw(t){
   });
   if(t==='scan'&&!scanCache)loadScanner();
   if(t==='temp'&&!tempScanCache)loadTempScanner();
+  if(t==='temp')loadTempStatus();
   if(t==='pos')loadPortfolio();
 }
 
 // ── TEMPERATURE SCANNER ────────────────────────────────────────────────────
-let tempCache   = null;
 let tempHorizon = 'd1';
 let tempFilter  = 'all';
 
@@ -1074,7 +1075,7 @@ function setTempHorizon(h){
     const el=document.getElementById('htog-'+k);
     if(el)el.className='htog-btn'+(k===h?' on':'');
   });
-  tempCache=null;
+  tempScanCache=null;
   loadTempScanner();
 }
 
@@ -1084,7 +1085,7 @@ function setTempFilter(f){
     const el=document.getElementById('tsf-'+k);
     if(el)el.className='sf'+(k===f?' on':'');
   });
-  if(tempCache)renderTempScanner(tempCache);
+  if(tempScanCache)renderTempScanner(tempScanCache);
 }
 
 function tempTimingInfo(){
@@ -1138,7 +1139,7 @@ async function loadTempScanner(){
     if(!res.ok)throw new Error('Server '+res.status);
     const data=await res.json();
     if(!data.ok)throw new Error(data.error||'scan failed');
-    tempCache=data;
+    tempScanCache=data;
     renderTempScanner(data);
     const act=data.total_actionable||0;
     const aG=(data.cities||[]).filter(c=>c.best_grade==='A').length;
@@ -2563,12 +2564,7 @@ async function loadBacktestResults(){
   }
 }
 
-// Auto-load temp status when temp tab opens
-const _origSw = sw;
-function sw(t){
-  _origSw(t);
-  if(t==='temp') loadTempStatus();
-}
+
 </script>
 
 </body>
