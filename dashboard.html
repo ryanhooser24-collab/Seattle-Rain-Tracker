@@ -350,7 +350,8 @@ body{max-width:900px;margin:0 auto;}
 <body>
 
 <div class="tabs">
-  <div class="tab active" id="t-scan" onclick="sw('scan')">Scanner</div>
+  <div class="tab active" id="t-scan" onclick="sw('scan')">Rain Scanner</div>
+  <div class="tab" id="t-temp" onclick="sw('temp')">Temp Scanner</div>
   <div class="tab" id="t-dash" onclick="sw('dash')">City Detail</div>
   <div class="tab" id="t-pos" onclick="sw('pos')">Positions</div>
   <div class="tab" id="t-rules" onclick="sw('rules')">Rules</div>
@@ -358,8 +359,187 @@ body{max-width:900px;margin:0 auto;}
   <div class="tab" id="t-bt" onclick="sw('bt')">Backtest</div>
 </div>
 
-<!-- SCANNER -->
-<div id="p-scan">
+<!-- TEMPERATURE SCANNER -->
+<div id="p-temp" style="display:none">
+
+<style>
+/* ── TEMP-SPECIFIC STYLES ──────────────────────────────────────────────── */
+.temp-hdr{padding:14px 16px 12px;border-bottom:0.5px solid var(--border);background:var(--paper);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;}
+.temp-hdr h1{font-family:'Instrument Serif',serif;font-size:22px;font-weight:400;}
+.temp-hdr h1 em{color:var(--hot,#993c1d);}
+.hot{color:#993c1d;}.cold{color:#185fa5;}
+:root{--hot:#993c1d;--hot-lt:#faece7;--hot-border:#f0997b;}
+
+.timing-track{display:flex;align-items:stretch;height:26px;border-radius:4px;overflow:hidden;}
+.tt-d1open{flex:2;background:#e6f1fb;color:#0c447c;display:flex;align-items:center;justify-content:center;font-size:9px;letter-spacing:.8px;text-transform:uppercase;font-weight:500;}
+.tt-d1ec{flex:1;background:#e6f4ec;color:#0f4d2a;display:flex;align-items:center;justify-content:center;font-size:9px;letter-spacing:.8px;text-transform:uppercase;font-weight:500;}
+.tt-d0gfs{flex:1;background:#faeeda;color:#633806;display:flex;align-items:center;justify-content:center;font-size:9px;letter-spacing:.8px;text-transform:uppercase;font-weight:500;}
+.tt-hrrr{flex:1;background:#faece7;color:#712b13;display:flex;align-items:center;justify-content:center;font-size:9px;letter-spacing:.8px;text-transform:uppercase;font-weight:500;}
+.tt-close{flex:0.5;background:#f1efe8;color:#444441;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:500;}
+.timing-now-track{height:4px;background:var(--border);border-radius:2px;position:relative;margin-top:4px;}
+.timing-now-dot{position:absolute;top:-4px;width:10px;height:10px;border-radius:50%;background:#993c1d;border:2px solid var(--paper);}
+
+.temp-filters{display:flex;gap:6px;padding:8px 16px;border-bottom:0.5px solid var(--border);background:var(--paper);flex-wrap:wrap;align-items:center;}
+.horizon-tog{display:flex;border:0.5px solid var(--border);border-radius:4px;overflow:hidden;}
+.htog-btn{padding:4px 10px;font-size:10px;letter-spacing:1px;text-transform:uppercase;cursor:pointer;border:none;background:var(--bg);color:var(--muted);font-family:inherit;}
+.htog-btn.on{background:var(--ink);color:var(--paper);}
+
+.temp-opp{background:var(--paper);border:0.5px solid var(--border);border-radius:8px;overflow:hidden;cursor:pointer;}
+.temp-opp.grade-A{border-left:3px solid #3B6D11;}
+.temp-opp.grade-B{border-left:3px solid var(--warn,#ba7517);}
+.temp-opp.grade-skip{border-left:3px solid var(--border);opacity:.65;}
+.temp-opp-inner{display:flex;align-items:center;padding:12px 14px;gap:14px;}
+.temp-opp-left{flex:1;min-width:0;}
+.temp-opp-city{font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-bottom:3px;}
+.temp-opp-decision{font-size:13px;font-weight:500;margin-bottom:3px;}
+.grade-A .temp-opp-decision{color:#27500A;}
+.grade-B .temp-opp-decision{color:#854f0b;}
+.temp-opp-ctx{font-size:11px;color:var(--muted);line-height:1.5;}
+.temp-opp-ctx b{color:var(--ink);font-weight:500;}
+.temp-opp-right{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0;}
+.temp-opp-edge{font-size:22px;font-weight:500;line-height:1;}
+.grade-A .temp-opp-edge{color:#3B6D11;}
+.grade-B .temp-opp-edge{color:#854f0b;}
+.temp-opp-meta{font-size:10px;color:var(--muted);text-align:right;line-height:1.5;}
+.temp-opp-btn{font-size:10px;padding:5px 12px;border-radius:4px;cursor:pointer;font-family:inherit;border:none;margin-top:2px;}
+.grade-A .temp-opp-btn{background:var(--yes-lt);color:#27500A;border:0.5px solid var(--yes-border);}
+.grade-B .temp-opp-btn{background:var(--gap-lt,#fef3e8);color:#854f0b;border:0.5px solid var(--gap-border,#e8c49a);}
+.gbadge{font-size:9px;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:5px;}
+.gA{background:var(--yes-lt);color:#0f4d2a;}.gB{background:var(--warn-lt,#faeeda);color:#854f0b;}
+
+.bracket-detail{display:none;border-top:0.5px solid var(--border);padding:12px 14px;background:var(--bg);}
+.temp-opp.open .bracket-detail{display:block;}
+.bkt-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+.bkt-row{display:flex;align-items:center;gap:8px;margin-bottom:4px;}
+.bkt-range{font-size:10px;color:var(--muted);min-width:72px;}
+.bkt-wrap{flex:1;height:6px;background:var(--border);border-radius:3px;position:relative;overflow:visible;}
+.bkt-fill{height:100%;border-radius:3px;}
+.bkt-needle{position:absolute;top:-5px;width:2px;height:16px;border-radius:1px;}
+.bkt-prob{font-size:10px;font-weight:500;min-width:34px;text-align:right;}
+.bkt-legend{display:flex;gap:12px;margin-top:6px;font-size:9px;color:var(--muted);}
+.bkt-legend span{display:flex;align-items:center;gap:4px;}
+.bkt-dot{width:7px;height:7px;border-radius:50%;}
+
+.mdl-row{display:flex;align-items:center;gap:6px;margin-bottom:5px;}
+.mdl-name{font-size:10px;color:var(--muted);min-width:56px;}
+.mdl-temp{font-size:12px;font-weight:500;min-width:46px;}
+.mdl-bar{flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden;}
+.mdl-fill{height:100%;border-radius:2px;}
+.m-gfs{background:var(--rain,#2e5fa3);}
+.m-ecmwf{background:var(--hot,#993c1d);}
+.m-best{background:#3B6D11;}
+.mdl-conf{font-size:9px;padding:2px 6px;border-radius:3px;margin-left:4px;}
+.conf-hi{background:var(--yes-lt);color:#0f4d2a;}
+.conf-lo{background:var(--warn-lt,#faeeda);color:#854f0b;}
+
+.kelly-box{margin-top:8px;background:var(--yes-lt);border:0.5px solid var(--yes-border);border-radius:4px;padding:8px 10px;}
+.kelly-row{display:flex;justify-content:space-between;font-size:10px;line-height:1.8;}
+.kelly-lbl{color:var(--yes);}
+.kelly-val{color:#0f4d2a;font-weight:500;}
+
+.temp-city-strip{display:flex;gap:6px;padding:0 16px 12px;overflow-x:auto;}
+.tc-card{background:var(--paper);border:0.5px solid var(--border);border-radius:6px;padding:8px 10px;min-width:96px;flex-shrink:0;cursor:pointer;}
+.tc-card.has-edge{border-color:var(--yes-border,#a8d4b8);}
+.tc-city{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:3px;}
+.tc-high{font-size:16px;font-weight:500;color:var(--hot,#993c1d);}
+.tc-low{font-size:12px;color:var(--cold,#185fa5);margin-top:1px;}
+.tc-edge{font-size:9px;font-weight:500;color:#3B6D11;margin-top:3px;}
+.tc-spread{font-size:9px;margin-top:2px;}
+.spread-tight{color:#3B6D11;}.spread-wide{color:#854f0b;}
+.tc-noedge{font-size:9px;color:var(--muted);margin-top:3px;}
+</style>
+
+<div class="temp-hdr">
+  <h1>Temperature <em>Scanner</em></h1>
+  <div class="header-meta" id="temp-status-pills">
+    <span class="pill" style="background:var(--hot-lt,#faece7);color:var(--hot,#993c1d);">LOADING...</span>
+    <button onclick="loadTempScanner()" style="font-size:10px;padding:5px 12px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;">↻ Refresh</button>
+  </div>
+</div>
+
+<!-- Timing banner -->
+<div style="background:var(--paper);border-bottom:0.5px solid var(--border);padding:10px 16px;">
+  <div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:6px;">Trading window — 28h cycle</div>
+  <div class="timing-track">
+    <div class="tt-d1open">D-1 10AM · market opens</div>
+    <div class="tt-d1ec">D-1 6PM · ECMWF 12Z</div>
+    <div class="tt-d0gfs">D-0 6AM · GFS 0Z</div>
+    <div class="tt-hrrr">D-0 2PM · HRRR lock</div>
+    <div class="tt-close">close</div>
+  </div>
+  <div class="timing-now-track" id="temp-timing-track"><div class="timing-now-dot" id="temp-timing-dot"></div></div>
+  <div style="font-size:9px;color:var(--muted);margin-top:5px;line-height:1.6;" id="temp-timing-label">Calculating...</div>
+</div>
+
+<div class="temp-filters">
+  <div class="horizon-tog">
+    <button class="htog-btn on" id="htog-d1" onclick="setTempHorizon('d1')">D+1 (tomorrow)</button>
+    <button class="htog-btn" id="htog-d0" onclick="setTempHorizon('d0')">D+0 (today)</button>
+  </div>
+  <button class="sf on" id="tsf-all"  onclick="setTempFilter('all')">All</button>
+  <button class="sf"    id="tsf-A"    onclick="setTempFilter('A')">A only</button>
+  <button class="sf"    id="tsf-high" onclick="setTempFilter('high')">HIGH</button>
+  <button class="sf"    id="tsf-low"  onclick="setTempFilter('low')">LOW</button>
+  <button class="sf"    id="tsf-agree" onclick="setTempFilter('agree')">Models agree</button>
+  <span id="temp-scan-meta" style="font-size:10px;color:var(--muted);margin-left:auto;"></span>
+</div>
+
+<div style="padding:10px 16px 6px;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);" id="temp-sec-A">A-grade edges</div>
+<div id="temp-opp-A" class="opp-list"></div>
+<div style="padding:10px 16px 6px;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);display:none;" id="temp-sec-B">B-grade edges</div>
+<div id="temp-opp-B" class="opp-list"></div>
+<div id="temp-city-strip-wrap" style="padding-top:8px;"></div>
+
+<!-- Settlement & Backtest status -->
+<div style="padding:10px 16px 6px;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-top:4px;border-top:0.5px solid var(--border);">System status · auto-backtest</div>
+<div id="temp-status-card" style="padding:0 16px 16px;">
+  <div style="background:var(--paper);border:0.5px solid var(--border);border-radius:8px;padding:12px 14px;">
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:10px;" id="temp-status-grid">
+      <div><div style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Scheduler</div><div style="font-size:13px;font-weight:500;" id="ts-scheduler">—</div></div>
+      <div><div style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Calibrated</div><div style="font-size:13px;font-weight:500;" id="ts-calibrated">—</div></div>
+      <div><div style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Snapshots</div><div style="font-size:13px;font-weight:500;" id="ts-snaps">—</div></div>
+      <div><div style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Unsettled</div><div style="font-size:13px;font-weight:500;" id="ts-unsettled">—</div></div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <button onclick="triggerSettle()" style="font-size:10px;padding:5px 12px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;">⚡ Run settlement now</button>
+      <button onclick="loadBacktestResults()" style="font-size:10px;padding:5px 12px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;">📊 Load backtest results</button>
+      <button onclick="loadTempStatus()" style="font-size:10px;padding:5px 12px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;">↻ Refresh status</button>
+      <span id="ts-settle-msg" style="font-size:10px;color:var(--muted);"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Backtest results table -->
+<div id="temp-bt-wrap" style="padding:0 16px 20px;display:none;">
+  <div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:8px;">Backtest results — win rate by city · horizon · grade</div>
+  <div style="background:var(--paper);border:0.5px solid var(--border);border-radius:8px;overflow:hidden;">
+    <div style="overflow-x:auto;">
+      <table id="temp-bt-table" style="width:100%;border-collapse:collapse;font-size:11px;font-family:'DM Mono',monospace;">
+        <thead>
+          <tr style="border-bottom:0.5px solid var(--border);background:var(--bg);">
+            <th style="text-align:left;padding:8px 12px;font-weight:500;color:var(--muted);white-space:nowrap;">City</th>
+            <th style="text-align:center;padding:8px 8px;font-weight:500;color:var(--muted);">Horizon</th>
+            <th style="text-align:center;padding:8px 8px;font-weight:500;color:var(--muted);">Grade</th>
+            <th style="text-align:right;padding:8px 8px;font-weight:500;color:var(--muted);">n</th>
+            <th style="text-align:right;padding:8px 8px;font-weight:500;color:var(--muted);">Win %</th>
+            <th style="text-align:right;padding:8px 8px;font-weight:500;color:var(--muted);">Model %</th>
+            <th style="text-align:right;padding:8px 8px;font-weight:500;color:var(--muted);">Mkt ¢</th>
+            <th style="text-align:right;padding:8px 8px;font-weight:500;color:var(--muted);">Avg gap</th>
+            <th style="text-align:right;padding:8px 8px;font-weight:500;color:var(--muted);">Edge/σ</th>
+            <th style="text-align:right;padding:8px 12px;font-weight:500;color:var(--muted);">Signal</th>
+          </tr>
+        </thead>
+        <tbody id="temp-bt-tbody"></tbody>
+      </table>
+    </div>
+    <div id="temp-bt-foot" style="padding:8px 12px;font-size:10px;color:var(--muted);border-top:0.5px solid var(--border);"></div>
+  </div>
+  <div style="margin-top:10px;font-size:10px;color:var(--muted);line-height:1.7;padding:10px 12px;background:var(--paper);border:0.5px solid var(--border);border-radius:6px;" id="temp-bt-interpretation"></div>
+</div>
+
+</div><!-- end p-temp -->
+
+<!-- SCANNER (rain) -->
   <div class="scan-hdr">
     <div>
       <div class="scan-title">Opportunity scanner — all rain markets</div>
@@ -519,6 +699,8 @@ let currentCity='seattle';
 const cityCache={};
 let scanFilter='all';
 let scanCache=null;
+let tempScanCache=null;
+let tempCityCards={};
 
 // All known Kalshi monthly rain series
 const ALL_CITIES={
@@ -870,14 +1052,277 @@ function toggleTheme(){
   });
 })();
 function sw(t){
-  ['scan','dash','pos','rules','hist','bt'].forEach(x=>{
+  ['scan','temp','dash','pos','rules','hist','bt'].forEach(x=>{
     const p=document.getElementById('p-'+x)||document.getElementById('s-'+x);
     if(p)p.style.display=x===t?'block':'none';
     const tb=document.getElementById('t-'+x);
     if(tb)tb.className='tab'+(x===t?' active':'');
   });
   if(t==='scan'&&!scanCache)loadScanner();
+  if(t==='temp'&&!tempScanCache)loadTempScanner();
   if(t==='pos')loadPortfolio();
+}
+
+// ── TEMPERATURE SCANNER ────────────────────────────────────────────────────
+let tempCache   = null;
+let tempHorizon = 'd1';
+let tempFilter  = 'all';
+
+function setTempHorizon(h){
+  tempHorizon=h;
+  ['d1','d0'].forEach(k=>{
+    const el=document.getElementById('htog-'+k);
+    if(el)el.className='htog-btn'+(k===h?' on':'');
+  });
+  tempCache=null;
+  loadTempScanner();
+}
+
+function setTempFilter(f){
+  tempFilter=f;
+  ['all','A','high','low','agree'].forEach(k=>{
+    const el=document.getElementById('tsf-'+k);
+    if(el)el.className='sf'+(k===f?' on':'');
+  });
+  if(tempCache)renderTempScanner(tempCache);
+}
+
+function tempTimingInfo(){
+  const now=new Date();
+  const utcH=now.getUTCHours()+now.getUTCMinutes()/60;
+  // ET = UTC-5 (rough)
+  const etH=((utcH-5)+24)%24;
+  let pct,conf;
+  if(etH>=10&&etH<18){
+    pct=(etH-10)/8*0.33;
+    conf='MEDIUM — GFS 6Z posted. Best D-1 entry window open.';
+  }else if(etH>=18||etH<6){
+    const h=etH>=18?etH-18:etH+6;
+    pct=0.33+(h/12)*0.25;
+    conf='MEDIUM-HIGH — ECMWF 12Z posted. Overnight σ improvement.';
+  }else if(etH>=6&&etH<14){
+    pct=0.58+(etH-6)/8*0.25;
+    conf='HIGH — D+0 same-day models running. σ ≈ 1.3°F.';
+  }else{
+    pct=0.83+Math.min((etH-14)/1.5,1)*0.17;
+    conf='VERY HIGH — HRRR lock-in. Manage existing positions.';
+  }
+  return{pct:Math.min(1,Math.max(0,pct)),conf};
+}
+
+function updateTempTimingBanner(){
+  const{pct,conf}=tempTimingInfo();
+  const dot=document.getElementById('temp-timing-dot');
+  const lbl=document.getElementById('temp-timing-label');
+  if(dot)dot.style.left=`calc(${(pct*100).toFixed(1)}% - 5px)`;
+  if(lbl){
+    const now=new Date();
+    const ts=now.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'});
+    lbl.innerHTML=`Now: <b style="color:var(--ink)">${ts}</b> — ${conf}`;
+  }
+}
+
+async function loadTempScanner(){
+  const pw=document.getElementById('temp-status-pills');
+  if(pw)pw.innerHTML=`<span class="pill" style="background:var(--hot-lt,#faece7);color:var(--hot,#993c1d);">SCANNING...</span>
+    <button onclick="loadTempScanner()" style="font-size:10px;padding:5px 12px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;">↻ Refresh</button>`;
+  const wA=document.getElementById('temp-opp-A');
+  const wB=document.getElementById('temp-opp-B');
+  if(wA)wA.innerHTML='<div class="scan-loading">Fetching forecasts from Open-Meteo + Kalshi...</div>';
+  if(wB)wB.innerHTML='';
+  updateTempTimingBanner();
+  try{
+    const ctrl=new AbortController();
+    setTimeout(()=>ctrl.abort(),90000);
+    const res=await fetch(`${SERVER}/temp/scan?horizon=${tempHorizon}`,{signal:ctrl.signal});
+    if(!res.ok)throw new Error('Server '+res.status);
+    const data=await res.json();
+    if(!data.ok)throw new Error(data.error||'scan failed');
+    tempCache=data;
+    renderTempScanner(data);
+    const act=data.total_actionable||0;
+    const aG=(data.cities||[]).filter(c=>c.best_grade==='A').length;
+    if(pw)pw.innerHTML=
+      `<span class="pill" style="background:var(--hot-lt,#faece7);color:var(--hot,#993c1d);">${data.city_count} CITIES</span>`+
+      (act?`<span class="pill pill-ok">${act} ACTIONABLE</span>`:'')+
+      (aG?`<span class="pill" style="background:var(--yes-lt);color:var(--yes);">${aG} A-GRADE</span>`:'')+
+      `<button onclick="loadTempScanner()" style="font-size:10px;padding:5px 12px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;">↻ Refresh</button>`;
+  }catch(e){
+    if(wA)wA.innerHTML=`<div class="err-msg" style="margin:0 16px 16px">${e.message}<br>Make sure server.py is running.</div>`;
+    if(pw)pw.innerHTML=`<span class="pill pill-err">ERROR</span>
+      <button onclick="loadTempScanner()" style="font-size:10px;padding:5px 12px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;">↻ Retry</button>`;
+  }
+}
+
+function renderTempScanner(data){
+  const cities=data.cities||[];
+  const secA=document.getElementById('temp-sec-A');
+  const wA=document.getElementById('temp-opp-A');
+  const secB=document.getElementById('temp-sec-B');
+  const wB=document.getElementById('temp-opp-B');
+  const stripW=document.getElementById('temp-city-strip-wrap');
+
+  const allBkts=[];
+  for(const city of cities){
+    for(const mtype of['high','low']){
+      const mkts=mtype==='high'?(city.high_markets||[]):(city.low_markets||[]);
+      for(const m of mkts){
+        if(m.grade==='skip')continue;
+        allBkts.push({...m,city_key:city.city,city_label:city.label,
+          market_type:mtype,forecast:city.forecast,
+          spread_models:mtype==='high'?city.forecast?.spread_high:city.forecast?.spread_low});
+      }
+    }
+  }
+
+  const filtered=allBkts.filter(b=>{
+    if(tempFilter==='A')    return b.grade==='A';
+    if(tempFilter==='high') return b.market_type==='high';
+    if(tempFilter==='low')  return b.market_type==='low';
+    if(tempFilter==='agree')return(b.spread_models||0)<1.5;
+    return true;
+  });
+
+  const grA=filtered.filter(b=>b.grade==='A').sort((a,b)=>b.net_gap_c-a.net_gap_c);
+  const grB=filtered.filter(b=>b.grade==='B').sort((a,b)=>b.net_gap_c-a.net_gap_c);
+
+  if(secA)secA.style.display=grA.length?'block':'none';
+  if(secB)secB.style.display=grB.length?'block':'none';
+  if(wA)wA.innerHTML=grA.length?grA.map(b=>renderTempCard(b)).join('')
+    :'<div class="scan-empty" style="padding:20px 16px;color:var(--muted);font-size:12px;">No A-grade edges right now.</div>';
+  if(wB)wB.innerHTML=grB.map(b=>renderTempCard(b)).join('');
+
+  if(stripW){
+    const cards=cities.map(c=>{
+      const fc=c.forecast||{};
+      const hi=fc.best_high!=null?fc.best_high.toFixed(1):'—';
+      const lo=fc.best_low!=null?fc.best_low.toFixed(1):'—';
+      const spr=Math.max(fc.spread_high||0,fc.spread_low||0);
+      const hasEdge=c.best_grade==='A'||c.best_grade==='B';
+      return `<div class="tc-card${hasEdge?' has-edge':''}" onclick="tempDrillCity('${c.city}')">
+        <div class="tc-city">${c.label}</div>
+        <div class="tc-high">${hi}°</div>
+        <div class="tc-low">${lo}°</div>
+        <div class="tc-spread ${spr>2?'spread-wide':'spread-tight'}">±${spr.toFixed(1)}°F</div>
+        ${hasEdge?`<div class="tc-edge">+${c.best_edge_c}¢ ${c.best_grade}</div>`
+                 :`<div class="tc-noedge">no edge</div>`}
+      </div>`;
+    });
+    stripW.innerHTML=cities.length
+      ?`<div style="padding:0 16px 6px;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);">All cities — forecast summary</div>
+         <div class="temp-city-strip">${cards.join('')}</div>`:'';
+  }
+
+  const meta=document.getElementById('temp-scan-meta');
+  if(meta)meta.textContent=`${cities.length} cities · ${filtered.length} brackets · ${grA.length+grB.length} actionable`;
+}
+
+function renderTempCard(b){
+  const fc=b.forecast||{};
+  const mtype=b.market_type;
+  const mu=mtype==='high'?fc.gfs_high:fc.gfs_low;
+  const muEc=mtype==='high'?fc.ecmwf_high:fc.ecmwf_low;
+  const muBest=mtype==='high'?fc.best_high:fc.best_low;
+  const spr=(b.spread_models||0).toFixed(1);
+  const sigma=(b.sigma||2.0).toFixed(1);
+  const askC=Math.round((b.yes_ask||0)*100);
+  const probC=Math.round((b.model_prob||0)*100);
+  const gfsLbl=mu!=null?mu.toFixed(1)+'°F':'—';
+  const ecLbl=muEc!=null?muEc.toFixed(1)+'°F':'—';
+  const bestLbl=muBest!=null?muBest.toFixed(1)+'°F':'—';
+  const confCl=(b.spread_models||0)<1.5?'conf-hi':'conf-lo';
+  const kdol=((b.kelly_size||0)).toFixed(2);
+
+  // Simple bracket bar — market price vs model prob
+  const barMkt=Math.max(3,Math.min(95,askC));
+  const barMdl=Math.max(3,Math.min(95,probC));
+  let needlePct=50;
+  if(muBest!=null&&b.lo_temp!=null&&b.hi_temp!=null&&b.hi_temp>b.lo_temp){
+    needlePct=Math.min(95,Math.max(5,((muBest-b.lo_temp)/(b.hi_temp-b.lo_temp))*100));
+  }
+
+  return `<div class="temp-opp grade-${b.grade}" onclick="this.classList.toggle('open')">
+  <div class="temp-opp-inner">
+    <div class="temp-opp-left">
+      <div class="temp-opp-city">${b.city_label} · ${mtype.toUpperCase()} · ${fc.target_date||''} · ${fc.nws_station||''}</div>
+      <div class="temp-opp-decision">Buy ${b.bracket_label||''} YES <span class="gbadge g${b.grade}">${b.grade}</span></div>
+      <div class="temp-opp-ctx">GFS <b>${gfsLbl}</b> · ECMWF <b>${ecLbl}</b> · spread <b>${spr}°F</b> · σ=${sigma}°F</div>
+    </div>
+    <div class="temp-opp-right">
+      <div class="temp-opp-edge">+${b.net_gap_c}¢</div>
+      <div class="temp-opp-meta">mkt ${askC}¢ / model ${probC}%<br>liq ${b.liq_grade||'?'} · ratio ${(b.edge_ratio||0).toFixed(2)}</div>
+      <button class="temp-opp-btn" onclick="event.stopPropagation();placeTempBet('${b.ticker||''}','${b.city_key}',${askC})">Size ↗</button>
+    </div>
+  </div>
+  <div class="bracket-detail">
+    <div class="bkt-grid">
+      <div>
+        <div style="font-size:10px;color:var(--muted);margin-bottom:6px;">Bracket · ${b.ticker||''}</div>
+        <div class="bkt-row" style="background:var(--yes-lt);border-radius:4px;padding:3px 4px;">
+          <div class="bkt-range" style="font-weight:500;color:#27500A;">${b.bracket_label||''}</div>
+          <div class="bkt-wrap">
+            <div class="bkt-fill" style="width:${barMkt}%;background:#3B6D11;"></div>
+            <div class="bkt-needle" style="left:${needlePct}%;background:var(--ink);"></div>
+          </div>
+          <div class="bkt-prob" style="color:#27500A;font-weight:500;">${askC}¢</div>
+        </div>
+        <div class="bkt-row">
+          <div class="bkt-range" style="font-size:9px;color:var(--muted);">Model prob.</div>
+          <div class="bkt-wrap"><div class="bkt-fill" style="width:${barMdl}%;background:var(--rain,#2e5fa3);opacity:.7;"></div></div>
+          <div class="bkt-prob" style="color:var(--rain,#2e5fa3);">${probC}%</div>
+        </div>
+        <div class="bkt-legend"><span><span class="bkt-dot" style="background:var(--ink);"></span>Model center (${bestLbl})</span></div>
+        <div class="kelly-box" style="margin-top:10px;">
+          <div class="kelly-row"><span class="kelly-lbl">Model prob.</span><span class="kelly-val">${probC}%</span></div>
+          <div class="kelly-row"><span class="kelly-lbl">Market ask</span><span class="kelly-val">${askC}¢</span></div>
+          <div class="kelly-row"><span class="kelly-lbl">Raw edge</span><span class="kelly-val">+${b.gap_c||0}¢</span></div>
+          <div class="kelly-row"><span class="kelly-lbl">Spread cost</span><span class="kelly-val">−${b.spread_c||0}¢</span></div>
+          <div class="kelly-row"><span class="kelly-lbl">Net edge</span><span class="kelly-val">+${b.net_gap_c||0}¢</span></div>
+          <div class="kelly-row"><span class="kelly-lbl">Half-Kelly</span><span class="kelly-val">${((b.kelly_frac||0)*100).toFixed(1)}% → $${kdol}/unit</span></div>
+          <div class="kelly-row"><span class="kelly-lbl">σ edge ratio</span><span class="kelly-val">${(b.edge_ratio||0).toFixed(3)} (A≥0.12, B≥0.07)</span></div>
+        </div>
+      </div>
+      <div>
+        <div style="font-size:10px;color:var(--muted);margin-bottom:6px;">Model consensus</div>
+        <div class="mdl-row"><div class="mdl-name">GFS</div><div class="mdl-temp">${gfsLbl}</div>
+          <div class="mdl-bar"><div class="mdl-fill m-gfs" style="width:${Math.min(95,Math.max(5,((mu||50)/120)*100))}%"></div></div>
+          <span class="mdl-conf ${confCl}">±${spr}°F</span></div>
+        <div class="mdl-row"><div class="mdl-name">ECMWF</div><div class="mdl-temp">${ecLbl}</div>
+          <div class="mdl-bar"><div class="mdl-fill m-ecmwf" style="width:${Math.min(95,Math.max(5,((muEc||50)/120)*100))}%"></div></div></div>
+        <div class="mdl-row"><div class="mdl-name">Adj. best</div><div class="mdl-temp">${bestLbl}</div>
+          <div class="mdl-bar"><div class="mdl-fill m-best" style="width:${Math.min(95,Math.max(5,((muBest||50)/120)*100))}%"></div></div></div>
+        <div style="margin-top:10px;font-size:10px;color:var(--muted);padding:8px;background:var(--paper);border:0.5px solid var(--border);border-radius:4px;line-height:1.7;">
+          <b style="color:var(--ink);">Station bias applied</b><br>
+          GFS: <b style="color:var(--ink);">−${(fc.gfs_bias_applied||0).toFixed(1)}°F</b> ·
+          ECMWF: <b style="color:var(--ink);">−${(fc.ecmwf_bias_applied||0).toFixed(1)}°F</b><br>
+          σ (${tempHorizon==='d0'?'D+0':'D+1'}): <b style="color:var(--ink);">${sigma}°F</b><br>
+          Settlement: <b style="color:var(--hot,#993c1d);">NWS CLI ${fc.nws_station||''}</b>
+        </div>
+        ${b.spread_penalty?`<div style="margin-top:8px;font-size:10px;padding:6px 8px;background:var(--warn-lt,#faeeda);border-radius:4px;color:#854f0b;">⚠ Model spread &gt;2°F — confidence reduced.</div>`:''}
+      </div>
+    </div>
+  </div>
+</div>`;
+}
+
+function placeTempBet(ticker,city,price_c){
+  if(!ticker){alert('No ticker for this bracket');return;}
+  const k=`temp-${ticker}`;
+  betSlip[k]=(betSlip[k]||0)+1;
+  updatePlaceBtn();
+  alert(`${ticker} added to slip at ${price_c}¢. Execute via Kalshi API from Positions tab.`);
+}
+
+function tempDrillCity(city_key){
+  fetch(`${SERVER}/temp/city?city=${city_key}&horizon=${tempHorizon}`)
+    .then(r=>r.json())
+    .then(d=>{
+      if(d.ok){
+        renderTempScanner({cities:[d],city_count:1,total_actionable:d.actionable_count||0});
+        const meta=document.getElementById('temp-scan-meta');
+        if(meta)meta.textContent=`Focused: ${d.label} · click ↻ to return to all cities`;
+      }
+    }).catch(e=>console.error('Drill failed',e));
 }
 
 // ── PORTFOLIO ─────────────────────────────────────────────────────────────────
@@ -1854,8 +2299,6 @@ async function testAllCitiesActuals(){
   status.style.color = allGood ? 'var(--yes)' : '#854F0B';
 }
 
-async function loadBacktest(){}  // called on tab switch, does nothing until user clicks Run
-
 async function runIEMBacktest(){
   const city = document.getElementById('bt-city').value;
   const status = document.getElementById('iem-bt-status');
@@ -1982,6 +2425,149 @@ async function runBacktest(){
   }catch(err){
     status.textContent='Request failed: '+err.message;
   }
+}
+
+// ── TEMP STATUS + AUTO-BACKTEST ───────────────────────────────────────────────
+async function loadTempStatus(){
+  try{
+    const res  = await fetch(SERVER+'/temp/status');
+    const data = await res.json();
+    if(!data.ok) return;
+    const sched  = document.getElementById('ts-scheduler');
+    const cal    = document.getElementById('ts-calibrated');
+    const snaps  = document.getElementById('ts-snaps');
+    const unsett = document.getElementById('ts-unsettled');
+    if(sched) sched.innerHTML = data.scheduler_alive
+      ? '<span style="color:var(--yes)">Running</span>'
+      : '<span style="color:var(--no)">Stopped</span>';
+    if(cal)   cal.textContent  = `${data.calibrated_cities}/${data.total_cities}`;
+    if(snaps) snaps.textContent = data.total_snapshots||'0';
+    if(unsett){
+      const u = data.yesterday_unsettled||0;
+      unsett.innerHTML = u > 0
+        ? `<span style="color:var(--warn,#ba7517)">${u} pending</span>`
+        : `<span style="color:var(--yes)">All clear</span>`;
+    }
+  }catch(e){ console.log('Status load failed',e); }
+}
+
+async function triggerSettle(){
+  const msg = document.getElementById('ts-settle-msg');
+  if(msg){ msg.textContent='Running settlement...'; msg.style.color='var(--muted)'; }
+  try{
+    const res  = await fetch(SERVER+'/temp/auto-settle');
+    const data = await res.json();
+    if(msg){
+      if(data.ok){
+        const settled = data.settled||0;
+        msg.textContent = data.skipped
+          ? `Skipped: ${data.reason}`
+          : `Done — ${settled} brackets settled for ${data.date}`;
+        msg.style.color = settled > 0 ? 'var(--yes)' : 'var(--muted)';
+      } else {
+        msg.textContent = 'Error: '+(data.error||'unknown');
+        msg.style.color = 'var(--no)';
+      }
+    }
+    loadTempStatus();
+  }catch(e){
+    if(msg){ msg.textContent='Failed: '+e.message; msg.style.color='var(--no)'; }
+  }
+}
+
+async function loadBacktestResults(){
+  const wrap  = document.getElementById('temp-bt-wrap');
+  const tbody = document.getElementById('temp-bt-tbody');
+  const foot  = document.getElementById('temp-bt-foot');
+  const interp= document.getElementById('temp-bt-interpretation');
+  if(!wrap||!tbody) return;
+  wrap.style.display='block';
+  tbody.innerHTML='<tr><td colspan="10" style="padding:16px;text-align:center;color:var(--muted);">Loading...</td></tr>';
+  try{
+    const res  = await fetch(SERVER+'/temp/backtest');
+    const data = await res.json();
+    if(!data.ok){
+      tbody.innerHTML=`<tr><td colspan="10" style="padding:12px;color:var(--no);">${data.error||'No data'}</td></tr>`;
+      return;
+    }
+    const rows = data.rows||[];
+    if(!rows.length){
+      tbody.innerHTML='<tr><td colspan="10" style="padding:16px;text-align:center;color:var(--muted);">No settled trades yet — backtest results appear automatically after a few days.</td></tr>';
+      if(foot) foot.textContent='No data yet';
+      return;
+    }
+    tbody.innerHTML=rows.map(r=>{
+      const winRate = r.win_rate!=null?Math.round(r.win_rate*100):null;
+      const modelP  = r.avg_model_prob!=null?Math.round(r.avg_model_prob*100):null;
+      const mktP    = r.avg_market_price!=null?Math.round(r.avg_market_price*100):null;
+      const avgGap  = r.avg_net_gap_c!=null?parseFloat(r.avg_net_gap_c).toFixed(1):'—';
+      const edgeR   = r.avg_edge_ratio!=null?parseFloat(r.avg_edge_ratio).toFixed(3):'—';
+      const n       = r.n||0;
+      let signal='—', sigColor='var(--muted)';
+      if(winRate!=null&&modelP!=null&&n>=10){
+        const diff=winRate-modelP;
+        if(diff>=5){signal=`+${diff}% edge`;sigColor='var(--yes)';}
+        else if(diff>=-3){signal='On model';sigColor='var(--muted)';}
+        else{signal=`${diff}% below`;sigColor='var(--no)';}
+      } else if(n<10){signal=`n=${n} (need 10)`;sigColor='var(--muted)';}
+      const winColor=winRate==null?'var(--muted)':
+        winRate>=(modelP||50)+3?'var(--yes)':
+        winRate>=(modelP||50)-3?'var(--ink)':'var(--no)';
+      const gradeSty=r.grade==='A'?'background:var(--yes-lt);color:#0f4d2a;':
+        r.grade==='B'?'background:var(--warn-lt,#faeeda);color:#854f0b;':'';
+      return `<tr style="border-bottom:0.5px solid var(--border);">
+        <td style="padding:8px 12px;font-weight:500;">${r.city||'—'}</td>
+        <td style="padding:8px 8px;text-align:center;color:var(--muted);">${r.horizon||'—'}</td>
+        <td style="padding:8px 8px;text-align:center;"><span style="font-size:9px;padding:2px 6px;border-radius:3px;${gradeSty}">${r.grade||'—'}</span></td>
+        <td style="padding:8px 8px;text-align:right;color:var(--muted);">${n}</td>
+        <td style="padding:8px 8px;text-align:right;font-weight:500;color:${winColor};">${winRate!=null?winRate+'%':'—'}</td>
+        <td style="padding:8px 8px;text-align:right;color:var(--muted);">${modelP!=null?modelP+'%':'—'}</td>
+        <td style="padding:8px 8px;text-align:right;color:var(--muted);">${mktP!=null?mktP+'¢':'—'}</td>
+        <td style="padding:8px 8px;text-align:right;">${avgGap}¢</td>
+        <td style="padding:8px 8px;text-align:right;">${edgeR}</td>
+        <td style="padding:8px 12px;text-align:right;font-size:10px;color:${sigColor};">${signal}</td>
+      </tr>`;
+    }).join('');
+    const settled=rows.reduce((s,r)=>s+(r.n||0),0);
+    const aRows=rows.filter(r=>r.grade==='A'&&(r.n||0)>=10);
+    const aWinAvg=aRows.length?Math.round(aRows.reduce((s,r)=>s+r.win_rate*100,0)/aRows.length):null;
+    if(foot) foot.textContent=`${settled} settled bets · ${rows.length} groups · ${aRows.length} A-grade groups with n≥10`;
+    if(interp){
+      const lines=[];
+      if(!aRows.length){
+        lines.push('Not enough A-grade settled trades yet (n≥10 per group needed). Settlement runs automatically each morning — results appear here as data accumulates.');
+      } else {
+        if(aWinAvg!=null){
+          const verdict=aWinAvg>=53?'Model is beating market pricing on A-grade signals.':
+            aWinAvg>=48?'Model is roughly in line. Edge may be real but narrow — wait for more data.':
+            '⚠ Win rate below expected — σ may be underestimated, or entry timing needs adjustment.';
+          lines.push(`A-grade avg win rate: <b style="color:${aWinAvg>=53?'var(--yes)':'var(--ink)'}">${aWinAvg}%</b>. ${verdict}`);
+        }
+        const d1=rows.filter(r=>r.horizon==='d1'&&r.grade==='A'&&r.n>=10);
+        const d0=rows.filter(r=>r.horizon==='d0'&&r.grade==='A'&&r.n>=10);
+        if(d1.length&&d0.length){
+          const d1w=Math.round(d1.reduce((s,r)=>s+r.win_rate*100,0)/d1.length);
+          const d0w=Math.round(d0.reduce((s,r)=>s+r.win_rate*100,0)/d0.length);
+          lines.push(`D+1 win rate: <b>${d1w}%</b> · D+0 win rate: <b>${d0w}%</b>. ${
+            d0w>d1w+3?'D+0 entries are more accurate — consider shifting primary entry to same-day scans.':
+            d1w>d0w+3?'D+1 entries outperforming — market pricing is lagging overnight model updates.':
+            'Both horizons similar — no strong reason to prefer one over the other.'}`);
+        }
+        const top=[...aRows].sort((a,b)=>b.win_rate-a.win_rate)[0];
+        if(top) lines.push(`Best city: <b>${top.city}</b> at ${Math.round(top.win_rate*100)}% (n=${top.n}). Consider allocating more here.`);
+      }
+      interp.innerHTML=lines.join('<br><br>');
+    }
+  }catch(e){
+    if(tbody) tbody.innerHTML=`<tr><td colspan="10" style="padding:12px;color:var(--no);">Error: ${e.message}</td></tr>`;
+  }
+}
+
+// Auto-load temp status when temp tab opens
+const _origSw = sw;
+function sw(t){
+  _origSw(t);
+  if(t==='temp') loadTempStatus();
 }
 </script>
 

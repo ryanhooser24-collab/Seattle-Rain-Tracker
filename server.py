@@ -184,6 +184,1024 @@ CITIES = {
     },
 }
 
+# ── TEMPERATURE CITIES ────────────────────────────────────────────────────────
+# Each entry: kalshi_high / kalshi_low = Kalshi series tickers
+# nws_station = ICAO used by NWS CLI for settlement (must match Kalshi rules)
+# σ_d1 / σ_d0 = forecast error (°F RMSE) at D+1 and D+0 horizons (bias-corrected)
+# These are research-based starting values; /temp/calibrate refines them.
+TEMP_CITIES = {
+    "nyc": {
+        "label": "New York", "nws_station": "KNYC",
+        "kalshi_high": "KXHIGHNY",  "kalshi_low": "KXLOWTNYC",
+        "lat": 40.779, "lon": -73.969, "tz": "America/New_York",
+        "σ_d1": 1.8, "σ_d0": 1.3,
+        "warm_bias_gfs": 0.4, "warm_bias_ecmwf": 0.2,
+    },
+    "chicago": {
+        "label": "Chicago", "nws_station": "KMDW",
+        "kalshi_high": "KXHIGHCHI", "kalshi_low": "KXLOWTCHI",
+        "lat": 41.786, "lon": -87.752, "tz": "America/Chicago",
+        "σ_d1": 2.0, "σ_d0": 1.4,
+        "warm_bias_gfs": 0.8, "warm_bias_ecmwf": 0.4,
+    },
+    "miami": {
+        "label": "Miami", "nws_station": "KMIA",
+        "kalshi_high": "KXHIGHMIA",  "kalshi_low": "KXLOWTMIA",
+        "lat": 25.795, "lon": -80.287, "tz": "America/New_York",
+        "σ_d1": 1.5, "σ_d0": 1.0,
+        "warm_bias_gfs": 0.3, "warm_bias_ecmwf": 0.1,
+    },
+    "los_angeles": {
+        "label": "Los Angeles", "nws_station": "KLAX",
+        "kalshi_high": "KXHIGHLAX",  "kalshi_low": "KXLOWTLAX",
+        "lat": 33.938, "lon": -118.408, "tz": "America/Los_Angeles",
+        "σ_d1": 1.6, "σ_d0": 1.1,
+        "warm_bias_gfs": 0.5, "warm_bias_ecmwf": 0.3,
+    },
+    "austin": {
+        "label": "Austin", "nws_station": "KAUS",
+        "kalshi_high": "KXHIGHAUS",  "kalshi_low": "KXLOWTAUS",
+        "lat": 30.194, "lon": -97.670, "tz": "America/Chicago",
+        "σ_d1": 2.1, "σ_d0": 1.5,
+        "warm_bias_gfs": 0.9, "warm_bias_ecmwf": 0.5,
+    },
+    "phoenix": {
+        "label": "Phoenix", "nws_station": "KPHX",
+        "kalshi_high": "KXHIGHTPHX", "kalshi_low": None,
+        "lat": 33.434, "lon": -112.008, "tz": "America/Phoenix",
+        "σ_d1": 1.7, "σ_d0": 1.2,
+        "warm_bias_gfs": 0.6, "warm_bias_ecmwf": 0.4,
+    },
+    "san_francisco": {
+        "label": "San Francisco", "nws_station": "KSFO",
+        "kalshi_high": "KXHIGHTSFO", "kalshi_low": None,
+        "lat": 37.619, "lon": -122.375, "tz": "America/Los_Angeles",
+        "σ_d1": 1.9, "σ_d0": 1.3,
+        "warm_bias_gfs": 0.7, "warm_bias_ecmwf": 0.4,
+    },
+    "atlanta": {
+        "label": "Atlanta", "nws_station": "KATL",
+        "kalshi_high": "KXHIGHTATL", "kalshi_low": None,
+        "lat": 33.640, "lon": -84.427, "tz": "America/New_York",
+        "σ_d1": 2.0, "σ_d0": 1.4,
+        "warm_bias_gfs": 0.7, "warm_bias_ecmwf": 0.4,
+    },
+    "washington_dc": {
+        "label": "Washington DC", "nws_station": "KDCA",
+        "kalshi_high": "KXHIGHTDC",  "kalshi_low": None,
+        "lat": 38.852, "lon": -77.037, "tz": "America/New_York",
+        "σ_d1": 1.9, "σ_d0": 1.3,
+        "warm_bias_gfs": 0.5, "warm_bias_ecmwf": 0.3,
+    },
+    "denver": {
+        "label": "Denver", "nws_station": "KDEN",
+        "kalshi_high": "KXHIGHDEN",  "kalshi_low": "KXLOWTDEN",
+        "lat": 39.861, "lon": -104.673, "tz": "America/Denver",
+        "σ_d1": 2.3, "σ_d0": 1.6,
+        "warm_bias_gfs": 1.0, "warm_bias_ecmwf": 0.6,
+    },
+    "houston": {
+        "label": "Houston", "nws_station": "KHOU",
+        "kalshi_high": "KXHIGHTHOU", "kalshi_low": None,
+        "lat": 29.645, "lon": -95.279, "tz": "America/Chicago",
+        "σ_d1": 2.2, "σ_d0": 1.5,
+        "warm_bias_gfs": 0.8, "warm_bias_ecmwf": 0.5,
+    },
+    "minneapolis": {
+        "label": "Minneapolis", "nws_station": "KMSP",
+        "kalshi_high": "KXHIGHTMIN", "kalshi_low": None,
+        "lat": 44.882, "lon": -93.229, "tz": "America/Chicago",
+        "σ_d1": 2.4, "σ_d0": 1.7,
+        "warm_bias_gfs": 1.1, "warm_bias_ecmwf": 0.7,
+    },
+    "boston": {
+        "label": "Boston", "nws_station": "KBOS",
+        "kalshi_high": "KXHIGHTBOS", "kalshi_low": None,
+        "lat": 42.362, "lon": -71.006, "tz": "America/New_York",
+        "σ_d1": 1.9, "σ_d0": 1.3,
+        "warm_bias_gfs": 0.4, "warm_bias_ecmwf": 0.2,
+    },
+    "las_vegas": {
+        "label": "Las Vegas", "nws_station": "KLAS",
+        "kalshi_high": "KXHIGHTLV",  "kalshi_low": None,
+        "lat": 36.080, "lon": -115.152, "tz": "America/Los_Angeles",
+        "σ_d1": 1.8, "σ_d0": 1.2,
+        "warm_bias_gfs": 0.7, "warm_bias_ecmwf": 0.4,
+    },
+    "philadelphia": {
+        "label": "Philadelphia", "nws_station": "KPHL",
+        "kalshi_high": "KXHIGHPHIL", "kalshi_low": "KXLOWTPHIL",
+        "lat": 39.873, "lon": -75.241, "tz": "America/New_York",
+        "σ_d1": 1.9, "σ_d0": 1.3,
+        "warm_bias_gfs": 0.5, "warm_bias_ecmwf": 0.3,
+    },
+    "oklahoma_city": {
+        "label": "Oklahoma City", "nws_station": "KOKC",
+        "kalshi_high": "KXHIGHTOKC", "kalshi_low": None,
+        "lat": 35.393, "lon": -97.601, "tz": "America/Chicago",
+        "σ_d1": 2.3, "σ_d0": 1.6,
+        "warm_bias_gfs": 0.9, "warm_bias_ecmwf": 0.6,
+    },
+    "seattle": {
+        "label": "Seattle", "nws_station": "KSEA",
+        "kalshi_high": "KXHIGHTSEA", "kalshi_low": None,
+        "lat": 47.441, "lon": -122.3,  "tz": "America/Los_Angeles",
+        "σ_d1": 1.8, "σ_d0": 1.2,
+        "warm_bias_gfs": 0.4, "warm_bias_ecmwf": 0.2,
+    },
+}
+
+# ── TEMP BIAS CACHE (per-station, populated by /temp/calibrate) ───────────────
+_TEMP_BIAS_CACHE   = {}   # city_key -> {"gfs_bias": float, "ecmwf_bias": float, "σ_d1": float, "σ_d0": float}
+_TEMP_SNAPSHOT_TTL = 300  # seconds between /temp/scan refreshes per city
+_TEMP_SCAN_CACHE   = {}   # city_key -> {"ts": float, "result": dict}
+
+# ── TEMP FORECAST FUNCTIONS ───────────────────────────────────────────────────
+
+def fetch_temp_forecast(city_key, horizon="d1"):
+    """
+    Fetch GFS and ECMWF temperature forecasts for a temp city.
+    horizon: "d1" = tomorrow (D+1), "d0" = today (D+0)
+    Returns dict with gfs_high, ecmwf_high, best_high, gfs_low, ecmwf_low,
+    best_low, spread_high, spread_low, target_date, model_run_ts.
+
+    Uses Open-Meteo's multi-model API — no API key, no rotation risk.
+    Fetches temperature_2m_max and temperature_2m_min converted to °F.
+    """
+    import time as _t
+    cfg = TEMP_CITIES.get(city_key)
+    if not cfg:
+        return {"ok": False, "error": f"Unknown temp city: {city_key}"}
+
+    try:
+        import pytz
+        from datetime import datetime as dt_cls, timedelta
+        tz_name   = cfg["tz"]
+        local_tz  = pytz.timezone(tz_name)
+        now_local = dt_cls.utcnow().replace(tzinfo=pytz.utc).astimezone(local_tz)
+        today_str = now_local.strftime("%Y-%m-%d")
+
+        if horizon == "d0":
+            target_date = today_str
+        else:
+            target_date = (now_local + timedelta(days=1)).strftime("%Y-%m-%d")
+
+        results = {}
+        errors  = []
+
+        # Fetch three models: gfs, ecmwf, best_match (blend)
+        model_map = {
+            "gfs":        "gfs_seamless",
+            "ecmwf":      "ecmwf_ifs",
+            "best":       "best_match",
+        }
+
+        import concurrent.futures as _cf
+        def fetch_model(model_key, model_str):
+            params = {
+                "latitude":  cfg["lat"],
+                "longitude": cfg["lon"],
+                "daily":     "temperature_2m_max,temperature_2m_min",
+                "timezone":  tz_name,
+                "start_date": target_date,
+                "end_date":   target_date,
+                "models":     model_str,
+            }
+            r = requests.get("https://api.open-meteo.com/v1/forecast",
+                             params=params, timeout=6)
+            r.raise_for_status()
+            d = r.json()
+            hi_c = (d.get("daily", {}).get("temperature_2m_max") or [None])[0]
+            lo_c = (d.get("daily", {}).get("temperature_2m_min") or [None])[0]
+            if hi_c is None or lo_c is None:
+                raise ValueError(f"{model_key}: no data for {target_date}")
+            # Convert °C → °F, round to 1 decimal
+            hi_f = round(hi_c * 9/5 + 32, 1)
+            lo_f = round(lo_c * 9/5 + 32, 1)
+            return model_key, hi_f, lo_f
+
+        ex = _cf.ThreadPoolExecutor(max_workers=3)
+        try:
+            futures = {ex.submit(fetch_model, k, v): k for k, v in model_map.items()}
+            for f in _cf.as_completed(futures, timeout=10):
+                try:
+                    k, hi, lo = f.result()
+                    results[k] = {"high": hi, "low": lo}
+                except Exception as e:
+                    errors.append(str(e))
+        finally:
+            ex.shutdown(wait=False)
+
+        if not results:
+            return {"ok": False, "error": "; ".join(errors)}
+
+        # Apply station bias corrections from cache (fall back to config defaults)
+        bias_cache = _TEMP_BIAS_CACHE.get(city_key, {})
+        gfs_bias   = bias_cache.get("gfs_bias",   cfg.get("warm_bias_gfs", 0.0))
+        ecmwf_bias = bias_cache.get("ecmwf_bias", cfg.get("warm_bias_ecmwf", 0.0))
+
+        gfs_raw    = results.get("gfs",   {})
+        ecmwf_raw  = results.get("ecmwf", {})
+        best_raw   = results.get("best",  {})
+
+        gfs_hi_adj   = round(gfs_raw.get("high",  0) - gfs_bias,   1) if gfs_raw   else None
+        gfs_lo_adj   = round(gfs_raw.get("low",   0) - gfs_bias,   1) if gfs_raw   else None
+        ecmwf_hi_adj = round(ecmwf_raw.get("high",0) - ecmwf_bias, 1) if ecmwf_raw else None
+        ecmwf_lo_adj = round(ecmwf_raw.get("low", 0) - ecmwf_bias, 1) if ecmwf_raw else None
+
+        # Best = average of all available adj. forecasts
+        hi_vals = [v for v in [gfs_hi_adj, ecmwf_hi_adj,
+                                best_raw.get("high") if best_raw else None] if v is not None]
+        lo_vals = [v for v in [gfs_lo_adj, ecmwf_lo_adj,
+                                best_raw.get("low")  if best_raw else None] if v is not None]
+
+        best_hi = round(sum(hi_vals) / len(hi_vals), 1) if hi_vals else None
+        best_lo = round(sum(lo_vals) / len(lo_vals), 1) if lo_vals else None
+
+        spread_hi = round(max(hi_vals) - min(hi_vals), 1) if len(hi_vals) >= 2 else 0.0
+        spread_lo = round(max(lo_vals) - min(lo_vals), 1) if len(lo_vals) >= 2 else 0.0
+
+        # σ for this horizon from cache, else config fallback
+        σ_key = "σ_d0" if horizon == "d0" else "σ_d1"
+        σ     = bias_cache.get(σ_key, cfg.get(σ_key, 2.0))
+
+        return {
+            "ok":           True,
+            "city":         city_key,
+            "label":        cfg["label"],
+            "target_date":  target_date,
+            "horizon":      horizon,
+            "nws_station":  cfg["nws_station"],
+            "gfs_high_raw": gfs_raw.get("high"),
+            "gfs_low_raw":  gfs_raw.get("low"),
+            "ecmwf_high_raw": ecmwf_raw.get("high"),
+            "ecmwf_low_raw":  ecmwf_raw.get("low"),
+            "gfs_high":     gfs_hi_adj,
+            "gfs_low":      gfs_lo_adj,
+            "ecmwf_high":   ecmwf_hi_adj,
+            "ecmwf_low":    ecmwf_lo_adj,
+            "best_high":    best_hi,
+            "best_low":     best_lo,
+            "spread_high":  spread_hi,
+            "spread_low":   spread_lo,
+            "gfs_bias_applied":   gfs_bias,
+            "ecmwf_bias_applied": ecmwf_bias,
+            "sigma":        σ,
+            "errors":       errors,
+            "fetched_at":   _t.time(),
+        }
+
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+def fetch_temp_kalshi_markets(city_key, market_type="high"):
+    """
+    Fetch open bracket markets for a temp city from Kalshi.
+    market_type: "high" or "low"
+    Returns list of brackets with ticker, low_temp, high_temp, yes_ask,
+    yes_bid, no_ask, no_bid, spread, yes_ask_size, volume_24h, open_interest.
+    """
+    cfg = TEMP_CITIES.get(city_key)
+    if not cfg:
+        return {"ok": False, "error": f"Unknown temp city: {city_key}", "markets": []}
+
+    series = cfg["kalshi_high"] if market_type == "high" else cfg.get("kalshi_low")
+    if not series:
+        return {"ok": True, "markets": [], "note": f"No {market_type} series for {city_key}"}
+
+    if not KALSHI_KEY_ID:
+        return {"ok": False, "error": "Kalshi key not configured", "markets": []}
+
+    try:
+        path = "/trade-api/v2/markets"
+        url  = f"{KALSHI_BASE}/markets"
+        params = {"series_ticker": series, "status": "open", "limit": 20}
+        headers = kalshi_auth_headers("GET", path)
+        r = requests.get(url, params=params, headers=headers, timeout=6)
+        r.raise_for_status()
+        raw = r.json()
+
+        markets = []
+        for m in raw.get("markets", []):
+            ticker  = m.get("ticker", "")
+            title   = m.get("title", "")
+
+            # Parse bracket from title e.g. "54° to 55°F" or "Above 57°F" or "Below 50°F"
+            lo_temp = hi_temp = None
+            bracket_label = title
+
+            # Range bracket: "54° to 55°F" or "54-55°F"
+            rng = re.search(r"(\d+\.?\d*)\s*[°to\-–]+\s*(\d+\.?\d*)\s*°?F", title, re.IGNORECASE)
+            if rng:
+                lo_temp = float(rng.group(1))
+                hi_temp = float(rng.group(2))
+                bracket_label = f"{int(lo_temp)}–{int(hi_temp)}°F"
+            else:
+                # Edge bracket: "Above X" or "Below X" or "> X" or "< X"
+                above = re.search(r"(?:above|>)\s*(\d+\.?\d*)", title, re.IGNORECASE)
+                below = re.search(r"(?:below|<)\s*(\d+\.?\d*)", title, re.IGNORECASE)
+                if above:
+                    lo_temp = float(above.group(1))
+                    hi_temp = None
+                    bracket_label = f">{int(lo_temp)}°F"
+                elif below:
+                    lo_temp = None
+                    hi_temp = float(below.group(1))
+                    bracket_label = f"<{int(hi_temp)}°F"
+                # Try functional_strike as fallback
+                if lo_temp is None and hi_temp is None:
+                    fs = m.get("functional_strike", "") or ""
+                    fs_lo = re.search(r"(\d+\.?\d*)\s*(?:to|-)\s*(\d+\.?\d*)", str(fs))
+                    if fs_lo:
+                        lo_temp = float(fs_lo.group(1))
+                        hi_temp = float(fs_lo.group(2))
+                        bracket_label = f"{int(lo_temp)}–{int(hi_temp)}°F"
+
+            yes_ask   = float(m.get("yes_ask_dollars", 0) or 0)
+            yes_bid   = float(m.get("yes_bid_dollars", 0) or 0)
+            no_ask    = float(m.get("no_ask_dollars", 0)  or 0)
+            no_bid    = float(m.get("no_bid_dollars", 0)  or 0)
+            spread    = round(max(0.0, yes_ask - yes_bid), 4)
+            yes_ask_sz = float(m.get("yes_ask_size_fp", 0) or 0)
+            yes_bid_sz = float(m.get("yes_bid_size_fp", 0) or 0)
+            open_int   = float(m.get("open_interest_fp", 0) or 0)
+            vol_24h    = float(m.get("volume_24h_fp",    0) or 0)
+            volume     = float(m.get("volume_fp",        0) or 0)
+            close_time = m.get("close_time", "")
+
+            markets.append({
+                "ticker":        ticker,
+                "title":         title,
+                "bracket_label": bracket_label,
+                "lo_temp":       lo_temp,
+                "hi_temp":       hi_temp,
+                "yes_ask":       yes_ask,
+                "yes_bid":       yes_bid,
+                "no_ask":        no_ask,
+                "no_bid":        no_bid,
+                "spread":        spread,
+                "yes_ask_size":  yes_ask_sz,
+                "yes_bid_size":  yes_bid_sz,
+                "open_interest": open_int,
+                "volume_24h":    vol_24h,
+                "volume":        volume,
+                "close_time":    close_time,
+            })
+
+        # Sort by lo_temp ascending
+        markets.sort(key=lambda x: (x["lo_temp"] or x["hi_temp"] or 0))
+        return {"ok": True, "markets": markets, "series": series}
+
+    except Exception as e:
+        return {"ok": False, "error": str(e), "markets": []}
+
+
+def analyze_temp_brackets(markets, forecast, market_type="high"):
+    """
+    Score each bracket against the bias-adjusted forecast.
+    Uses a normal distribution centred on best_high (or best_low) with
+    sigma from the forecast dict.  Computes:
+      model_prob   — P(settlement falls in this bracket)
+      gap_c        — model_prob*100 - yes_ask*100 (in cents)
+      net_gap_c    — gap_c minus bid/ask spread cost
+      kelly_frac   — half-Kelly fraction
+      kelly_size   — dollar size at kelly_frac × $100 bankroll unit
+      edge_ratio   — gap_c / sigma (σ-adjusted edge signal)
+      grade        — A / B / C / skip
+    """
+    from math import erf, sqrt
+    def normcdf(x):
+        return 0.5 * (1 + erf(x / sqrt(2)))
+    def bracket_prob(lo, hi, mu, sigma):
+        """P(lo ≤ X ≤ hi) for X ~ N(mu, sigma)."""
+        if sigma <= 0:
+            return 1.0 if (lo is None or mu >= lo) and (hi is None or mu < hi) else 0.0
+        p_hi = normcdf((hi - mu) / sigma) if hi is not None else 1.0
+        p_lo = normcdf((lo - mu) / sigma) if lo is not None else 0.0
+        return round(p_hi - p_lo, 4)
+
+    mu    = forecast.get("best_high") if market_type == "high" else forecast.get("best_low")
+    sigma = forecast.get("sigma", 2.0)
+    spread_hi = forecast.get("spread_high" if market_type == "high" else "spread_low", 0)
+
+    if mu is None:
+        for m in markets:
+            m["model_prob"] = None; m["gap_c"] = 0; m["net_gap_c"] = 0
+            m["grade"] = "skip"; m["edge_ratio"] = 0
+        return markets
+
+    analyzed = []
+    for m in markets:
+        lo  = m.get("lo_temp")
+        hi  = m.get("hi_temp")
+        ask = m.get("yes_ask", 0)
+        bid = m.get("yes_bid", 0)
+        spr = round((ask - bid) * 100)  # spread in cents
+
+        prob     = bracket_prob(lo, hi, mu, sigma)
+        gap_c    = round((prob - ask) * 100)
+        net_gap_c = max(0, gap_c - spr)
+
+        # Kelly: f = (p*b - q) / b where b = (1-ask)/ask (payout ratio)
+        if ask > 0 and ask < 1:
+            b        = (1 - ask) / ask
+            kelly    = (prob * b - (1 - prob)) / b
+            kelly_h  = max(0.0, round(kelly * 0.5, 3))   # half-Kelly
+            kelly_sz = round(kelly_h * 100, 2)             # $ per $100 bankroll unit
+        else:
+            kelly_h  = 0.0
+            kelly_sz = 0.0
+
+        # Liquidity: quick score from spread + ask_size + OI
+        ask_sz   = m.get("yes_ask_size", 0)
+        oi       = m.get("open_interest", 0)
+        vol_24h  = m.get("volume_24h", 0)
+        liq_pts  = (20 if spr <= 1 else 12 if spr <= 3 else 5 if spr <= 5 else 0) + \
+                   (20 if ask_sz >= 500 else 12 if ask_sz >= 100 else 4 if ask_sz >= 20 else 0) + \
+                   (15 if oi >= 2000 else 8 if oi >= 500 else 3 if oi > 0 else 0) + \
+                   (10 if vol_24h >= 500 else 5 if vol_24h >= 100 else 0)
+        liq_grade = "A" if liq_pts >= 55 else "B" if liq_pts >= 35 else "C" if liq_pts >= 18 else "D"
+
+        # Σ-adjusted edge ratio: signal strength independent of σ level
+        edge_ratio = round(gap_c / sigma, 3) if sigma > 0 else 0.0
+
+        # Model spread confidence penalty
+        spread_penalty = spread_hi > 2.0  # cross-model spread > 2°F = less confidence
+
+        # Grade: based on edge_ratio threshold (not flat cents)
+        if net_gap_c <= 0 or liq_grade == "D":
+            grade = "skip"
+        elif edge_ratio >= 0.12 and not spread_penalty and liq_grade in ("A","B"):
+            grade = "A"
+        elif edge_ratio >= 0.07 and liq_grade in ("A","B","C"):
+            grade = "B"
+        elif edge_ratio >= 0.04:
+            grade = "C"
+        else:
+            grade = "skip"
+
+        m.update({
+            "model_prob":   prob,
+            "mu":           mu,
+            "sigma":        sigma,
+            "gap_c":        gap_c,
+            "net_gap_c":    net_gap_c,
+            "spread_c":     spr,
+            "kelly_frac":   kelly_h,
+            "kelly_size":   kelly_sz,
+            "edge_ratio":   edge_ratio,
+            "liq_grade":    liq_grade,
+            "liq_pts":      liq_pts,
+            "spread_penalty": spread_penalty,
+            "grade":        grade,
+            "actionable":   grade in ("A", "B"),
+        })
+        analyzed.append(m)
+
+    # Sort: A first, then by gap_c descending
+    grade_order = {"A": 0, "B": 1, "C": 2, "skip": 3}
+    analyzed.sort(key=lambda x: (grade_order.get(x["grade"], 4), -x["gap_c"]))
+    return analyzed
+
+
+def scan_temp_city(city_key, horizon="d1"):
+    """
+    Full pipeline for one temp city: forecast + both market types + analysis.
+    Returns unified result dict suitable for /temp/scan response.
+    """
+    import time as _t
+    cfg = TEMP_CITIES.get(city_key)
+    if not cfg:
+        return {"ok": False, "city": city_key, "error": "Unknown city"}
+
+    # Check in-memory cache (avoid hammering Kalshi + OM on every request)
+    cache_key = f"{city_key}-{horizon}"
+    cached    = _TEMP_SCAN_CACHE.get(cache_key)
+    if cached and (_t.time() - cached["ts"]) < _TEMP_SNAPSHOT_TTL:
+        return cached["result"]
+
+    import concurrent.futures as _cf
+    try:
+        ex = _cf.ThreadPoolExecutor(max_workers=3)
+        try:
+            f_fc   = ex.submit(fetch_temp_forecast, city_key, horizon)
+            f_high = ex.submit(fetch_temp_kalshi_markets, city_key, "high")
+            f_low  = ex.submit(fetch_temp_kalshi_markets, city_key, "low")
+            try: fc   = f_fc.result(timeout=12)
+            except Exception as e: fc = {"ok": False, "error": str(e)}
+            try: high = f_high.result(timeout=8)
+            except Exception as e: high = {"ok": False, "markets": [], "error": str(e)}
+            try: low  = f_low.result(timeout=8)
+            except Exception as e: low  = {"ok": False, "markets": [], "error": str(e)}
+        finally:
+            ex.shutdown(wait=False)
+
+        if not fc.get("ok"):
+            return {"ok": False, "city": city_key, "label": cfg["label"], "error": fc.get("error", "forecast failed")}
+
+        # Score brackets
+        high_markets = analyze_temp_brackets(high.get("markets", []), fc, "high") if high.get("ok") else []
+        low_markets  = analyze_temp_brackets(low.get("markets",  []), fc, "low")  if low.get("ok")  else []
+
+        # Best edge across both market types
+        all_mkts = [m for m in high_markets + low_markets if m.get("actionable")]
+        best_edge = max((m["net_gap_c"] for m in all_mkts), default=0)
+        best_grade = "A" if any(m["grade"] == "A" for m in all_mkts) else \
+                     "B" if any(m["grade"] == "B" for m in all_mkts) else "none"
+
+        result = {
+            "ok":           True,
+            "city":         city_key,
+            "label":        cfg["label"],
+            "nws_station":  cfg["nws_station"],
+            "horizon":      horizon,
+            "forecast":     fc,
+            "high_markets": high_markets,
+            "low_markets":  low_markets,
+            "best_edge_c":  best_edge,
+            "best_grade":   best_grade,
+            "actionable_count": len(all_mkts),
+        }
+
+        _TEMP_SCAN_CACHE[cache_key] = {"ts": _t.time(), "result": result}
+
+        # Persist snapshots to DB (best-effort, non-blocking)
+        try:
+            conn = get_db()
+            if conn:
+                with conn.cursor() as cur:
+                    for mtype, mkts in [("high", high_markets), ("low", low_markets)]:
+                        for m in mkts:
+                            if not m.get("ticker"): continue
+                            try:
+                                cur.execute("""
+                                    INSERT INTO temp_snapshots
+                                    (city, nws_station, target_date, horizon, market_type,
+                                     ticker, bracket_label, lo_temp, hi_temp,
+                                     gfs_forecast, ecmwf_forecast, best_forecast,
+                                     sigma, spread_models, model_prob, yes_ask,
+                                     gap_c, net_gap_c, edge_ratio, kelly_frac,
+                                     grade, liq_grade, open_interest, volume_24h)
+                                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                    ON CONFLICT (city, target_date, horizon, ticker, DATE(scan_ts)) DO NOTHING
+                                """, (
+                                    city_key, cfg["nws_station"], fc["target_date"], horizon, mtype,
+                                    m["ticker"], m.get("bracket_label"),
+                                    m.get("lo_temp"), m.get("hi_temp"),
+                                    fc.get("gfs_high"),  fc.get("ecmwf_high"),  fc.get("best_high"),
+                                    fc.get("sigma"),     fc.get("spread_high" if mtype=="high" else "spread_low"),
+                                    m.get("model_prob"), m.get("yes_ask"),
+                                    m.get("gap_c"),      m.get("net_gap_c"),
+                                    m.get("edge_ratio"), m.get("kelly_frac"),
+                                    m.get("grade"),      m.get("liq_grade"),
+                                    int(m.get("open_interest",0)), int(m.get("volume_24h",0)),
+                                ))
+                            except Exception:
+                                pass
+                conn.commit()
+                conn.close()
+        except Exception:
+            pass
+
+        return result
+
+    except Exception as e:
+        return {"ok": False, "city": city_key, "label": cfg.get("label",""), "error": str(e)}
+
+
+# ── NWS CLI TEMPERATURE PARSER ───────────────────────────────────────────────
+# NWS station code → (site, issuedby) for CLI temperature reports
+# Mirrors the settlement station Kalshi uses for each city
+NWS_TEMP_CLI = {
+    "KNYC": ("OKX", "NYC"),   # Central Park, New York
+    "KMDW": ("LOT", "MDW"),   # Midway Airport, Chicago
+    "KMIA": ("MFL", "MIA"),   # Miami Intl
+    "KLAX": ("LOX", "LAX"),   # LA Intl
+    "KAUS": ("EWX", "AUS"),   # Austin-Bergstrom
+    "KPHX": ("PSR", "PHX"),   # Phoenix Sky Harbor
+    "KSFO": ("MTR", "SFO"),   # San Francisco Intl
+    "KATL": ("FFC", "ATL"),   # Atlanta Hartsfield
+    "KDCA": ("LWX", "DCA"),   # Reagan National, DC
+    "KDEN": ("BOU", "DEN"),   # Denver Intl
+    "KHOU": ("HGX", "HOU"),   # Houston Hobby
+    "KMSP": ("MPX", "MSP"),   # Minneapolis-St Paul
+    "KBOS": ("BOX", "BOS"),   # Boston Logan
+    "KLAS": ("VEF", "LAS"),   # Las Vegas McCarran
+    "KPHL": ("PHI", "PHL"),   # Philadelphia Intl
+    "KOKC": ("OUN", "OKC"),   # Oklahoma City
+    "KSEA": ("SEW", "SEA"),   # Seattle-Tacoma
+}
+
+def fetch_nws_temp_cli(nws_station, version=1):
+    """
+    Fetch NWS Daily Climate Report (CLI) for a temperature station.
+    Parses the daily maximum and minimum temperature.
+    Returns: {"ok": True, "high": float, "low": float, "date": str,
+              "issued": str, "is_final": bool, "source": str}
+
+    The CLI is issued ~7 AM local time the morning after the observation day.
+    During DST, the NWS 24-hr window runs midnight-to-midnight *standard* time,
+    so the high temperature can appear up to 1 AM the following calendar day.
+    """
+    cli_info = NWS_TEMP_CLI.get(nws_station)
+    if not cli_info:
+        return {"ok": False, "error": f"No CLI config for {nws_station}"}
+
+    site, issuedby = cli_info
+    base_url = (f"https://forecast.weather.gov/product.php"
+                f"?site={site}&issuedby={issuedby}&product=CLI&format=txt")
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+    last_err = "No versions tried"
+
+    for ver in range(1, 6):
+        try:
+            url = base_url if ver == 1 else f"{base_url}&version={ver}"
+            r   = requests.get(url, headers=headers, timeout=8)
+            r.raise_for_status()
+
+            soup = BeautifulSoup(r.text, "html.parser")
+            pre  = soup.find("pre")
+            raw  = pre.get_text() if pre else r.text
+
+            # ── Parse issued time ─────────────────────────────────────────────
+            issued_match = re.search(
+                r"(\d{3,4}\s+(?:AM|PM)\s+\w+\s+\w+\s+\w+\s+\d+\s+\d{4})", raw, re.IGNORECASE)
+            issued_str  = issued_match.group(1).strip() if issued_match else None
+            issued_hour = None
+            is_final    = False
+
+            if issued_str:
+                h_m = re.search(r"(\d{3,4})\s+(AM|PM)", issued_str, re.IGNORECASE)
+                if h_m:
+                    raw_h = int(h_m.group(1))
+                    ampm  = h_m.group(2).upper()
+                    hh    = (raw_h // 100) % 12 + (12 if ampm == "PM" else 0)
+                    if ampm == "AM" and raw_h // 100 == 12:
+                        hh = 0
+                    issued_hour = hh
+                    is_final    = (4 <= hh <= 12)  # morning report = final daily
+
+            # ── Parse date ────────────────────────────────────────────────────
+            date_match = re.search(
+                r"CLIMATE (?:SUMMARY|REPORT) FOR\s+([\w\s,]+\d{4})", raw, re.IGNORECASE)
+            cli_date = date_match.group(1).strip() if date_match else "Unknown"
+
+            # ── Parse temperatures ────────────────────────────────────────────
+            # NWS CLI temperature section looks like:
+            #
+            # TEMPERATURE (F)
+            # MAXIMUM          54           56          56
+            # MINIMUM          28           34          35
+            #
+            # We want the first (observed) column.
+            temp_section = re.search(
+                r"TEMPERATURE\s*\(F\)(.*?)(?:PRECIPITATION|SNOWFALL|DEGREE|WIND|$)",
+                raw, re.IGNORECASE | re.DOTALL)
+            section_txt = temp_section.group(1) if temp_section else raw
+
+            max_match = re.search(
+                r"MAXIMUM\s+(\d+)", section_txt, re.IGNORECASE)
+            min_match = re.search(
+                r"MINIMUM\s+(\d+)", section_txt, re.IGNORECASE)
+
+            if not max_match or not min_match:
+                last_err = f"v{ver}: could not parse MAXIMUM/MINIMUM from CLI"
+                continue
+
+            high_f = float(max_match.group(1))
+            low_f  = float(min_match.group(1))
+
+            # Sanity checks — °F range for US cities
+            if not (-60 <= high_f <= 135) or not (-60 <= low_f <= 135):
+                last_err = f"v{ver}: temperature out of range ({high_f}/{low_f})"
+                continue
+            if low_f > high_f:
+                last_err = f"v{ver}: low {low_f} > high {high_f} — bad parse"
+                continue
+
+            return {
+                "ok":        True,
+                "high":      high_f,
+                "low":       low_f,
+                "date":      cli_date,
+                "issued":    issued_str,
+                "issued_hour": issued_hour,
+                "is_final":  is_final,
+                "station":   nws_station,
+                "source":    f"NWS CLI {issuedby}",
+                "version":   ver,
+                "raw_snippet": section_txt[:300],
+            }
+
+        except Exception as e:
+            last_err = str(e)
+            continue
+
+    return {"ok": False, "error": f"All CLI versions failed: {last_err}",
+            "station": nws_station}
+
+
+# ── AUTO-SETTLEMENT ENGINE ────────────────────────────────────────────────────
+# Background thread polls NWS CLI for all temp cities each morning and
+# auto-fills settled_temp + settled_correct in temp_snapshots.
+#
+# Design:
+#   • Runs every SETTLE_POLL_INTERVAL seconds (default: 3600 = hourly)
+#   • Between SETTLE_WINDOW_START and SETTLE_WINDOW_END ET (7 AM – 2 PM)
+#     to catch the final CLI report without hammering NWS overnight
+#   • Looks for temp_snapshots rows where:
+#       target_date = yesterday  AND  settled_temp IS NULL
+#   • Fetches NWS CLI for the station, marks rows settled_correct
+#   • Logs results to _SETTLE_LOG for the /temp/settle-log endpoint
+
+import threading as _threading
+import time as _time_mod
+
+SETTLE_POLL_INTERVAL  = 3600        # seconds between settlement poll runs
+SETTLE_WINDOW_START   = 7           # 7 AM ET — CLI is usually posted by now
+SETTLE_WINDOW_END     = 14          # 2 PM ET — stop checking once market is closing
+_SETTLE_LOG           = []          # last N settlement results, in memory
+_SETTLE_LOCK          = _threading.Lock()
+_SETTLE_THREAD        = None
+_LAST_SETTLE_RUN      = {}          # date_str → result dict, prevents duplicate runs
+
+
+def run_auto_settlement(force=False):
+    """
+    Pull NWS CLI for yesterday's date for all temp cities and mark
+    temp_snapshot rows as settled_correct.
+
+    Called from the background scheduler thread and from /temp/auto-settle.
+    force=True bypasses the time-window check (useful for manual trigger).
+    """
+    import pytz
+    from datetime import datetime as dt_cls, timedelta
+
+    et_tz    = pytz.timezone("America/New_York")
+    now_et   = dt_cls.utcnow().replace(tzinfo=pytz.utc).astimezone(et_tz)
+    hour_et  = now_et.hour
+    today_et = now_et.strftime("%Y-%m-%d")
+
+    if not force and not (SETTLE_WINDOW_START <= hour_et < SETTLE_WINDOW_END):
+        return {"ok": True, "skipped": True,
+                "reason": f"Outside settlement window ({hour_et} ET, window {SETTLE_WINDOW_START}–{SETTLE_WINDOW_END})"}
+
+    # Target: yesterday in ET (the date whose high is in this morning's CLI)
+    yesterday = (now_et - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # Avoid re-running for the same date more than once per day
+    if not force and _LAST_SETTLE_RUN.get(yesterday, {}).get("ok"):
+        return {"ok": True, "skipped": True,
+                "reason": f"Already settled {yesterday} today"}
+
+    conn = get_db()
+    if not conn:
+        return {"ok": False, "error": "No DB connection"}
+
+    results   = []
+    settled   = 0
+    attempted = 0
+
+    try:
+        # Find all cities that have unsettled snapshots for yesterday
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT city, nws_station
+                FROM temp_snapshots
+                WHERE target_date = %s AND settled_temp IS NULL
+            """, (yesterday,))
+            cities_needed = cur.fetchall()
+
+        if not cities_needed:
+            msg = {"ok": True, "date": yesterday, "settled": 0,
+                   "note": "No unsettled snapshots for this date"}
+            with _SETTLE_LOCK:
+                _SETTLE_LOG.insert(0, {**msg, "run_at": now_et.isoformat()})
+                _SETTLE_LOG[:] = _SETTLE_LOG[:50]
+            _LAST_SETTLE_RUN[yesterday] = msg
+            conn.close()
+            return msg
+
+        import concurrent.futures as _cf
+        def settle_city(city_key, station):
+            cli = fetch_nws_temp_cli(station)
+            if not cli.get("ok"):
+                return {"city": city_key, "station": station, "ok": False,
+                        "error": cli.get("error")}
+            return {"city": city_key, "station": station, "ok": True,
+                    "high": cli["high"], "low": cli["low"],
+                    "date": cli["date"], "is_final": cli.get("is_final", False)}
+
+        ex = _cf.ThreadPoolExecutor(max_workers=8)
+        try:
+            futs = {ex.submit(settle_city, ck, st): (ck, st)
+                    for ck, st in cities_needed}
+            done, _ = _cf.wait(futs, timeout=60)
+            for f in done:
+                try:
+                    res = f.result()
+                    results.append(res)
+                except Exception as e:
+                    results.append({"ok": False, "error": str(e)})
+        finally:
+            ex.shutdown(wait=False)
+
+        # Write settlements to DB
+        with conn.cursor() as cur:
+            for res in results:
+                if not res.get("ok"):
+                    continue
+                city    = res["city"]
+                high_f  = res["high"]
+                low_f   = res["low"]
+                attempted += 1
+
+                # Mark HIGH brackets
+                cur.execute("""
+                    UPDATE temp_snapshots
+                    SET settled_temp    = %s,
+                        settled_correct = (
+                            (lo_temp IS NULL OR %s >= lo_temp) AND
+                            (hi_temp IS NULL OR %s < hi_temp)
+                        )
+                    WHERE city = %s AND target_date = %s
+                      AND market_type = 'high' AND settled_temp IS NULL
+                """, (high_f, high_f, high_f, city, yesterday))
+                settled += cur.rowcount
+
+                # Mark LOW brackets
+                cur.execute("""
+                    UPDATE temp_snapshots
+                    SET settled_temp    = %s,
+                        settled_correct = (
+                            (lo_temp IS NULL OR %s >= lo_temp) AND
+                            (hi_temp IS NULL OR %s < hi_temp)
+                        )
+                    WHERE city = %s AND target_date = %s
+                      AND market_type = 'low' AND settled_temp IS NULL
+                """, (low_f, low_f, low_f, city, yesterday))
+                settled += cur.rowcount
+
+        conn.commit()
+
+    except Exception as e:
+        try: conn.close()
+        except: pass
+        return {"ok": False, "error": str(e)}
+    finally:
+        try: conn.close()
+        except: pass
+
+    summary = {
+        "ok":        True,
+        "date":      yesterday,
+        "settled":   settled,
+        "attempted": attempted,
+        "cities":    results,
+        "run_at":    now_et.isoformat(),
+    }
+    with _SETTLE_LOCK:
+        _SETTLE_LOG.insert(0, summary)
+        _SETTLE_LOG[:] = _SETTLE_LOG[:50]
+    _LAST_SETTLE_RUN[yesterday] = summary
+    print(f"  ✅ Auto-settle {yesterday}: {settled} brackets settled across {attempted} cities")
+    return summary
+
+
+def _settlement_scheduler():
+    """Background thread: polls every SETTLE_POLL_INTERVAL seconds."""
+    import time as _t
+    print("  🕐 Auto-settlement scheduler started")
+    while True:
+        try:
+            run_auto_settlement()
+        except Exception as e:
+            print(f"  ⚠️  Settlement scheduler error: {e}")
+        _t.sleep(SETTLE_POLL_INTERVAL)
+
+
+def start_settlement_scheduler():
+    """Launch the background settlement thread (daemon — dies with server)."""
+    global _SETTLE_THREAD
+    if _SETTLE_THREAD and _SETTLE_THREAD.is_alive():
+        return
+    _SETTLE_THREAD = _threading.Thread(
+        target=_settlement_scheduler, daemon=True, name="TempSettler")
+    _SETTLE_THREAD.start()
+
+
+# ── CALIBRATE-ON-STARTUP HELPER ───────────────────────────────────────────────
+# Also schedule a weekly re-calibration to keep bias/σ fresh.
+_LAST_CALIBRATE_DATE = None
+
+def maybe_auto_calibrate():
+    """
+    Run /temp/calibrate for all cities on startup (non-blocking thread)
+    and every Sunday night. Uses 90 days of historical data.
+    """
+    import threading as _t2
+    import time as _t
+
+    def _do_calibrate():
+        global _LAST_CALIBRATE_DATE
+        import pytz
+        from datetime import datetime as dt_cls
+        et_tz   = pytz.timezone("America/New_York")
+        today_s = dt_cls.utcnow().replace(tzinfo=pytz.utc).astimezone(et_tz).strftime("%Y-%m-%d")
+
+        if _LAST_CALIBRATE_DATE == today_s:
+            return   # already ran today
+        print("  🔧 Auto-calibrating temp bias/σ for all cities (90d)...")
+        cities = list(TEMP_CITIES.keys())
+        from math import sqrt
+        import concurrent.futures as _cf
+
+        def cal_one(city_key):
+            # Inline a fast version — identical logic to /temp/calibrate endpoint
+            cfg = TEMP_CITIES[city_key]
+            try:
+                import pytz as _pytz
+                from datetime import timedelta
+                tz_name  = cfg["tz"]
+                local_tz = _pytz.timezone(tz_name)
+                now      = dt_cls.utcnow().replace(tzinfo=_pytz.utc).astimezone(local_tz)
+                errs_gfs = []; errs_ecmwf = []
+
+                for offset in range(2, 92):
+                    target   = (now - timedelta(days=offset-1)).strftime("%Y-%m-%d")
+                    def _hist(model_str):
+                        p = {"latitude": cfg["lat"], "longitude": cfg["lon"],
+                             "daily": "temperature_2m_max", "timezone": tz_name,
+                             "start_date": target, "end_date": target,
+                             "models": model_str, "past_days": offset+2}
+                        resp = requests.get("https://api.open-meteo.com/v1/forecast",
+                                            params=p, timeout=8)
+                        resp.raise_for_status()
+                        val = (resp.json().get("daily",{}).get("temperature_2m_max") or [None])[0]
+                        return round(val*9/5+32,1) if val is not None else None
+
+                    def _actual():
+                        p = {"latitude": cfg["lat"], "longitude": cfg["lon"],
+                             "daily": "temperature_2m_max", "timezone": tz_name,
+                             "start_date": target, "end_date": target}
+                        resp = requests.get("https://archive-api.open-meteo.com/v1/archive",
+                                            params=p, timeout=8)
+                        resp.raise_for_status()
+                        val = (resp.json().get("daily",{}).get("temperature_2m_max") or [None])[0]
+                        return round(val*9/5+32,1) if val is not None else None
+
+                    try:
+                        ex2 = _cf.ThreadPoolExecutor(max_workers=3)
+                        try:
+                            fg = ex2.submit(_hist, "gfs_seamless")
+                            fe = ex2.submit(_hist, "ecmwf_ifs")
+                            fa = ex2.submit(_actual)
+                            gv = fg.result(timeout=10)
+                            ev = fe.result(timeout=10)
+                            av = fa.result(timeout=10)
+                        finally:
+                            ex2.shutdown(wait=False)
+                        if gv and av: errs_gfs.append(gv - av)
+                        if ev and av: errs_ecmwf.append(ev - av)
+                    except Exception:
+                        continue
+
+                def _stats(e):
+                    if not e: return 0.0, cfg["σ_d1"]
+                    n = len(e)
+                    return round(sum(e)/n,2), round(sqrt(sum(x**2 for x in e)/n),2)
+
+                gb, gr = _stats(errs_gfs)
+                eb, er = _stats(errs_ecmwf)
+                rmse_vals = [v for v in [gr, er] if v]
+                σ_d1 = round(sum(rmse_vals)/len(rmse_vals), 2) if rmse_vals else cfg["σ_d1"]
+
+                _TEMP_BIAS_CACHE[city_key] = {
+                    "gfs_bias": gb, "ecmwf_bias": eb,
+                    "σ_d1": σ_d1, "σ_d0": round(σ_d1*0.70, 2),
+                    "n_days": len(errs_gfs), "calibrated_at": _t.time()
+                }
+                return city_key, True
+            except Exception as e:
+                return city_key, False
+
+        ex = _cf.ThreadPoolExecutor(max_workers=4)
+        try:
+            futs = {ex.submit(cal_one, ck): ck for ck in cities}
+            done, _ = _cf.wait(futs, timeout=600)
+            ok = sum(1 for f in done if f.result()[1])
+        finally:
+            ex.shutdown(wait=False)
+
+        _LAST_CALIBRATE_DATE = today_s
+        print(f"  ✅ Auto-calibration complete: {ok}/{len(cities)} cities updated")
+
+    t = _t2.Thread(target=_do_calibrate, daemon=True, name="TempCalibrate")
+    t.start()
+
+
 # Active city for this deployment — change via CITY env var on Railway
 # e.g. set CITY=portland on your Portland deployment
 ACTIVE_CITY  = os.environ.get("CITY", "seattle")
@@ -1116,6 +2134,60 @@ def ensure_tables():
                     notes           TEXT,
                     created_at      TIMESTAMPTZ DEFAULT NOW()
                 );
+            """)
+            # Temperature market snapshots — one row per bracket per scan
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS temp_snapshots (
+                    id              SERIAL PRIMARY KEY,
+                    city            TEXT NOT NULL,
+                    nws_station     TEXT NOT NULL,
+                    target_date     DATE NOT NULL,
+                    horizon         TEXT NOT NULL DEFAULT 'd1',
+                    scan_ts         TIMESTAMPTZ DEFAULT NOW(),
+                    market_type     TEXT NOT NULL,  -- 'high' or 'low'
+                    ticker          TEXT NOT NULL,
+                    bracket_label   TEXT,
+                    lo_temp         NUMERIC(5,1),
+                    hi_temp         NUMERIC(5,1),
+                    gfs_forecast    NUMERIC(5,1),
+                    ecmwf_forecast  NUMERIC(5,1),
+                    best_forecast   NUMERIC(5,1),
+                    sigma           NUMERIC(5,2),
+                    spread_models   NUMERIC(5,2),
+                    model_prob      NUMERIC(5,3),
+                    yes_ask         NUMERIC(5,3),
+                    gap_c           INTEGER,
+                    net_gap_c       INTEGER,
+                    edge_ratio      NUMERIC(6,3),
+                    kelly_frac      NUMERIC(5,3),
+                    grade           TEXT,
+                    liq_grade       TEXT,
+                    open_interest   INTEGER,
+                    volume_24h      INTEGER,
+                    settled_temp    NUMERIC(5,1),  -- filled after NWS settlement
+                    settled_correct BOOLEAN,        -- true if bracket won
+                    UNIQUE (city, target_date, horizon, ticker, DATE(scan_ts))
+                );
+            """)
+            # View: model accuracy by city, horizon, grade
+            cur.execute("""
+                CREATE OR REPLACE VIEW temp_backtest AS
+                SELECT
+                    city,
+                    horizon,
+                    grade,
+                    COUNT(*)                                            AS n,
+                    ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END), 3) AS win_rate,
+                    ROUND(AVG(model_prob::float), 3)                    AS avg_model_prob,
+                    ROUND(AVG(yes_ask::float), 3)                       AS avg_market_price,
+                    ROUND(AVG(gap_c), 1)                                AS avg_gap_c,
+                    ROUND(AVG(net_gap_c), 1)                            AS avg_net_gap_c,
+                    ROUND(AVG(edge_ratio::float), 3)                    AS avg_edge_ratio,
+                    ROUND(STDDEV(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END), 3) AS win_rate_stddev
+                FROM temp_snapshots
+                WHERE settled_correct IS NOT NULL
+                GROUP BY city, horizon, grade
+                ORDER BY city, horizon, grade;
             """)
             # View joining snapshots with settlements for calibration analysis
             cur.execute("""
@@ -2347,6 +3419,428 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
+        elif path == "/temp/scan":
+            # Full scan: all temp cities, both HIGH and LOW, D+1 horizon by default
+            # Optional ?horizon=d0  to run same-day scan
+            # Optional ?city=chicago to scan a single city
+            import concurrent.futures as _cf
+            qs       = parse_qs(urlparse(self.path).query)
+            horizon  = qs.get("horizon", ["d1"])[0]
+            city_req = qs.get("city", [None])[0]
+            cities   = [city_req] if city_req and city_req in TEMP_CITIES else list(TEMP_CITIES.keys())
+
+            try:
+                ex = _cf.ThreadPoolExecutor(max_workers=8)
+                try:
+                    futures = {ex.submit(scan_temp_city, ck, horizon): ck for ck in cities}
+                    results = []
+                    done, _ = _cf.wait(futures, timeout=60)
+                    for f in done:
+                        try:
+                            r = f.result()
+                            if r: results.append(r)
+                        except Exception as e:
+                            results.append({"ok": False, "city": futures[f], "error": str(e)})
+                finally:
+                    ex.shutdown(wait=False)
+
+                # Sort: A-grade first, then B, then by best_edge_c desc
+                grade_order = {"A": 0, "B": 1, "none": 2}
+                results.sort(key=lambda x: (grade_order.get(x.get("best_grade","none"), 3), -x.get("best_edge_c", 0)))
+
+                total_actionable = sum(r.get("actionable_count", 0) for r in results)
+                self.send_json({
+                    "ok":           True,
+                    "horizon":      horizon,
+                    "cities":       results,
+                    "city_count":   len(results),
+                    "total_actionable": total_actionable,
+                    "timestamp":    datetime.now().isoformat(),
+                })
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/temp/city":
+            # Single city detail — refreshes without cache for live dashboard view
+            qs      = parse_qs(urlparse(self.path).query)
+            city    = qs.get("city", ["nyc"])[0]
+            horizon = qs.get("horizon", ["d1"])[0]
+            # Bust cache so dashboard always gets fresh data
+            cache_key = f"{city}-{horizon}"
+            _TEMP_SCAN_CACHE.pop(cache_key, None)
+            result = scan_temp_city(city, horizon)
+            self.send_json(result)
+
+        elif path == "/temp/calibrate":
+            # Backtest: pull 90 days of Open-Meteo historical D+1 forecasts vs NWS CLI actuals
+            # and compute per-station warm bias and σ.
+            # Writes to _TEMP_BIAS_CACHE (in-memory; re-run after each deploy).
+            # Usage: GET /temp/calibrate?city=chicago  or omit city for all cities.
+            import concurrent.futures as _cf
+            import time as _t
+            from math import sqrt
+            qs       = parse_qs(urlparse(self.path).query)
+            city_req = qs.get("city", [None])[0]
+            cities   = [city_req] if city_req and city_req in TEMP_CITIES else list(TEMP_CITIES.keys())
+            days_back = int(qs.get("days", ["90"])[0])
+
+            def calibrate_temp_city(city_key):
+                cfg = TEMP_CITIES[city_key]
+                try:
+                    import pytz
+                    from datetime import datetime as dt_cls, timedelta
+                    tz_name  = cfg["tz"]
+                    local_tz = pytz.timezone(tz_name)
+                    now      = dt_cls.utcnow().replace(tzinfo=pytz.utc).astimezone(local_tz)
+
+                    errors_high_gfs = []
+                    errors_high_ecmwf = []
+                    actuals_fetched = 0
+
+                    for day_offset in range(2, days_back + 2):
+                        target_date  = (now - timedelta(days=day_offset - 1)).strftime("%Y-%m-%d")
+                        forecast_date = (now - timedelta(days=day_offset)).strftime("%Y-%m-%d")
+
+                        # Fetch historical GFS and ECMWF D+1 forecast for that date
+                        def get_hist(model_str, date_str, target):
+                            params = {
+                                "latitude":  cfg["lat"],
+                                "longitude": cfg["lon"],
+                                "daily":     "temperature_2m_max",
+                                "timezone":  tz_name,
+                                "start_date": target,
+                                "end_date":   target,
+                                "models":     model_str,
+                                "past_days":  day_offset + 2,
+                            }
+                            r2 = requests.get("https://api.open-meteo.com/v1/forecast",
+                                              params=params, timeout=8)
+                            r2.raise_for_status()
+                            d2 = r2.json()
+                            hi_c = (d2.get("daily", {}).get("temperature_2m_max") or [None])[0]
+                            if hi_c is None:
+                                return None
+                            return round(hi_c * 9/5 + 32, 1)
+
+                        # Fetch actual high from Open-Meteo historical weather API
+                        def get_actual(target):
+                            params = {
+                                "latitude":  cfg["lat"],
+                                "longitude": cfg["lon"],
+                                "daily":     "temperature_2m_max",
+                                "timezone":  tz_name,
+                                "start_date": target,
+                                "end_date":   target,
+                            }
+                            r3 = requests.get("https://archive-api.open-meteo.com/v1/archive",
+                                              params=params, timeout=8)
+                            r3.raise_for_status()
+                            d3 = r3.json()
+                            hi_c = (d3.get("daily", {}).get("temperature_2m_max") or [None])[0]
+                            if hi_c is None:
+                                return None
+                            return round(hi_c * 9/5 + 32, 1)
+
+                        try:
+                            import concurrent.futures as _cf2
+                            ex2 = _cf2.ThreadPoolExecutor(max_workers=3)
+                            try:
+                                fg = ex2.submit(get_hist, "gfs_seamless", forecast_date, target_date)
+                                fe = ex2.submit(get_hist, "ecmwf_ifs",    forecast_date, target_date)
+                                fa = ex2.submit(get_actual, target_date)
+                                gfs_hi   = fg.result(timeout=10)
+                                ecmwf_hi = fe.result(timeout=10)
+                                actual   = fa.result(timeout=10)
+                            finally:
+                                ex2.shutdown(wait=False)
+
+                            if gfs_hi is not None and actual is not None:
+                                errors_high_gfs.append(gfs_hi - actual)
+                            if ecmwf_hi is not None and actual is not None:
+                                errors_high_ecmwf.append(ecmwf_hi - actual)
+                            if actual is not None:
+                                actuals_fetched += 1
+                        except Exception:
+                            continue
+
+                    if not errors_high_gfs and not errors_high_ecmwf:
+                        return {"city": city_key, "ok": False, "error": "No data returned"}
+
+                    def stats(errs):
+                        if not errs: return None, None, None
+                        n    = len(errs)
+                        bias = round(sum(errs) / n, 2)
+                        rmse = round(sqrt(sum(e**2 for e in errs) / n), 2)
+                        mae  = round(sum(abs(e) for e in errs) / n, 2)
+                        return bias, rmse, mae
+
+                    gfs_bias, gfs_rmse, gfs_mae     = stats(errors_high_gfs)
+                    ecmwf_bias, ecmwf_rmse, ecmwf_mae = stats(errors_high_ecmwf)
+
+                    # σ_d1 = average of GFS and ECMWF RMSE (both are D+1 here)
+                    rmse_vals = [v for v in [gfs_rmse, ecmwf_rmse] if v is not None]
+                    σ_d1 = round(sum(rmse_vals) / len(rmse_vals), 2) if rmse_vals else cfg["σ_d1"]
+                    # σ_d0 estimated as 70% of σ_d1 (HRRR tightens same-day)
+                    σ_d0 = round(σ_d1 * 0.70, 2)
+
+                    _TEMP_BIAS_CACHE[city_key] = {
+                        "gfs_bias":   gfs_bias   or 0.0,
+                        "ecmwf_bias": ecmwf_bias or 0.0,
+                        "σ_d1":       σ_d1,
+                        "σ_d0":       σ_d0,
+                        "n_days":     actuals_fetched,
+                        "calibrated_at": _t.time(),
+                    }
+
+                    return {
+                        "city":        city_key,
+                        "ok":          True,
+                        "n_days":      actuals_fetched,
+                        "gfs_bias":    gfs_bias,   "gfs_rmse":   gfs_rmse,
+                        "ecmwf_bias":  ecmwf_bias, "ecmwf_rmse": ecmwf_rmse,
+                        "σ_d1":        σ_d1,       "σ_d0":       σ_d0,
+                    }
+
+                except Exception as e:
+                    return {"city": city_key, "ok": False, "error": str(e)}
+
+            try:
+                ex = _cf.ThreadPoolExecutor(max_workers=4)
+                try:
+                    futures = {ex.submit(calibrate_temp_city, ck): ck for ck in cities}
+                    results = []
+                    done, _ = _cf.wait(futures, timeout=300)
+                    for f in done:
+                        try:    results.append(f.result())
+                        except Exception as e: results.append({"city": futures[f], "ok": False, "error": str(e)})
+                finally:
+                    ex.shutdown(wait=False)
+
+                self.send_json({
+                    "ok":      True,
+                    "days_back": days_back,
+                    "cities":  results,
+                    "cache_size": len(_TEMP_BIAS_CACHE),
+                    "note":    "Bias cache updated in-memory. Re-run after each deploy.",
+                })
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/temp/auto-settle":
+            # Manually trigger auto-settlement (bypasses time-window check).
+            # Useful on first deploy or if the scheduler missed a day.
+            # GET /temp/auto-settle           → run for yesterday
+            # GET /temp/auto-settle?date=2026-04-07  → run for specific date (override)
+            qs       = parse_qs(urlparse(self.path).query)
+            override = qs.get("date", [None])[0]
+            try:
+                if override:
+                    # Run settlement for a specific past date
+                    conn = get_db()
+                    if not conn:
+                        self.send_json({"ok": False, "error": "No DB"})
+                    else:
+                        results = []; settled = 0
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                SELECT DISTINCT city, nws_station FROM temp_snapshots
+                                WHERE target_date = %s AND settled_temp IS NULL
+                            """, (override,))
+                            cities_needed = cur.fetchall()
+
+                        import concurrent.futures as _cf
+                        def _settle_one(ck, st):
+                            cli = fetch_nws_temp_cli(st)
+                            return {"city": ck, "station": st, **cli}
+
+                        ex = _cf.ThreadPoolExecutor(max_workers=8)
+                        try:
+                            futs = {ex.submit(_settle_one, ck, st): (ck, st)
+                                    for ck, st in cities_needed}
+                            done, _ = _cf.wait(futs, timeout=60)
+                            for f in done:
+                                try: results.append(f.result())
+                                except Exception as e: results.append({"ok": False, "error": str(e)})
+                        finally:
+                            ex.shutdown(wait=False)
+
+                        with conn.cursor() as cur:
+                            for res in results:
+                                if not res.get("ok"): continue
+                                for mtype, actual in [("high", res.get("high")), ("low", res.get("low"))]:
+                                    if actual is None: continue
+                                    cur.execute("""
+                                        UPDATE temp_snapshots
+                                        SET settled_temp = %s,
+                                            settled_correct = (
+                                                (lo_temp IS NULL OR %s >= lo_temp) AND
+                                                (hi_temp IS NULL OR %s < hi_temp))
+                                        WHERE city=%s AND target_date=%s
+                                          AND market_type=%s AND settled_temp IS NULL
+                                    """, (actual, actual, actual, res["city"], override, mtype))
+                                    settled += cur.rowcount
+                        conn.commit(); conn.close()
+                        self.send_json({"ok": True, "date": override,
+                                        "settled": settled, "cities": results})
+                else:
+                    result = run_auto_settlement(force=True)
+                    self.send_json(result)
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/temp/settle-log":
+            # Return the in-memory settlement log (last 50 runs)
+            with _SETTLE_LOCK:
+                log = list(_SETTLE_LOG)
+            self.send_json({
+                "ok":          True,
+                "log":         log,
+                "count":       len(log),
+                "scheduler_alive": _SETTLE_THREAD is not None and _SETTLE_THREAD.is_alive(),
+                "last_settle_run": _LAST_SETTLE_RUN,
+            })
+
+        elif path == "/temp/status":
+            # Quick system health for the temp pipeline
+            import pytz
+            from datetime import datetime as dt_cls, timedelta
+            et_tz   = pytz.timezone("America/New_York")
+            now_et  = dt_cls.utcnow().replace(tzinfo=pytz.utc).astimezone(et_tz)
+            yesterday = (now_et - timedelta(days=1)).strftime("%Y-%m-%d")
+
+            # Count unsettled snapshots for yesterday
+            unsettled = 0
+            total_snaps = 0
+            conn = get_db()
+            if conn:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT
+                                COUNT(*) FILTER (WHERE target_date = %s) AS yesterday_total,
+                                COUNT(*) FILTER (WHERE target_date = %s AND settled_temp IS NULL) AS yesterday_unsettled,
+                                COUNT(*) FILTER (WHERE settled_temp IS NOT NULL) AS all_settled,
+                                COUNT(*) AS all_total
+                            FROM temp_snapshots
+                        """, (yesterday, yesterday))
+                        row = cur.fetchone()
+                        if row:
+                            yesterday_total, unsettled, all_settled, total_snaps = row
+                finally:
+                    conn.close()
+
+            self.send_json({
+                "ok":               True,
+                "scheduler_alive":  _SETTLE_THREAD is not None and _SETTLE_THREAD.is_alive(),
+                "calibrated_cities": len(_TEMP_BIAS_CACHE),
+                "total_cities":     len(TEMP_CITIES),
+                "bias_cache":       {k: {kk: round(vv,3) if isinstance(vv,float) else vv
+                                         for kk,vv in v.items() if kk != "calibrated_at"}
+                                     for k,v in _TEMP_BIAS_CACHE.items()},
+                "yesterday":        yesterday,
+                "yesterday_snapshots": yesterday_total if conn else "no DB",
+                "yesterday_unsettled": unsettled,
+                "total_snapshots":  total_snaps,
+                "last_calibrate_date": _LAST_CALIBRATE_DATE,
+                "settle_poll_interval_min": SETTLE_POLL_INTERVAL // 60,
+                "settle_window_et": f"{SETTLE_WINDOW_START}AM–{SETTLE_WINDOW_END-12}PM",
+            })
+
+        elif path == "/temp/settle":
+            # Record actual NWS high/low temperature for a city+date.
+            # Compares against stored snapshots and marks settled_correct.
+            # Usage: GET /temp/settle?city=chicago&date=2026-04-08&high=54&low=32
+            qs     = parse_qs(urlparse(self.path).query)
+            city   = qs.get("city",   [None])[0]
+            date_s = qs.get("date",   [None])[0]
+            high_s = qs.get("high",   [None])[0]
+            low_s  = qs.get("low",    [None])[0]
+            if not city or not date_s or (not high_s and not low_s):
+                self.send_json({"ok": False, "error": "city, date, and high or low required"})
+            else:
+                conn = get_db()
+                if not conn:
+                    self.send_json({"ok": False, "error": "No DB"})
+                else:
+                    try:
+                        updated = 0
+                        with conn.cursor() as cur:
+                            for mtype, val_s in [("high", high_s), ("low", low_s)]:
+                                if not val_s: continue
+                                try:   actual = float(val_s)
+                                except: continue
+                                # Mark each bracket snapshot as correct/incorrect
+                                # A bracket [lo_temp, hi_temp] wins if actual falls in range.
+                                cur.execute("""
+                                    UPDATE temp_snapshots
+                                    SET settled_temp    = %s,
+                                        settled_correct = (
+                                            (lo_temp IS NULL OR %s >= lo_temp) AND
+                                            (hi_temp IS NULL OR %s < hi_temp)
+                                        )
+                                    WHERE city = %s AND target_date = %s AND market_type = %s
+                                      AND settled_temp IS NULL
+                                """, (actual, actual, actual, city, date_s, mtype))
+                                updated += cur.rowcount
+                        conn.commit()
+                        self.send_json({"ok": True, "city": city, "date": date_s,
+                                        "high": high_s, "low": low_s, "rows_updated": updated})
+                    except Exception as e:
+                        self.send_json({"ok": False, "error": str(e)})
+                    finally:
+                        conn.close()
+
+        elif path == "/temp/backtest":
+            # Return the temp_backtest aggregated view
+            conn = get_db()
+            if not conn:
+                self.send_json({"ok": False, "error": "No DB"})
+            else:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT * FROM temp_backtest")
+                        cols    = [desc[0] for desc in cur.description]
+                        rows    = [dict(zip(cols, row)) for row in cur.fetchall()]
+                    conn.close()
+                    for r in rows:
+                        for k, v in r.items():
+                            if hasattr(v, "__float__"): r[k] = float(v)
+                    self.send_json({"ok": True, "rows": rows, "count": len(rows)})
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/temp/snapshots":
+            # Return raw temp_snapshots for a city+date range, for manual analysis
+            qs     = parse_qs(urlparse(self.path).query)
+            city   = qs.get("city",  [None])[0]
+            limit  = int(qs.get("limit", ["200"])[0])
+            conn   = get_db()
+            if not conn:
+                self.send_json({"ok": False, "error": "No DB"})
+            else:
+                try:
+                    with conn.cursor() as cur:
+                        if city:
+                            cur.execute("""
+                                SELECT * FROM temp_snapshots WHERE city=%s
+                                ORDER BY target_date DESC, scan_ts DESC LIMIT %s
+                            """, (city, limit))
+                        else:
+                            cur.execute("""
+                                SELECT * FROM temp_snapshots
+                                ORDER BY target_date DESC, scan_ts DESC LIMIT %s
+                            """, (limit,))
+                        cols = [desc[0] for desc in cur.description]
+                        rows = [dict(zip(cols, row)) for row in cur.fetchall()]
+                    conn.close()
+                    for r in rows:
+                        for k, v in r.items():
+                            if hasattr(v, "isoformat"): r[k] = v.isoformat()
+                            elif hasattr(v, "__float__"): r[k] = float(v)
+                    self.send_json({"ok": True, "rows": rows, "count": len(rows)})
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)})
+
         elif path == "/portfolio":
             # Fetch live Kalshi balance and positions
             if not KALSHI_KEY_ID:
@@ -2468,6 +3962,8 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     ensure_tables()
+    start_settlement_scheduler()   # auto-settle yesterday's temp snapshots each morning
+    maybe_auto_calibrate()         # calibrate bias/σ on startup (non-blocking)
     print(f"""
 ╔══════════════════════════════════════════╗
 ║   Seattle Rain Kalshi Tracker — Server   ║
