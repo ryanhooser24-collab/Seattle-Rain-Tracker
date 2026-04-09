@@ -313,7 +313,7 @@ TEMP_CITIES = {
 
 # ── TEMP BIAS CACHE (per-station, populated by /temp/calibrate) ───────────────
 _TEMP_BIAS_CACHE   = {}   # city_key -> {"gfs_bias": float, "ecmwf_bias": float, "σ_d1": float, "σ_d0": float}
-_TEMP_SNAPSHOT_TTL = 300  # seconds between /temp/scan refreshes per city
+_TEMP_SNAPSHOT_TTL  = 180   # 3 min cache — keeps markets fresh, avoids stale settled data
 _TEMP_SCAN_CACHE   = {}   # city_key -> {"ts": float, "result": dict}
 
 # ── TEMP FORECAST FUNCTIONS ───────────────────────────────────────────────────
@@ -599,6 +599,49 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
         bid = m.get("yes_bid", 0)
         spr = round((ask - bid) * 100)  # spread in cents
 
+        # ── Skip settled / stale markets ─────────────────────────────────────
+        # 1. Market priced at or below 2¢ YES = already settled worthless, or
+        #    effectively dead. Never trade these — the "edge" is fake.
+        # 2. Market priced at or above 98¢ YES = already settled in-the-money.
+        # 3. close_time in the past = market closed, no longer tradeable.
+        if ask <= 0.02 or ask >= 0.98:
+            m["model_prob"] = None; m["gap_c"] = 0; m["net_gap_c"] = 0
+            m["grade"] = "skip"; m["edge_ratio"] = 0
+            m["skip_reason"] = "settled"
+            analyzed.append(m)
+            continue
+
+        close_time = m.get("close_time", "")
+        if close_time:
+            try:
+                from datetime import datetime as _dt, timezone as _tz
+                # close_time is ISO8601 — parse and compare to now UTC
+                ct = _dt.fromisoformat(close_time.replace("Z", "+00:00"))
+                if ct < _dt.now(_tz.utc):
+                    m["model_prob"] = None; m["gap_c"] = 0; m["net_gap_c"] = 0
+                    m["grade"] = "skip"; m["edge_ratio"] = 0
+                    m["skip_reason"] = "expired"
+                    analyzed.append(m)
+                    continue
+            except Exception:
+                pass  # if we can't parse close_time, proceed normally
+
+        # ── Also skip if the target_date in the forecast is today or past ────
+        # This catches D+1 markets where the date has rolled over to today/yesterday.
+        target_date = forecast.get("target_date", "")
+        if target_date:
+            try:
+                from datetime import date as _date
+                td = _date.fromisoformat(target_date)
+                if td < _date.today():
+                    m["model_prob"] = None; m["gap_c"] = 0; m["net_gap_c"] = 0
+                    m["grade"] = "skip"; m["edge_ratio"] = 0
+                    m["skip_reason"] = "past_date"
+                    analyzed.append(m)
+                    continue
+            except Exception:
+                pass
+
         prob     = bracket_prob(lo, hi, mu, sigma)
         gap_c    = round((prob - ask) * 100)
         net_gap_c = max(0, gap_c - spr)
@@ -703,6 +746,10 @@ def scan_temp_city(city_key, horizon="d1"):
         # Score brackets
         high_markets = analyze_temp_brackets(high.get("markets", []), fc, "high") if high.get("ok") else []
         low_markets  = analyze_temp_brackets(low.get("markets",  []), fc, "low")  if low.get("ok")  else []
+
+        # Drop settled/expired/past-date brackets from the response entirely
+        high_markets = [m for m in high_markets if m.get("grade") != "skip" or m.get("skip_reason") not in ("settled","expired","past_date")]
+        low_markets  = [m for m in low_markets  if m.get("grade") != "skip" or m.get("skip_reason") not in ("settled","expired","past_date")]
 
         # Best edge across both market types
         all_mkts = [m for m in high_markets + low_markets if m.get("actionable")]
@@ -1199,7 +1246,17 @@ def maybe_auto_calibrate():
 
                 gb, gr = _stats(errs_gfs)
                 eb, er = _stats(errs_ecmwf)
-                rmse_vals = [v for v in [gr, er] if v]
+
+                # ECMWF RMSE < 0.3°F across 7+ days means Open-Meteo is returning
+                # the same underlying data for both "forecast" and "archive" on recent
+                # dates — ERA5 isn't available yet so they share the analysis.
+                # Exclude from σ calculation; use GFS RMSE only.
+                ecmwf_is_mirror = (er < 0.3 and len(errs_ecmwf) >= 5)
+                if ecmwf_is_mirror:
+                    eb = 0.0  # don't apply a fake bias
+                    er = 0.0  # exclude from σ
+
+                rmse_vals = [v for v in [gr, er] if v > 0.1]  # exclude 0 and near-0
                 σ_d1 = round(sum(rmse_vals)/len(rmse_vals), 2) if rmse_vals else cfg["σ_d1"]
 
                 _TEMP_BIAS_CACHE[city_key] = {
@@ -3599,6 +3656,15 @@ class Handler(BaseHTTPRequestHandler):
                         "fetch_errors": errors,
                         "gfs_stats":  _st(errs_gfs),
                         "ecmwf_stats":_st(errs_ecmwf),
+                        "ecmwf_mirror": (
+                            _st(errs_ecmwf) is not None
+                            and _st(errs_ecmwf).get("rmse", 99) < 0.3
+                        ),
+                        "ecmwf_mirror_note": (
+                            "ECMWF RMSE < 0.3°F — Open-Meteo is returning the same "
+                            "underlying data for both model and archive on recent dates. "
+                            "ECMWF excluded from σ calculation; GFS bias/σ used only."
+                        ) if (_st(errs_ecmwf) or {}).get("rmse", 99) < 0.3 else None,
                         "sample_archive": dict(list(results.get("archive", {}).items())[:3]),
                         "sample_gfs":     dict(list(results.get("gfs", {}).items())[:3]),
                         "calibration_would_succeed": len(errs_gfs) > 0 or len(errs_ecmwf) > 0,
@@ -3696,7 +3762,14 @@ class Handler(BaseHTTPRequestHandler):
                     gfs_bias, gfs_rmse, gfs_mae       = stats(errors_high_gfs)
                     ecmwf_bias, ecmwf_rmse, ecmwf_mae = stats(errors_high_ecmwf)
 
-                    rmse_vals = [v for v in [gfs_rmse, ecmwf_rmse] if v is not None]
+                    # Exclude ECMWF if it mirrors the archive (< 0.3°F RMSE = same data source)
+                    ecmwf_is_mirror = (ecmwf_rmse is not None and ecmwf_rmse < 0.3
+                                       and len(errors_high_ecmwf) >= 5)
+                    if ecmwf_is_mirror:
+                        ecmwf_bias = 0.0
+                        ecmwf_rmse = None
+
+                    rmse_vals = [v for v in [gfs_rmse, ecmwf_rmse] if v and v > 0.1]
                     σ_d1 = round(sum(rmse_vals) / len(rmse_vals), 2) if rmse_vals else cfg["σ_d1"]
                     σ_d0 = round(σ_d1 * 0.70, 2)
 
