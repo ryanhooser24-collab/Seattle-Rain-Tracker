@@ -1149,21 +1149,27 @@ def maybe_auto_calibrate():
                         "longitude":  cfg["lon"],
                         "daily":      "temperature_2m_max",
                         "timezone":   tz_name,
-                        "start_date": start_s,
-                        "end_date":   end_s,
                     }
-                    if not use_archive:
+                    if use_archive:
+                        # Archive API: use explicit date range, no past_days
+                        p["start_date"] = start_s
+                        p["end_date"]   = end_s
+                    else:
+                        # Forecast API: past_days cannot be combined with start/end_date
+                        # Request enough past days to cover our window, then filter
                         p["models"]    = model_str
                         p["past_days"] = 92
+                        p["forecast_days"] = 1   # minimize future data returned
                     resp = requests.get(base, params=p, timeout=20)
-                    resp.raise_for_status()
                     d    = resp.json()
+                    if d.get("error"):
+                        raise ValueError(f"Open-Meteo error: {d.get('reason', d.get('error'))}")
                     dates = d.get("daily", {}).get("time", [])
                     vals  = d.get("daily", {}).get("temperature_2m_max", [])
-                    # Return date → °F dict, skipping None
+                    # Filter to our target date range and convert °C → °F
                     result = {}
                     for date_str, val_c in zip(dates, vals):
-                        if val_c is not None:
+                        if val_c is not None and start_s <= date_str <= end_s:
                             result[date_str] = round(val_c * 9/5 + 32, 1)
                     return result
 
@@ -3538,14 +3544,14 @@ class Handler(BaseHTTPRequestHandler):
                         ("gfs", "https://api.open-meteo.com/v1/forecast", {
                             "latitude": cfg["lat"], "longitude": cfg["lon"],
                             "daily": "temperature_2m_max", "timezone": tz_name,
-                            "start_date": start_s, "end_date": end_s,
                             "models": "gfs_seamless", "past_days": days_t + 3,
+                            "forecast_days": 1,
                         }),
                         ("ecmwf", "https://api.open-meteo.com/v1/forecast", {
                             "latitude": cfg["lat"], "longitude": cfg["lon"],
                             "daily": "temperature_2m_max", "timezone": tz_name,
-                            "start_date": start_s, "end_date": end_s,
                             "models": "ecmwf_ifs", "past_days": days_t + 3,
+                            "forecast_days": 1,
                         }),
                         ("archive", "https://archive-api.open-meteo.com/v1/archive", {
                             "latitude": cfg["lat"], "longitude": cfg["lon"],
@@ -3557,17 +3563,18 @@ class Handler(BaseHTTPRequestHandler):
                             r = requests.get(url, params=params, timeout=15)
                             d = r.json()
                             if "error" in d:
-                                errors[label] = d["error"]
+                                errors[label] = {"api_error": d["error"], "reason": d.get("reason", ""), "status": r.status_code}
                                 results[label] = {}
                             else:
                                 dates = d.get("daily", {}).get("time", [])
                                 vals  = d.get("daily", {}).get("temperature_2m_max", [])
                                 results[label] = {
                                     ds: round(v*9/5+32, 1)
-                                    for ds, v in zip(dates, vals) if v is not None
+                                    for ds, v in zip(dates, vals)
+                                    if v is not None and start_s <= ds <= end_s
                                 }
                         except Exception as e:
-                            errors[label] = str(e)
+                            errors[label] = {"exception": str(e)}
                             results[label] = {}
 
                     # Compute errors where we have both
@@ -3636,18 +3643,24 @@ class Handler(BaseHTTPRequestHandler):
                                 if use_archive else
                                 "https://api.open-meteo.com/v1/forecast")
                         p = {"latitude": cfg["lat"], "longitude": cfg["lon"],
-                             "daily": "temperature_2m_max", "timezone": tz_name,
-                             "start_date": start_s, "end_date": end_s}
-                        if not use_archive:
-                            p["models"]    = model_str
-                            p["past_days"] = days_back + 3
+                             "daily": "temperature_2m_max", "timezone": tz_name}
+                        if use_archive:
+                            # Archive API supports explicit date range
+                            p["start_date"] = start_s
+                            p["end_date"]   = end_s
+                        else:
+                            # Forecast API: past_days cannot be combined with start/end_date
+                            p["models"]        = model_str
+                            p["past_days"]     = days_back + 3
+                            p["forecast_days"] = 1
                         r2 = requests.get(base, params=p, timeout=20)
-                        r2.raise_for_status()
                         d2 = r2.json()
+                        if d2.get("error"):
+                            raise ValueError(f"Open-Meteo: {d2.get('reason', d2.get('error'))}")
                         dates = d2.get("daily", {}).get("time", [])
                         vals  = d2.get("daily", {}).get("temperature_2m_max", [])
                         return {ds: round(v*9/5+32, 1) for ds, v in zip(dates, vals)
-                                if v is not None}
+                                if v is not None and start_s <= ds <= end_s}
 
                     import concurrent.futures as _cf2
                     ex2 = _cf2.ThreadPoolExecutor(max_workers=3)
