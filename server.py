@@ -1095,6 +1095,7 @@ def start_settlement_scheduler():
 # ── CALIBRATE-ON-STARTUP HELPER ───────────────────────────────────────────────
 # Also schedule a weekly re-calibration to keep bias/σ fresh.
 _LAST_CALIBRATE_DATE = None
+_CALIBRATE_ERRORS    = []   # populated when calibration fails, cleared on success
 
 def maybe_auto_calibrate():
     """
@@ -1209,16 +1210,32 @@ def maybe_auto_calibrate():
                 print(f"    ✗ {city_key} calibration failed: {e}")
                 return city_key, False
 
+        _cal_errors = []
         ex = _cf.ThreadPoolExecutor(max_workers=4)
         try:
             futs = {ex.submit(cal_one, ck): ck for ck in cities}
             done, _ = _cf.wait(futs, timeout=600)
-            ok = sum(1 for f in done if f.result()[1])
+            ok = 0
+            for f in done:
+                try:
+                    city_k, success = f.result()
+                    if success:
+                        ok += 1
+                    else:
+                        _cal_errors.append(city_k)
+                except Exception as e:
+                    _cal_errors.append(str(e))
         finally:
             ex.shutdown(wait=False)
 
-        _LAST_CALIBRATE_DATE = today_s
-        print(f"  ✅ Auto-calibration complete: {ok}/{len(cities)} cities updated")
+        if ok > 0:
+            _LAST_CALIBRATE_DATE = today_s   # only mark done if at least one city succeeded
+            _CALIBRATE_ERRORS.clear()
+            print(f"  ✅ Auto-calibration complete: {ok}/{len(cities)} cities updated")
+        else:
+            _CALIBRATE_ERRORS[:] = _cal_errors[:10]
+            print(f"  ⚠️  Auto-calibration: 0/{len(cities)} cities succeeded — errors: {_cal_errors[:3]}")
+            # Don't set _LAST_CALIBRATE_DATE so it retries next poll
 
     t = _t2.Thread(target=_do_calibrate, daemon=True, name="TempCalibrate")
     t.start()
@@ -3493,6 +3510,95 @@ class Handler(BaseHTTPRequestHandler):
             result = scan_temp_city(city, horizon)
             self.send_json(result)
 
+        elif path == "/temp/calibrate-test":
+            # Diagnostic: test calibration for ONE city and return raw errors.
+            # Use this to debug why calibration fails before running all cities.
+            # GET /temp/calibrate-test?city=chicago&days=7
+            qs      = parse_qs(urlparse(self.path).query)
+            city    = qs.get("city", ["chicago"])[0]
+            days_t  = int(qs.get("days", ["7"])[0])
+            cfg     = TEMP_CITIES.get(city)
+            if not cfg:
+                self.send_json({"ok": False, "error": f"Unknown city: {city}"})
+            else:
+                try:
+                    import pytz
+                    from datetime import datetime as dt_cls, timedelta
+                    from math import sqrt
+                    tz_name  = cfg["tz"]
+                    local_tz = pytz.timezone(tz_name)
+                    now      = dt_cls.utcnow().replace(tzinfo=pytz.utc).astimezone(local_tz)
+                    end_s    = (now - timedelta(days=2)).strftime("%Y-%m-%d")
+                    start_s  = (now - timedelta(days=days_t + 1)).strftime("%Y-%m-%d")
+
+                    results  = {}
+                    errors   = {}
+
+                    for label, url, params in [
+                        ("gfs", "https://api.open-meteo.com/v1/forecast", {
+                            "latitude": cfg["lat"], "longitude": cfg["lon"],
+                            "daily": "temperature_2m_max", "timezone": tz_name,
+                            "start_date": start_s, "end_date": end_s,
+                            "models": "gfs_seamless", "past_days": days_t + 3,
+                        }),
+                        ("ecmwf", "https://api.open-meteo.com/v1/forecast", {
+                            "latitude": cfg["lat"], "longitude": cfg["lon"],
+                            "daily": "temperature_2m_max", "timezone": tz_name,
+                            "start_date": start_s, "end_date": end_s,
+                            "models": "ecmwf_ifs", "past_days": days_t + 3,
+                        }),
+                        ("archive", "https://archive-api.open-meteo.com/v1/archive", {
+                            "latitude": cfg["lat"], "longitude": cfg["lon"],
+                            "daily": "temperature_2m_max", "timezone": tz_name,
+                            "start_date": start_s, "end_date": end_s,
+                        }),
+                    ]:
+                        try:
+                            r = requests.get(url, params=params, timeout=15)
+                            d = r.json()
+                            if "error" in d:
+                                errors[label] = d["error"]
+                                results[label] = {}
+                            else:
+                                dates = d.get("daily", {}).get("time", [])
+                                vals  = d.get("daily", {}).get("temperature_2m_max", [])
+                                results[label] = {
+                                    ds: round(v*9/5+32, 1)
+                                    for ds, v in zip(dates, vals) if v is not None
+                                }
+                        except Exception as e:
+                            errors[label] = str(e)
+                            results[label] = {}
+
+                    # Compute errors where we have both
+                    errs_gfs   = [results["gfs"][d]   - results["archive"][d]
+                                  for d in results["archive"] if d in results["gfs"]]
+                    errs_ecmwf = [results["ecmwf"][d] - results["archive"][d]
+                                  for d in results["archive"] if d in results["ecmwf"]]
+
+                    def _st(e):
+                        if not e: return None
+                        n = len(e)
+                        return {"n": n, "bias": round(sum(e)/n, 2),
+                                "rmse": round(sqrt(sum(x**2 for x in e)/n), 2)}
+
+                    self.send_json({
+                        "ok":         True,
+                        "city":       city,
+                        "date_range": f"{start_s} → {end_s}",
+                        "n_archive":  len(results.get("archive", {})),
+                        "n_gfs":      len(results.get("gfs", {})),
+                        "n_ecmwf":    len(results.get("ecmwf", {})),
+                        "fetch_errors": errors,
+                        "gfs_stats":  _st(errs_gfs),
+                        "ecmwf_stats":_st(errs_ecmwf),
+                        "sample_archive": dict(list(results.get("archive", {}).items())[:3]),
+                        "sample_gfs":     dict(list(results.get("gfs", {}).items())[:3]),
+                        "calibration_would_succeed": len(errs_gfs) > 0 or len(errs_ecmwf) > 0,
+                    })
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)})
+
         elif path == "/temp/calibrate":
             # Backtest: pull 90 days of Open-Meteo historical D+1 forecasts vs NWS CLI actuals
             # and compute per-station warm bias and σ.
@@ -3748,6 +3854,8 @@ class Handler(BaseHTTPRequestHandler):
                     "Add Postgres: Railway project \u2192 + New \u2192 Database \u2192 PostgreSQL. "
                     "Railway auto-injects DATABASE_URL. Redeploy after adding."
                 ) if not DATABASE_URL else None,
+                "calibration_errors": _CALIBRATE_ERRORS or None,
+                "calibration_debug_url": "/temp/calibrate-test?city=chicago&days=7",
             })
 
         elif path == "/temp/settle":
