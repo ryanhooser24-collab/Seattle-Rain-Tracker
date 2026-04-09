@@ -350,9 +350,8 @@ body{max-width:900px;margin:0 auto;}
 <body>
 
 <div class="tabs">
-  <div class="tab active" id="t-scan" onclick="sw('scan')">Rain Scanner</div>
-  <div class="tab" id="t-temp" onclick="sw('temp')">Temp Scanner</div>
-  <div class="tab" id="t-dash" onclick="sw('dash')">City Detail</div>
+  <div class="tab active" id="t-scan" onclick="sw('scan')">Scanner</div>
+  <div class="tab" id="t-dash" onclick="sw('dash')">Rainfall Tracker</div>
   <div class="tab" id="t-pos" onclick="sw('pos')">Positions</div>
   <div class="tab" id="t-rules" onclick="sw('rules')">Rules</div>
   <div class="tab" id="t-hist" onclick="sw('hist')">History</div>
@@ -360,164 +359,99 @@ body{max-width:900px;margin:0 auto;}
 </div>
 
 <!-- TEMPERATURE SCANNER -->
-<div id="p-temp" style="display:none">
 
-<style>
-/* ── TEMP-SPECIFIC STYLES ──────────────────────────────────────────────── */
-.temp-hdr{padding:14px 16px 12px;border-bottom:0.5px solid var(--border);background:var(--paper);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;}
-.temp-hdr h1{font-family:'Instrument Serif',serif;font-size:22px;font-weight:400;}
-.temp-hdr h1 em{color:var(--hot,#993c1d);}
-.hot{color:#993c1d;}.cold{color:#185fa5;}
-:root{--hot:#993c1d;--hot-lt:#faece7;--hot-border:#f0997b;}
+<!-- SCANNER (rain + temp unified) -->
+<div id="p-scan">
 
-.timing-track{display:flex;align-items:stretch;height:26px;border-radius:4px;overflow:hidden;}
-.tt-d1open{flex:2;background:#e6f1fb;color:#0c447c;display:flex;align-items:center;justify-content:center;font-size:9px;letter-spacing:.8px;text-transform:uppercase;font-weight:500;}
-.tt-d1ec{flex:1;background:#e6f4ec;color:#0f4d2a;display:flex;align-items:center;justify-content:center;font-size:9px;letter-spacing:.8px;text-transform:uppercase;font-weight:500;}
-.tt-d0gfs{flex:1;background:#faeeda;color:#633806;display:flex;align-items:center;justify-content:center;font-size:9px;letter-spacing:.8px;text-transform:uppercase;font-weight:500;}
-.tt-hrrr{flex:1;background:#faece7;color:#712b13;display:flex;align-items:center;justify-content:center;font-size:9px;letter-spacing:.8px;text-transform:uppercase;font-weight:500;}
-.tt-close{flex:0.5;background:#f1efe8;color:#444441;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:500;}
-.timing-now-track{height:4px;background:var(--border);border-radius:2px;position:relative;margin-top:4px;}
-.timing-now-dot{position:absolute;top:-4px;width:10px;height:10px;border-radius:50%;background:#993c1d;border:2px solid var(--paper);}
-
-.temp-filters{display:flex;gap:6px;padding:8px 16px;border-bottom:0.5px solid var(--border);background:var(--paper);flex-wrap:wrap;align-items:center;}
-.horizon-tog{display:flex;border:0.5px solid var(--border);border-radius:4px;overflow:hidden;}
-.htog-btn{padding:4px 10px;font-size:10px;letter-spacing:1px;text-transform:uppercase;cursor:pointer;border:none;background:var(--bg);color:var(--muted);font-family:inherit;}
-.htog-btn.on{background:var(--ink);color:var(--paper);}
-
-.temp-opp{background:var(--paper);border:0.5px solid var(--border);border-radius:8px;overflow:hidden;cursor:pointer;}
-.temp-opp.grade-A{border-left:3px solid #3B6D11;}
-.temp-opp.grade-B{border-left:3px solid var(--warn,#ba7517);}
-.temp-opp.grade-skip{border-left:3px solid var(--border);opacity:.65;}
-.temp-opp-inner{display:flex;align-items:center;padding:12px 14px;gap:14px;}
-.temp-opp-left{flex:1;min-width:0;}
-.temp-opp-city{font-size:11px;color:var(--muted);letter-spacing:1px;text-transform:uppercase;margin-bottom:3px;}
-.temp-opp-decision{font-size:13px;font-weight:500;margin-bottom:3px;}
-.grade-A .temp-opp-decision{color:#27500A;}
-.grade-B .temp-opp-decision{color:#854f0b;}
-.temp-opp-ctx{font-size:11px;color:var(--muted);line-height:1.5;}
-.temp-opp-ctx b{color:var(--ink);font-weight:500;}
-.temp-opp-right{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0;}
-.temp-opp-edge{font-size:22px;font-weight:500;line-height:1;}
-.grade-A .temp-opp-edge{color:#3B6D11;}
-.grade-B .temp-opp-edge{color:#854f0b;}
-.temp-opp-meta{font-size:10px;color:var(--muted);text-align:right;line-height:1.5;}
-.temp-opp-btn{font-size:10px;padding:5px 12px;border-radius:4px;cursor:pointer;font-family:inherit;border:none;margin-top:2px;}
-.grade-A .temp-opp-btn{background:var(--yes-lt);color:#27500A;border:0.5px solid var(--yes-border);}
-.grade-B .temp-opp-btn{background:var(--gap-lt,#fef3e8);color:#854f0b;border:0.5px solid var(--gap-border,#e8c49a);}
-.gbadge{font-size:9px;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:5px;}
-.gA{background:var(--yes-lt);color:#0f4d2a;}.gB{background:var(--warn-lt,#faeeda);color:#854f0b;}
-
-.bracket-detail{display:none;border-top:0.5px solid var(--border);padding:12px 14px;background:var(--bg);}
-.temp-opp.open .bracket-detail{display:block;}
-.bkt-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
-.bkt-row{display:flex;align-items:center;gap:8px;margin-bottom:4px;}
-.bkt-range{font-size:10px;color:var(--muted);min-width:72px;}
-.bkt-wrap{flex:1;height:6px;background:var(--border);border-radius:3px;position:relative;overflow:visible;}
-.bkt-fill{height:100%;border-radius:3px;}
-.bkt-needle{position:absolute;top:-5px;width:2px;height:16px;border-radius:1px;}
-.bkt-prob{font-size:10px;font-weight:500;min-width:34px;text-align:right;}
-.bkt-legend{display:flex;gap:12px;margin-top:6px;font-size:9px;color:var(--muted);}
-.bkt-legend span{display:flex;align-items:center;gap:4px;}
-.bkt-dot{width:7px;height:7px;border-radius:50%;}
-
-.mdl-row{display:flex;align-items:center;gap:6px;margin-bottom:5px;}
-.mdl-name{font-size:10px;color:var(--muted);min-width:56px;}
-.mdl-temp{font-size:12px;font-weight:500;min-width:46px;}
-.mdl-bar{flex:1;height:4px;background:var(--border);border-radius:2px;overflow:hidden;}
-.mdl-fill{height:100%;border-radius:2px;}
-.m-gfs{background:var(--rain,#2e5fa3);}
-.m-ecmwf{background:var(--hot,#993c1d);}
-.m-best{background:#3B6D11;}
-.mdl-conf{font-size:9px;padding:2px 6px;border-radius:3px;margin-left:4px;}
-.conf-hi{background:var(--yes-lt);color:#0f4d2a;}
-.conf-lo{background:var(--warn-lt,#faeeda);color:#854f0b;}
-
-.kelly-box{margin-top:8px;background:var(--yes-lt);border:0.5px solid var(--yes-border);border-radius:4px;padding:8px 10px;}
-.kelly-row{display:flex;justify-content:space-between;font-size:10px;line-height:1.8;}
-.kelly-lbl{color:var(--yes);}
-.kelly-val{color:#0f4d2a;font-weight:500;}
-
-.temp-city-strip{display:flex;gap:6px;padding:0 16px 12px;overflow-x:auto;}
-.tc-card{background:var(--paper);border:0.5px solid var(--border);border-radius:6px;padding:8px 10px;min-width:96px;flex-shrink:0;cursor:pointer;}
-.tc-card.has-edge{border-color:var(--yes-border,#a8d4b8);}
-.tc-city{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:3px;}
-.tc-high{font-size:16px;font-weight:500;color:var(--hot,#993c1d);}
-.tc-low{font-size:12px;color:var(--cold,#185fa5);margin-top:1px;}
-.tc-edge{font-size:9px;font-weight:500;color:#3B6D11;margin-top:3px;}
-.tc-spread{font-size:9px;margin-top:2px;}
-.spread-tight{color:#3B6D11;}.spread-wide{color:#854f0b;}
-.tc-noedge{font-size:9px;color:var(--muted);margin-top:3px;}
-</style>
-
-<div class="temp-hdr">
-  <h1>Temperature <em>Scanner</em></h1>
-  <div class="header-meta" id="temp-status-pills">
-    <span class="pill" style="background:var(--hot-lt,#faece7);color:var(--hot,#993c1d);">LOADING...</span>
-    <button onclick="loadTempScanner()" style="font-size:10px;padding:5px 12px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;">↻ Refresh</button>
-  </div>
-</div>
-
-<!-- Timing banner -->
-<div style="background:var(--paper);border-bottom:0.5px solid var(--border);padding:10px 16px;">
-  <div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:6px;">Trading window — 28h cycle</div>
-  <div class="timing-track">
-    <div class="tt-d1open">D-1 10AM · market opens</div>
-    <div class="tt-d1ec">D-1 6PM · ECMWF 12Z</div>
-    <div class="tt-d0gfs">D-0 6AM · GFS 0Z</div>
-    <div class="tt-hrrr">D-0 2PM · HRRR lock</div>
-    <div class="tt-close">close</div>
-  </div>
-  <div class="timing-now-track" id="temp-timing-track"><div class="timing-now-dot" id="temp-timing-dot"></div></div>
-  <div style="font-size:9px;color:var(--muted);margin-top:5px;line-height:1.6;" id="temp-timing-label">Calculating...</div>
-</div>
-
-<div class="temp-filters">
-  <div class="horizon-tog">
-    <button class="htog-btn on" id="htog-d1" onclick="setTempHorizon('d1')">D+1 (tomorrow)</button>
-    <button class="htog-btn" id="htog-d0" onclick="setTempHorizon('d0')">D+0 (today)</button>
-  </div>
-  <button class="sf on" id="tsf-all"  onclick="setTempFilter('all')">All</button>
-  <button class="sf"    id="tsf-A"    onclick="setTempFilter('A')">A only</button>
-  <button class="sf"    id="tsf-high" onclick="setTempFilter('high')">HIGH</button>
-  <button class="sf"    id="tsf-low"  onclick="setTempFilter('low')">LOW</button>
-  <button class="sf"    id="tsf-agree" onclick="setTempFilter('agree')">Models agree</button>
-  <span id="temp-scan-meta" style="font-size:10px;color:var(--muted);margin-left:auto;"></span>
-</div>
-
-<div style="padding:10px 16px 6px;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);" id="temp-sec-A">A-grade edges</div>
-<div id="temp-opp-A" class="opp-list"></div>
-<div style="padding:10px 16px 6px;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);display:none;" id="temp-sec-B">B-grade edges</div>
-<div id="temp-opp-B" class="opp-list"></div>
-<div id="temp-city-strip-wrap" style="padding-top:8px;"></div>
-
-<!-- Settlement & Backtest status -->
-<div style="padding:10px 16px 6px;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-top:4px;border-top:0.5px solid var(--border);">System status · auto-backtest</div>
-<div id="temp-status-card" style="padding:0 16px 16px;">
-  <div style="background:var(--paper);border:0.5px solid var(--border);border-radius:8px;padding:12px 14px;">
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:10px;" id="temp-status-grid">
-      <div><div style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Scheduler</div><div style="font-size:13px;font-weight:500;" id="ts-scheduler">—</div></div>
-      <div><div style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Calibrated</div><div style="font-size:13px;font-weight:500;" id="ts-calibrated">—</div></div>
-      <div><div style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Snapshots</div><div style="font-size:13px;font-weight:500;" id="ts-snaps">—</div></div>
-      <div><div style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Unsettled</div><div style="font-size:13px;font-weight:500;" id="ts-unsettled">—</div></div>
+  <!-- Mode toggle -->
+  <div style="display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:0.5px solid var(--border);background:var(--paper);">
+    <div style="display:flex;border:0.5px solid var(--border);border-radius:4px;overflow:hidden;">
+      <button id="mode-rain" onclick="setScanMode('rain')" style="padding:6px 16px;font-size:10px;letter-spacing:1px;text-transform:uppercase;cursor:pointer;border:none;font-family:inherit;background:var(--ink);color:var(--paper);">Rain</button>
+      <button id="mode-temp" onclick="setScanMode('temp')" style="padding:6px 16px;font-size:10px;letter-spacing:1px;text-transform:uppercase;cursor:pointer;border:none;font-family:inherit;background:var(--bg);color:var(--muted);">Temp</button>
     </div>
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-      <button onclick="triggerSettle()" style="font-size:10px;padding:5px 12px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;">⚡ Run settlement now</button>
-      <button onclick="loadBacktestResults()" style="font-size:10px;padding:5px 12px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;">📊 Load backtest results</button>
-      <button onclick="loadTempStatus()" style="font-size:10px;padding:5px 12px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;">↻ Refresh status</button>
-      <span id="ts-settle-msg" style="font-size:10px;color:var(--muted);"></span>
+    <span id="scan-mode-meta" style="font-size:10px;color:var(--muted);flex:1;"></span>
+    <button id="scan-refresh-btn" onclick="refreshCurrentScan()" style="font-size:10px;padding:5px 12px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;">↻ Refresh</button>
+  </div>
+
+  <!-- RAIN sub-pane -->
+  <div id="scan-rain-pane">
+    <div class="scan-hdr">
+      <div>
+        <div class="scan-title">Opportunity scanner — all rain markets</div>
+        <div class="scan-meta" id="scan-meta">Loading...</div>
+      </div>
+    </div>
+    <div class="scan-filters">
+      <button class="sf on" id="sf-all" onclick="setFilter('all')">All</button>
+      <button class="sf" id="sf-settled" onclick="setFilter('settled')">Already cleared</button>
+      <button class="sf" id="sf-near" onclick="setFilter('near-certain')">Near certain</button>
+      <button class="sf" id="sf-prob" onclick="setFilter('probabilistic')">Forecast-dependent</button>
+      <button class="sf" id="sf-no" onclick="setFilter('no-value')" style="color:var(--no)">NO value</button>
+    </div>
+    <div id="opp-list" class="opp-list">
+      <div class="scan-loading">Scanning all cities...</div>
     </div>
   </div>
-</div>
 
-<!-- Backtest results table -->
-<div id="temp-bt-wrap" style="padding:0 16px 20px;display:none;">
-  <div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:8px;">Backtest results — win rate by city · horizon · grade</div>
-  <div style="background:var(--paper);border:0.5px solid var(--border);border-radius:8px;overflow:hidden;">
-    <div style="overflow-x:auto;">
-      <table id="temp-bt-table" style="width:100%;border-collapse:collapse;font-size:11px;font-family:'DM Mono',monospace;">
-        <thead>
-          <tr style="border-bottom:0.5px solid var(--border);background:var(--bg);">
-            <th style="text-align:left;padding:8px 12px;font-weight:500;color:var(--muted);white-space:nowrap;">City</th>
+  <!-- TEMP sub-pane (hidden until toggle) -->
+  <div id="scan-temp-pane" style="display:none;">
+    <div class="temp-hdr" style="padding:14px 16px 12px;border-bottom:0.5px solid var(--border);background:var(--paper);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+      <h1 style="font-family:'Instrument Serif',Georgia,serif;font-size:22px;font-weight:400;">Temperature <em style="color:#993c1d;font-style:normal;">Scanner</em></h1>
+      <div id="temp-status-pills" style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;">
+        <span class="pill" style="background:#faece7;color:#993c1d;">LOADING...</span>
+      </div>
+    </div>
+    <div style="background:var(--paper);border-bottom:0.5px solid var(--border);padding:10px 16px;">
+      <div style="font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:6px;">Trading window — 28h cycle</div>
+      <div class="timing-track">
+        <div class="tt-d1open">D-1 10AM · market opens</div>
+        <div class="tt-d1ec">D-1 6PM · ECMWF 12Z</div>
+        <div class="tt-d0gfs">D-0 6AM · GFS 0Z</div>
+        <div class="tt-hrrr">D-0 2PM · HRRR lock</div>
+        <div class="tt-close">close</div>
+      </div>
+      <div class="timing-now-track" id="temp-timing-track"><div class="timing-now-dot" id="temp-timing-dot"></div></div>
+      <div style="font-size:9px;color:var(--muted);margin-top:5px;line-height:1.6;" id="temp-timing-label">Calculating...</div>
+    </div>
+    <div class="temp-filters">
+      <div class="horizon-tog">
+        <button class="htog-btn on" id="htog-d1" onclick="setTempHorizon('d1')">D+1 (tomorrow)</button>
+        <button class="htog-btn" id="htog-d0" onclick="setTempHorizon('d0')">D+0 (today)</button>
+      </div>
+      <button class="sf on" id="tsf-all"   onclick="setTempFilter('all')">All</button>
+      <button class="sf"    id="tsf-A"     onclick="setTempFilter('A')">A only</button>
+      <button class="sf"    id="tsf-high"  onclick="setTempFilter('high')">HIGH</button>
+      <button class="sf"    id="tsf-low"   onclick="setTempFilter('low')">LOW</button>
+      <button class="sf"    id="tsf-agree" onclick="setTempFilter('agree')">Models agree</button>
+      <span id="temp-scan-meta" style="font-size:10px;color:var(--muted);margin-left:auto;"></span>
+    </div>
+    <div style="padding:10px 16px 6px;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);" id="temp-sec-A">A-grade edges</div>
+    <div id="temp-opp-A" class="opp-list"></div>
+    <div style="padding:10px 16px 6px;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);display:none;" id="temp-sec-B">B-grade edges</div>
+    <div id="temp-opp-B" class="opp-list"></div>
+    <div id="temp-city-strip-wrap" style="padding-top:8px;"></div>
+    <div style="padding:10px 16px 6px;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-top:4px;border-top:0.5px solid var(--border);">System status · auto-backtest</div>
+    <div id="temp-status-card" style="padding:0 16px 16px;">
+      <div style="background:var(--paper);border:0.5px solid var(--border);border-radius:8px;padding:12px 14px;">
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:10px;" id="temp-status-grid">
+          <div><div style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Scheduler</div><div style="font-size:13px;font-weight:500;" id="ts-scheduler">—</div></div>
+          <div><div style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Calibrated</div><div style="font-size:13px;font-weight:500;" id="ts-calibrated">—</div></div>
+          <div><div style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Snapshots</div><div style="font-size:13px;font-weight:500;" id="ts-snaps">—</div></div>
+          <div><div style="font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Unsettled</div><div style="font-size:13px;font-weight:500;" id="ts-unsettled">—</div></div>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+          <button onclick="triggerSettle()" style="font-size:10px;padding:5px 12px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;">Run settlement now</button>
+          <button onclick="loadBacktestResults()" style="font-size:10px;padding:5px 12px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;">Load backtest results</button>
+          <span id="ts-settle-msg" style="font-size:10px;color:var(--muted);"></span>
+        </div>
+      </div>
+    </div>
+    <div id="temp-bt-wrap" style="padding:0 16px 20px;display:none;">
+      <div style="font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin-bottom:8px;">Backtest results</div>
+      <div style="background:var(--paper);border:0.5px solid var(--border);border-radius:8px;overflow:hidden;">
+        <div style="overflow-x:auto;"><table id="temp-bt-table" style="width:100%;border-collapse:collapse;font-size:11px;font-family:'DM Mono',monospace;">
+          <thead><tr style="border-bottom:0.5px solid var(--border);background:var(--bg);">
+            <th style="text-align:left;padding:8px 12px;font-weight:500;color:var(--muted);">City</th>
             <th style="text-align:center;padding:8px 8px;font-weight:500;color:var(--muted);">Horizon</th>
             <th style="text-align:center;padding:8px 8px;font-weight:500;color:var(--muted);">Grade</th>
             <th style="text-align:right;padding:8px 8px;font-weight:500;color:var(--muted);">n</th>
@@ -527,37 +461,15 @@ body{max-width:900px;margin:0 auto;}
             <th style="text-align:right;padding:8px 8px;font-weight:500;color:var(--muted);">Avg gap</th>
             <th style="text-align:right;padding:8px 8px;font-weight:500;color:var(--muted);">Edge/σ</th>
             <th style="text-align:right;padding:8px 12px;font-weight:500;color:var(--muted);">Signal</th>
-          </tr>
-        </thead>
-        <tbody id="temp-bt-tbody"></tbody>
-      </table>
+          </tr></thead>
+          <tbody id="temp-bt-tbody"></tbody>
+        </table></div>
+        <div id="temp-bt-foot" style="padding:8px 12px;font-size:10px;color:var(--muted);border-top:0.5px solid var(--border);"></div>
+      </div>
+      <div style="margin-top:10px;font-size:10px;color:var(--muted);line-height:1.7;padding:10px 12px;background:var(--paper);border:0.5px solid var(--border);border-radius:6px;" id="temp-bt-interpretation"></div>
     </div>
-    <div id="temp-bt-foot" style="padding:8px 12px;font-size:10px;color:var(--muted);border-top:0.5px solid var(--border);"></div>
   </div>
-  <div style="margin-top:10px;font-size:10px;color:var(--muted);line-height:1.7;padding:10px 12px;background:var(--paper);border:0.5px solid var(--border);border-radius:6px;" id="temp-bt-interpretation"></div>
-</div>
 
-</div><!-- end p-temp -->
-
-<!-- SCANNER (rain) -->
-<div id="p-scan">
-  <div class="scan-hdr">
-    <div>
-      <div class="scan-title">Opportunity scanner — all rain markets</div>
-      <div class="scan-meta" id="scan-meta">Loading...</div>
-    </div>
-    <button onclick="loadScanner()" style="font-size:10px;padding:5px 12px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;">↻ Refresh</button>
-  </div>
-  <div class="scan-filters">
-    <button class="sf on" id="sf-all" onclick="setFilter('all')">All</button>
-    <button class="sf" id="sf-settled" onclick="setFilter('settled')">Already cleared</button>
-    <button class="sf" id="sf-near" onclick="setFilter('near-certain')">Near certain</button>
-    <button class="sf" id="sf-prob" onclick="setFilter('probabilistic')">Forecast-dependent</button>
-    <button class="sf" id="sf-no" onclick="setFilter('no-value')" style="color:var(--no)">NO value</button>
-  </div>
-  <div id="opp-list" class="opp-list">
-    <div class="scan-loading">Scanning all cities...</div>
-  </div>
 </div>
 
 <!-- DASHBOARD -->
@@ -1053,16 +965,42 @@ function toggleTheme(){
   });
 })();
 function sw(t){
-  ['scan','temp','dash','pos','rules','hist','bt'].forEach(x=>{
+  ['scan','dash','pos','rules','hist','bt'].forEach(x=>{
     const p=document.getElementById('p-'+x)||document.getElementById('s-'+x);
     if(p)p.style.display=x===t?'block':'none';
     const tb=document.getElementById('t-'+x);
     if(tb)tb.className='tab'+(x===t?' active':'');
   });
-  if(t==='scan'&&!scanCache)loadScanner();
-  if(t==='temp'&&!tempScanCache)loadTempScanner();
-  if(t==='temp')loadTempStatus();
+  if(t==='scan'&&!scanCache&&currentScanMode==='rain')loadScanner();
+  if(t==='scan'&&!tempScanCache&&currentScanMode==='temp')loadTempScanner();
+  if(t==='scan'&&currentScanMode==='temp')loadTempStatus();
   if(t==='pos')loadPortfolio();
+}
+
+let currentScanMode = 'rain';
+
+function setScanMode(mode){
+  currentScanMode = mode;
+  const rainPane = document.getElementById('scan-rain-pane');
+  const tempPane = document.getElementById('scan-temp-pane');
+  const btnRain  = document.getElementById('mode-rain');
+  const btnTemp  = document.getElementById('mode-temp');
+  const active   = 'background:var(--ink);color:var(--paper);';
+  const inactive = 'background:var(--bg);color:var(--muted);';
+  if(rainPane) rainPane.style.display = mode==='rain' ? 'block' : 'none';
+  if(tempPane) tempPane.style.display = mode==='temp' ? 'block' : 'none';
+  if(btnRain)  btnRain.style.cssText  = `padding:6px 16px;font-size:10px;letter-spacing:1px;text-transform:uppercase;cursor:pointer;border:none;font-family:inherit;${mode==='rain'?active:inactive}`;
+  if(btnTemp)  btnTemp.style.cssText  = `padding:6px 16px;font-size:10px;letter-spacing:1px;text-transform:uppercase;cursor:pointer;border:none;font-family:inherit;${mode==='temp'?active:inactive}`;
+  if(mode==='temp'){
+    if(!tempScanCache) loadTempScanner();
+    loadTempStatus();
+  }
+  if(mode==='rain' && !scanCache) loadScanner();
+}
+
+function refreshCurrentScan(){
+  if(currentScanMode==='rain'){ scanCache=null; loadScanner(); }
+  else { tempScanCache=null; loadTempScanner(); }
 }
 
 // ── TEMPERATURE SCANNER ────────────────────────────────────────────────────
@@ -1391,13 +1329,26 @@ function renderPortfolio(port,pnl){
     <div class="chart-foot" id="pnl-foot"></div>
   </div>`;
 
-  // Open positions
-  const posHtml=positions.length?`
-    <div class="section-lbl" style="margin-bottom:8px">Open positions</div>
+  // Open positions — rain and temp only, filter sports
+  const weatherPositions = positions.filter(p => {
+    const t = (p.ticker||'').toUpperCase();
+    const title = (p.market_title||'').toLowerCase();
+    const isRain = t.includes('RAIN') || title.includes('rain') || title.includes('precipitation');
+    const isTemp = t.includes('HIGH') || t.includes('LOWT') || t.includes('KXHIGH') || t.includes('KXLOWT')
+                || title.includes('temperature') || title.includes('highest temp') || title.includes('lowest temp');
+    return isRain || isTemp;
+  });
+  const hiddenCount = positions.length - weatherPositions.length;
+
+  const posHtml = weatherPositions.length ? `
+    <div class="section-lbl" style="margin-bottom:8px">Open positions — weather markets${hiddenCount>0?` <span style="font-size:10px;color:var(--muted);font-weight:400">(${hiddenCount} non-weather hidden)</span>`:''}</div>
     <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">
-      ${positions.map(p=>{
+      ${weatherPositions.map(p=>{
         const upnl=p.unrealized_pnl||0;
-        const isRain=p.ticker?.includes('RAIN')||p.market_title?.toLowerCase().includes('rain');
+        const t=(p.ticker||'').toUpperCase();
+        const isRain=t.includes('RAIN')||(p.market_title||'').toLowerCase().includes('rain');
+        const isTemp=t.includes('HIGH')||t.includes('LOWT');
+        const tag=isRain?'Rain':isTemp?'Temp':'';
         return `<div class="opp ${upnl>=0?'settled':'probabilistic'}" style="cursor:default">
           <div class="opp-inner">
             <div class="opp-left">
@@ -1406,12 +1357,12 @@ function renderPortfolio(port,pnl){
             </div>
             <div class="opp-right">
               <div class="opp-net-gap" style="font-size:18px;color:${upnl>=0?'var(--yes)':'var(--no)'}">${upnl>=0?'+':''}$${upnl.toFixed(2)}</div>
-              <div class="opp-meta-right">${isRain?'🌧 Rain market':''}</div>
+              <div class="opp-meta-right">${tag?`<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:var(--rain-lt);color:var(--rain)">${tag}</span>`:''}</div>
             </div>
           </div>
         </div>`;
       }).join('')}
-    </div>`:'<div class="scan-empty" style="padding:16px">No open positions</div>';
+    </div>` : `<div class="scan-empty" style="padding:16px">No open weather positions${hiddenCount>0?` · ${hiddenCount} non-weather positions hidden`:''}</div>`;
 
   wrap.innerHTML=balHtml+pnlHtml+posHtml;
   drawPnlChart(trades, pnlTimeframe);

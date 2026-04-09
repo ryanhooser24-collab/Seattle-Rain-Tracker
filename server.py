@@ -491,16 +491,36 @@ def fetch_temp_kalshi_markets(city_key, market_type="high"):
             lo_temp = hi_temp = None
             bracket_label = title
 
-            # Range bracket: "54° to 55°F" or "54-55°F"
-            rng = re.search(r"(\d+\.?\d*)\s*[°to\-–]+\s*(\d+\.?\d*)\s*°?F", title, re.IGNORECASE)
-            if rng:
-                lo_temp = float(rng.group(1))
-                hi_temp = float(rng.group(2))
-                bracket_label = f"{int(lo_temp)}–{int(hi_temp)}°F"
-            else:
-                # Edge bracket: "Above X" or "Below X" or "> X" or "< X"
-                above = re.search(r"(?:above|>)\s*(\d+\.?\d*)", title, re.IGNORECASE)
-                below = re.search(r"(?:below|<)\s*(\d+\.?\d*)", title, re.IGNORECASE)
+            # Try floor_strike / cap_strike first — most reliable source
+            # Kalshi stores bracket bounds as numeric fields
+            fs_floor = m.get("floor_strike")
+            fs_cap   = m.get("cap_strike")
+            if fs_floor is not None and fs_cap is not None:
+                try:
+                    lo_temp = float(fs_floor)
+                    hi_temp = float(fs_cap)
+                    bracket_label = f"{int(lo_temp)}–{int(hi_temp)}°F"
+                except Exception:
+                    pass
+
+            # Fall back to parsing title text
+            if lo_temp is None and hi_temp is None:
+                # Handles: "85-86°", "85–86°F", "85 to 86°F", "85°F to 86°F"
+                rng = re.search(
+                    r"(\d+\.?\d*)\s*(?:°F?)?\s*[-–to]+\s*(\d+\.?\d*)\s*°?F?",
+                    title, re.IGNORECASE)
+                if rng:
+                    lo_temp = float(rng.group(1))
+                    hi_temp = float(rng.group(2))
+                    # Sanity: lo < hi and both in reasonable temp range
+                    if lo_temp < hi_temp and 0 <= lo_temp <= 130:
+                        bracket_label = f"{int(lo_temp)}–{int(hi_temp)}°F"
+                    else:
+                        lo_temp = hi_temp = None
+
+            if lo_temp is None and hi_temp is None:
+                above = re.search(r"(?:above|>|or above)\s*(\d+\.?\d*)", title, re.IGNORECASE)
+                below = re.search(r"(?:below|<|or below)\s*(\d+\.?\d*)", title, re.IGNORECASE)
                 if above:
                     lo_temp = float(above.group(1))
                     hi_temp = None
@@ -509,14 +529,15 @@ def fetch_temp_kalshi_markets(city_key, market_type="high"):
                     lo_temp = None
                     hi_temp = float(below.group(1))
                     bracket_label = f"<{int(hi_temp)}°F"
-                # Try functional_strike as fallback
-                if lo_temp is None and hi_temp is None:
-                    fs = m.get("functional_strike", "") or ""
-                    fs_lo = re.search(r"(\d+\.?\d*)\s*(?:to|-)\s*(\d+\.?\d*)", str(fs))
-                    if fs_lo:
-                        lo_temp = float(fs_lo.group(1))
-                        hi_temp = float(fs_lo.group(2))
-                        bracket_label = f"{int(lo_temp)}–{int(hi_temp)}°F"
+
+            # Last resort: functional_strike field
+            if lo_temp is None and hi_temp is None:
+                fs = m.get("functional_strike", "") or ""
+                fs_lo = re.search(r"(\d+\.?\d*)\s*(?:to|-)\s*(\d+\.?\d*)", str(fs))
+                if fs_lo:
+                    lo_temp = float(fs_lo.group(1))
+                    hi_temp = float(fs_lo.group(2))
+                    bracket_label = f"{int(lo_temp)}–{int(hi_temp)}°F"
 
             yes_ask   = float(m.get("yes_ask_dollars", 0) or 0)
             yes_bid   = float(m.get("yes_bid_dollars", 0) or 0)
@@ -574,11 +595,36 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
     def normcdf(x):
         return 0.5 * (1 + erf(x / sqrt(2)))
     def bracket_prob(lo, hi, mu, sigma):
-        """P(lo ≤ X ≤ hi) for X ~ N(mu, sigma)."""
+        """
+        P(settlement falls in bracket) given NWS CLI always reports whole integers.
+
+        Since settlement = round(actual_temp) to nearest integer, the correct
+        probability mass for bracket [lo, hi] is:
+            P(lo - 0.5 < X < hi + 0.5) for a N(mu, sigma) distribution.
+
+        Examples with mu=79.3, sigma=1.0:
+          bracket 85-86: P(84.5 < X < 86.5) ≈ 0.0%  ← correct (6 sigma away)
+          bracket 79-80: P(78.5 < X < 80.5) ≈ 68%   ← correct (spans 1 sigma each side)
+          edge ">90":    P(X > 89.5)                  ← correct for "90 or above"
+          edge "<78":    P(X < 78.5)                  ← correct for "77 or below"
+
+        Without the ±0.5 adjustment, bracket 85-86 would compute P(85 < X < 86)
+        which is ~38% when mu=85.5 — the same as any 1-sigma bracket — even though
+        the settlement integer 85 and 86 are both inside this range.
+        """
         if sigma <= 0:
-            return 1.0 if (lo is None or mu >= lo) and (hi is None or mu < hi) else 0.0
-        p_hi = normcdf((hi - mu) / sigma) if hi is not None else 1.0
-        p_lo = normcdf((lo - mu) / sigma) if lo is not None else 0.0
+            # Degenerate: certain outcome
+            mu_int = round(mu)
+            if lo is None and hi is None:  return 1.0
+            if lo is None:  return 1.0 if mu_int <= round(hi) else 0.0
+            if hi is None:  return 1.0 if mu_int >= round(lo) else 0.0
+            return 1.0 if round(lo) <= mu_int <= round(hi) else 0.0
+        # Continuous approximation with half-integer shift
+        # lo/hi represent the included integers at the bracket edges
+        upper = hi + 0.5 if hi is not None else float('inf')
+        lower = lo - 0.5 if lo is not None else float('-inf')
+        p_hi = normcdf((upper - mu) / sigma) if hi is not None else 1.0
+        p_lo = normcdf((lower - mu) / sigma) if lo is not None else 0.0
         return round(p_hi - p_lo, 4)
 
     mu    = forecast.get("best_high") if market_type == "high" else forecast.get("best_low")
@@ -641,6 +687,16 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
                     continue
             except Exception:
                 pass
+
+        # ── Guard: skip if bracket bounds couldn't be parsed ────────────────
+        # lo=None AND hi=None means the title regex failed entirely.
+        # bracket_prob(None, None, mu, σ) = 1.0 — a fake 100% — so we must skip.
+        if lo is None and hi is None:
+            m["model_prob"] = None; m["gap_c"] = 0; m["net_gap_c"] = 0
+            m["grade"] = "skip"; m["edge_ratio"] = 0
+            m["skip_reason"] = "unparseable_bracket"
+            analyzed.append(m)
+            continue
 
         prob     = bracket_prob(lo, hi, mu, sigma)
         gap_c    = round((prob - ask) * 100)
@@ -1066,25 +1122,29 @@ def run_auto_settlement(force=False):
                 attempted += 1
 
                 # Mark HIGH brackets
+                # NWS CLI reports whole integers. Bracket "85–86" wins on 85 OR 86.
+                # Correct condition: lo_temp <= actual <= hi_temp (both inclusive).
+                # Edge brackets: lo_temp IS NULL means "below hi_temp" (wins if actual <= hi)
+                #                hi_temp IS NULL means "above lo_temp" (wins if actual >= lo)
                 cur.execute("""
                     UPDATE temp_snapshots
                     SET settled_temp    = %s,
                         settled_correct = (
                             (lo_temp IS NULL OR %s >= lo_temp) AND
-                            (hi_temp IS NULL OR %s < hi_temp)
+                            (hi_temp IS NULL OR %s <= hi_temp)
                         )
                     WHERE city = %s AND target_date = %s
                       AND market_type = 'high' AND settled_temp IS NULL
                 """, (high_f, high_f, high_f, city, yesterday))
                 settled += cur.rowcount
 
-                # Mark LOW brackets
+                # Mark LOW brackets (same inclusive logic)
                 cur.execute("""
                     UPDATE temp_snapshots
                     SET settled_temp    = %s,
                         settled_correct = (
                             (lo_temp IS NULL OR %s >= lo_temp) AND
-                            (hi_temp IS NULL OR %s < hi_temp)
+                            (hi_temp IS NULL OR %s <= hi_temp)
                         )
                     WHERE city = %s AND target_date = %s
                       AND market_type = 'low' AND settled_temp IS NULL
@@ -3864,7 +3924,7 @@ class Handler(BaseHTTPRequestHandler):
                                         SET settled_temp = %s,
                                             settled_correct = (
                                                 (lo_temp IS NULL OR %s >= lo_temp) AND
-                                                (hi_temp IS NULL OR %s < hi_temp))
+                                                (hi_temp IS NULL OR %s <= hi_temp))
                                         WHERE city=%s AND target_date=%s
                                           AND market_type=%s AND settled_temp IS NULL
                                     """, (actual, actual, actual, res["city"], override, mtype))
@@ -3974,7 +4034,7 @@ class Handler(BaseHTTPRequestHandler):
                                     SET settled_temp    = %s,
                                         settled_correct = (
                                             (lo_temp IS NULL OR %s >= lo_temp) AND
-                                            (hi_temp IS NULL OR %s < hi_temp)
+                                            (hi_temp IS NULL OR %s <= hi_temp)
                                         )
                                     WHERE city = %s AND target_date = %s AND market_type = %s
                                       AND settled_temp IS NULL
