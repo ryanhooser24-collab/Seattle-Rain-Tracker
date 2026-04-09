@@ -1119,7 +1119,11 @@ def maybe_auto_calibrate():
         import concurrent.futures as _cf
 
         def cal_one(city_key):
-            # Inline a fast version — identical logic to /temp/calibrate endpoint
+            """
+            Calibrate one city using bulk date-range queries — one API call per
+            model rather than one per day.  Avoids closure/loop-variable bugs
+            and is ~90x faster than per-day fetching.
+            """
             cfg = TEMP_CITIES[city_key]
             try:
                 import pytz as _pytz
@@ -1127,51 +1131,64 @@ def maybe_auto_calibrate():
                 tz_name  = cfg["tz"]
                 local_tz = _pytz.timezone(tz_name)
                 now      = dt_cls.utcnow().replace(tzinfo=_pytz.utc).astimezone(local_tz)
+
+                # Date range: 90 days ago → 2 days ago (yesterday's CLI may not be posted yet)
+                end_dt   = now - timedelta(days=2)
+                start_dt = now - timedelta(days=91)
+                start_s  = start_dt.strftime("%Y-%m-%d")
+                end_s    = end_dt.strftime("%Y-%m-%d")
+
+                def _fetch_bulk(model_str, use_archive=False):
+                    """Fetch daily max temps for the full date range in one call."""
+                    base = ("https://archive-api.open-meteo.com/v1/archive"
+                            if use_archive else
+                            "https://api.open-meteo.com/v1/forecast")
+                    p = {
+                        "latitude":   cfg["lat"],
+                        "longitude":  cfg["lon"],
+                        "daily":      "temperature_2m_max",
+                        "timezone":   tz_name,
+                        "start_date": start_s,
+                        "end_date":   end_s,
+                    }
+                    if not use_archive:
+                        p["models"]    = model_str
+                        p["past_days"] = 92
+                    resp = requests.get(base, params=p, timeout=20)
+                    resp.raise_for_status()
+                    d    = resp.json()
+                    dates = d.get("daily", {}).get("time", [])
+                    vals  = d.get("daily", {}).get("temperature_2m_max", [])
+                    # Return date → °F dict, skipping None
+                    result = {}
+                    for date_str, val_c in zip(dates, vals):
+                        if val_c is not None:
+                            result[date_str] = round(val_c * 9/5 + 32, 1)
+                    return result
+
+                # Fetch all three in parallel — no loop, no closures over loop vars
+                ex2 = _cf.ThreadPoolExecutor(max_workers=3)
+                try:
+                    fg = ex2.submit(_fetch_bulk, "gfs_seamless",  False)
+                    fe = ex2.submit(_fetch_bulk, "ecmwf_ifs",     False)
+                    fa = ex2.submit(_fetch_bulk, None,            True)   # archive = actual
+                    gfs_map    = fg.result(timeout=30)
+                    ecmwf_map  = fe.result(timeout=30)
+                    actual_map = fa.result(timeout=30)
+                finally:
+                    ex2.shutdown(wait=False)
+
                 errs_gfs = []; errs_ecmwf = []
-
-                for offset in range(2, 92):
-                    target   = (now - timedelta(days=offset-1)).strftime("%Y-%m-%d")
-                    def _hist(model_str):
-                        p = {"latitude": cfg["lat"], "longitude": cfg["lon"],
-                             "daily": "temperature_2m_max", "timezone": tz_name,
-                             "start_date": target, "end_date": target,
-                             "models": model_str, "past_days": offset+2}
-                        resp = requests.get("https://api.open-meteo.com/v1/forecast",
-                                            params=p, timeout=8)
-                        resp.raise_for_status()
-                        val = (resp.json().get("daily",{}).get("temperature_2m_max") or [None])[0]
-                        return round(val*9/5+32,1) if val is not None else None
-
-                    def _actual():
-                        p = {"latitude": cfg["lat"], "longitude": cfg["lon"],
-                             "daily": "temperature_2m_max", "timezone": tz_name,
-                             "start_date": target, "end_date": target}
-                        resp = requests.get("https://archive-api.open-meteo.com/v1/archive",
-                                            params=p, timeout=8)
-                        resp.raise_for_status()
-                        val = (resp.json().get("daily",{}).get("temperature_2m_max") or [None])[0]
-                        return round(val*9/5+32,1) if val is not None else None
-
-                    try:
-                        ex2 = _cf.ThreadPoolExecutor(max_workers=3)
-                        try:
-                            fg = ex2.submit(_hist, "gfs_seamless")
-                            fe = ex2.submit(_hist, "ecmwf_ifs")
-                            fa = ex2.submit(_actual)
-                            gv = fg.result(timeout=10)
-                            ev = fe.result(timeout=10)
-                            av = fa.result(timeout=10)
-                        finally:
-                            ex2.shutdown(wait=False)
-                        if gv and av: errs_gfs.append(gv - av)
-                        if ev and av: errs_ecmwf.append(ev - av)
-                    except Exception:
-                        continue
+                for date_s, actual in actual_map.items():
+                    if date_s in gfs_map:
+                        errs_gfs.append(gfs_map[date_s] - actual)
+                    if date_s in ecmwf_map:
+                        errs_ecmwf.append(ecmwf_map[date_s] - actual)
 
                 def _stats(e):
                     if not e: return 0.0, cfg["σ_d1"]
                     n = len(e)
-                    return round(sum(e)/n,2), round(sqrt(sum(x**2 for x in e)/n),2)
+                    return round(sum(e)/n, 2), round(sqrt(sum(x**2 for x in e)/n), 2)
 
                 gb, gr = _stats(errs_gfs)
                 eb, er = _stats(errs_ecmwf)
@@ -1179,12 +1196,17 @@ def maybe_auto_calibrate():
                 σ_d1 = round(sum(rmse_vals)/len(rmse_vals), 2) if rmse_vals else cfg["σ_d1"]
 
                 _TEMP_BIAS_CACHE[city_key] = {
-                    "gfs_bias": gb, "ecmwf_bias": eb,
-                    "σ_d1": σ_d1, "σ_d0": round(σ_d1*0.70, 2),
-                    "n_days": len(errs_gfs), "calibrated_at": _t.time()
+                    "gfs_bias":   gb,
+                    "ecmwf_bias": eb,
+                    "σ_d1":       σ_d1,
+                    "σ_d0":       round(σ_d1 * 0.70, 2),
+                    "n_days":     len(errs_gfs),
+                    "calibrated_at": _t.time(),
                 }
+                print(f"    ✓ {city_key}: gfs_bias={gb:+.1f}°F ecmwf_bias={eb:+.1f}°F σ_d1={σ_d1}°F n={len(errs_gfs)}")
                 return city_key, True
             except Exception as e:
+                print(f"    ✗ {city_key} calibration failed: {e}")
                 return city_key, False
 
         ex = _cf.ThreadPoolExecutor(max_workers=4)
@@ -3485,86 +3507,64 @@ class Handler(BaseHTTPRequestHandler):
             days_back = int(qs.get("days", ["90"])[0])
 
             def calibrate_temp_city(city_key):
+                """
+                Bulk-fetch 90 days of GFS, ECMWF, and archive actuals in
+                3 API calls total (not 270).  Computes warm bias and RMSE.
+                """
                 cfg = TEMP_CITIES[city_key]
                 try:
                     import pytz
                     from datetime import datetime as dt_cls, timedelta
+                    from math import sqrt
                     tz_name  = cfg["tz"]
                     local_tz = pytz.timezone(tz_name)
                     now      = dt_cls.utcnow().replace(tzinfo=pytz.utc).astimezone(local_tz)
 
-                    errors_high_gfs = []
+                    end_dt   = now - timedelta(days=2)
+                    start_dt = now - timedelta(days=days_back + 1)
+                    start_s  = start_dt.strftime("%Y-%m-%d")
+                    end_s    = end_dt.strftime("%Y-%m-%d")
+
+                    def _bulk(model_str, use_archive=False):
+                        base = ("https://archive-api.open-meteo.com/v1/archive"
+                                if use_archive else
+                                "https://api.open-meteo.com/v1/forecast")
+                        p = {"latitude": cfg["lat"], "longitude": cfg["lon"],
+                             "daily": "temperature_2m_max", "timezone": tz_name,
+                             "start_date": start_s, "end_date": end_s}
+                        if not use_archive:
+                            p["models"]    = model_str
+                            p["past_days"] = days_back + 3
+                        r2 = requests.get(base, params=p, timeout=20)
+                        r2.raise_for_status()
+                        d2 = r2.json()
+                        dates = d2.get("daily", {}).get("time", [])
+                        vals  = d2.get("daily", {}).get("temperature_2m_max", [])
+                        return {ds: round(v*9/5+32, 1) for ds, v in zip(dates, vals)
+                                if v is not None}
+
+                    import concurrent.futures as _cf2
+                    ex2 = _cf2.ThreadPoolExecutor(max_workers=3)
+                    try:
+                        fg = ex2.submit(_bulk, "gfs_seamless",  False)
+                        fe = ex2.submit(_bulk, "ecmwf_ifs",     False)
+                        fa = ex2.submit(_bulk, None,            True)
+                        gfs_map    = fg.result(timeout=30)
+                        ecmwf_map  = fe.result(timeout=30)
+                        actual_map = fa.result(timeout=30)
+                    finally:
+                        ex2.shutdown(wait=False)
+
+                    errors_high_gfs   = []
                     errors_high_ecmwf = []
-                    actuals_fetched = 0
-
-                    for day_offset in range(2, days_back + 2):
-                        target_date  = (now - timedelta(days=day_offset - 1)).strftime("%Y-%m-%d")
-                        forecast_date = (now - timedelta(days=day_offset)).strftime("%Y-%m-%d")
-
-                        # Fetch historical GFS and ECMWF D+1 forecast for that date
-                        def get_hist(model_str, date_str, target):
-                            params = {
-                                "latitude":  cfg["lat"],
-                                "longitude": cfg["lon"],
-                                "daily":     "temperature_2m_max",
-                                "timezone":  tz_name,
-                                "start_date": target,
-                                "end_date":   target,
-                                "models":     model_str,
-                                "past_days":  day_offset + 2,
-                            }
-                            r2 = requests.get("https://api.open-meteo.com/v1/forecast",
-                                              params=params, timeout=8)
-                            r2.raise_for_status()
-                            d2 = r2.json()
-                            hi_c = (d2.get("daily", {}).get("temperature_2m_max") or [None])[0]
-                            if hi_c is None:
-                                return None
-                            return round(hi_c * 9/5 + 32, 1)
-
-                        # Fetch actual high from Open-Meteo historical weather API
-                        def get_actual(target):
-                            params = {
-                                "latitude":  cfg["lat"],
-                                "longitude": cfg["lon"],
-                                "daily":     "temperature_2m_max",
-                                "timezone":  tz_name,
-                                "start_date": target,
-                                "end_date":   target,
-                            }
-                            r3 = requests.get("https://archive-api.open-meteo.com/v1/archive",
-                                              params=params, timeout=8)
-                            r3.raise_for_status()
-                            d3 = r3.json()
-                            hi_c = (d3.get("daily", {}).get("temperature_2m_max") or [None])[0]
-                            if hi_c is None:
-                                return None
-                            return round(hi_c * 9/5 + 32, 1)
-
-                        try:
-                            import concurrent.futures as _cf2
-                            ex2 = _cf2.ThreadPoolExecutor(max_workers=3)
-                            try:
-                                fg = ex2.submit(get_hist, "gfs_seamless", forecast_date, target_date)
-                                fe = ex2.submit(get_hist, "ecmwf_ifs",    forecast_date, target_date)
-                                fa = ex2.submit(get_actual, target_date)
-                                gfs_hi   = fg.result(timeout=10)
-                                ecmwf_hi = fe.result(timeout=10)
-                                actual   = fa.result(timeout=10)
-                            finally:
-                                ex2.shutdown(wait=False)
-
-                            if gfs_hi is not None and actual is not None:
-                                errors_high_gfs.append(gfs_hi - actual)
-                            if ecmwf_hi is not None and actual is not None:
-                                errors_high_ecmwf.append(ecmwf_hi - actual)
-                            if actual is not None:
-                                actuals_fetched += 1
-                        except Exception:
-                            continue
+                    for ds, actual in actual_map.items():
+                        if ds in gfs_map:
+                            errors_high_gfs.append(gfs_map[ds] - actual)
+                        if ds in ecmwf_map:
+                            errors_high_ecmwf.append(ecmwf_map[ds] - actual)
 
                     if not errors_high_gfs and not errors_high_ecmwf:
-                        return {"city": city_key, "ok": False, "error": "No data returned"}
+                        return {"city": city_key, "ok": False, "error": "No matching dates in response"}
 
                     def stats(errs):
                         if not errs: return None, None, None
@@ -3574,13 +3574,11 @@ class Handler(BaseHTTPRequestHandler):
                         mae  = round(sum(abs(e) for e in errs) / n, 2)
                         return bias, rmse, mae
 
-                    gfs_bias, gfs_rmse, gfs_mae     = stats(errors_high_gfs)
+                    gfs_bias, gfs_rmse, gfs_mae       = stats(errors_high_gfs)
                     ecmwf_bias, ecmwf_rmse, ecmwf_mae = stats(errors_high_ecmwf)
 
-                    # σ_d1 = average of GFS and ECMWF RMSE (both are D+1 here)
                     rmse_vals = [v for v in [gfs_rmse, ecmwf_rmse] if v is not None]
                     σ_d1 = round(sum(rmse_vals) / len(rmse_vals), 2) if rmse_vals else cfg["σ_d1"]
-                    # σ_d0 estimated as 70% of σ_d1 (HRRR tightens same-day)
                     σ_d0 = round(σ_d1 * 0.70, 2)
 
                     _TEMP_BIAS_CACHE[city_key] = {
@@ -3588,14 +3586,14 @@ class Handler(BaseHTTPRequestHandler):
                         "ecmwf_bias": ecmwf_bias or 0.0,
                         "σ_d1":       σ_d1,
                         "σ_d0":       σ_d0,
-                        "n_days":     actuals_fetched,
+                        "n_days":     len(errors_high_gfs),
                         "calibrated_at": _t.time(),
                     }
 
                     return {
                         "city":        city_key,
                         "ok":          True,
-                        "n_days":      actuals_fetched,
+                        "n_days":      len(errors_high_gfs),
                         "gfs_bias":    gfs_bias,   "gfs_rmse":   gfs_rmse,
                         "ecmwf_bias":  ecmwf_bias, "ecmwf_rmse": ecmwf_rmse,
                         "σ_d1":        σ_d1,       "σ_d0":       σ_d0,
@@ -3743,7 +3741,13 @@ class Handler(BaseHTTPRequestHandler):
                 "total_snapshots":  total_snaps,
                 "last_calibrate_date": _LAST_CALIBRATE_DATE,
                 "settle_poll_interval_min": SETTLE_POLL_INTERVAL // 60,
-                "settle_window_et": f"{SETTLE_WINDOW_START}AM–{SETTLE_WINDOW_END-12}PM",
+                "settle_window_et": f"{SETTLE_WINDOW_START}AM\u2013{SETTLE_WINDOW_END-12}PM",
+                "db_connected":     bool(DATABASE_URL and PSYCOPG2_AVAILABLE),
+                "db_action_needed": not bool(DATABASE_URL),
+                "db_setup_note":    (
+                    "Add Postgres: Railway project \u2192 + New \u2192 Database \u2192 PostgreSQL. "
+                    "Railway auto-injects DATABASE_URL. Redeploy after adding."
+                ) if not DATABASE_URL else None,
             })
 
         elif path == "/temp/settle":
