@@ -511,7 +511,6 @@ body{max-width:900px;margin:0 auto;}
       <button class="sf on" id="tsf-all"   onclick="setTempFilter('all')">All</button>
       <button class="sf"    id="tsf-A"     onclick="setTempFilter('A')">A only</button>
       <button class="sf"    id="tsf-high"  onclick="setTempFilter('high')">HIGH</button>
-      <button class="sf"    id="tsf-low"   onclick="setTempFilter('low')">LOW</button>
       <button class="sf"    id="tsf-agree" onclick="setTempFilter('agree')">Models agree</button>
       <span id="temp-scan-meta" style="font-size:10px;color:var(--muted);margin-left:auto;"></span>
     </div>
@@ -1207,7 +1206,6 @@ function renderTempScanner(data){
   const filtered=allBkts.filter(b=>{
     if(tempFilter==='A')    return b.grade==='A';
     if(tempFilter==='high') return b.market_type==='high';
-    if(tempFilter==='low')  return b.market_type==='low';
     if(tempFilter==='agree')return(b.spread_models||0)<1.5;
     return true;
   });

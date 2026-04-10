@@ -794,26 +794,26 @@ def scan_temp_city(city_key, horizon="d1"):
 
     import concurrent.futures as _cf
     try:
-        ex = _cf.ThreadPoolExecutor(max_workers=3)
+        ex = _cf.ThreadPoolExecutor(max_workers=2)
         try:
             f_fc   = ex.submit(fetch_temp_forecast, city_key, horizon)
             f_high = ex.submit(fetch_temp_kalshi_markets, city_key, "high")
-            f_low  = ex.submit(fetch_temp_kalshi_markets, city_key, "low")
+            # LOW markets suppressed — overnight low timing is ambiguous until
+            # we build hourly-based low forecast. PIN: add LOW back when ready.
             try: fc   = f_fc.result(timeout=12)
             except Exception as e: fc = {"ok": False, "error": str(e)}
             try: high = f_high.result(timeout=8)
             except Exception as e: high = {"ok": False, "markets": [], "error": str(e)}
-            try: low  = f_low.result(timeout=8)
-            except Exception as e: low  = {"ok": False, "markets": [], "error": str(e)}
+            low = {"ok": False, "markets": [], "suppressed": True}
         finally:
             ex.shutdown(wait=False)
 
         if not fc.get("ok"):
             return {"ok": False, "city": city_key, "label": cfg["label"], "error": fc.get("error", "forecast failed")}
 
-        # Score brackets
+        # Score brackets — HIGH only. LOW suppressed (PIN: add back with hourly low forecast)
         high_markets = analyze_temp_brackets(high.get("markets", []), fc, "high") if high.get("ok") else []
-        low_markets  = analyze_temp_brackets(low.get("markets",  []), fc, "low")  if low.get("ok")  else []
+        low_markets  = []
 
         # Drop settled/expired/past-date brackets from the response entirely
         high_markets = [m for m in high_markets if m.get("grade") != "skip" or m.get("skip_reason") not in ("settled","expired","past_date")]
@@ -826,16 +826,17 @@ def scan_temp_city(city_key, horizon="d1"):
                      "B" if any(m["grade"] == "B" for m in all_mkts) else "none"
 
         result = {
-            "ok":           True,
-            "city":         city_key,
-            "label":        cfg["label"],
-            "nws_station":  cfg["nws_station"],
-            "horizon":      horizon,
-            "forecast":     fc,
-            "high_markets": high_markets,
-            "low_markets":  low_markets,
-            "best_edge_c":  best_edge,
-            "best_grade":   best_grade,
+            "ok":             True,
+            "city":           city_key,
+            "label":          cfg["label"],
+            "nws_station":    cfg["nws_station"],
+            "horizon":        horizon,
+            "forecast":       fc,
+            "high_markets":   high_markets,
+            "low_markets":    low_markets,
+            "low_suppressed": horizon == "d1",
+            "best_edge_c":    best_edge,
+            "best_grade":     best_grade,
             "actionable_count": len(all_mkts),
         }
 
@@ -3624,12 +3625,13 @@ class Handler(BaseHTTPRequestHandler):
 
                 total_actionable = sum(r.get("actionable_count", 0) for r in results)
                 self.send_json({
-                    "ok":           True,
-                    "horizon":      horizon,
-                    "cities":       results,
-                    "city_count":   len(results),
-                    "total_actionable": total_actionable,
-                    "timestamp":    datetime.now().isoformat(),
+                    "ok":                True,
+                    "horizon":           horizon,
+                    "cities":            results,
+                    "city_count":        len(results),
+                    "total_actionable":  total_actionable,
+                    "low_suppressed_d1": horizon == "d1",
+                    "timestamp":         datetime.now().isoformat(),
                 })
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
