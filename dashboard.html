@@ -1491,7 +1491,9 @@ function renderPortfolio(port,pnl){
           </div>
         </div>`;
       }).join('')}
-    </div>` : `<div class="scan-empty" style="padding:16px">No open weather positions${hiddenCount>0?` · ${hiddenCount} non-weather positions hidden`:''}</div>`;
+    </div>` : `<div class="scan-empty" style="padding:16px;line-height:1.8;">
+      No open weather positions.${hiddenCount>0?`<br><span style="font-size:10px;color:var(--muted)">${hiddenCount} non-weather position${hiddenCount>1?'s':''} hidden (sports, crypto, etc.) — open Kalshi to view.</span>`:''}
+    </div>`;
 
   wrap.innerHTML=balHtml+pnlHtml+posHtml;
   drawPnlChart(trades, pnlTimeframe);

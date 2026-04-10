@@ -4192,19 +4192,23 @@ class Handler(BaseHTTPRequestHandler):
                         r_pnl   = float(p.get("realized_pnl_dollars", 0) or 0)
                         mkt_exp = float(p.get("market_exposure_dollars", 0) or 0)
                         fees    = float(p.get("fees_paid_dollars", 0) or 0)
-                        avg_c   = round((cost / max(qty, 1)) * 100, 1)  # dollars → cents
+                        ticker  = p.get("ticker", "")
+                        # avg price in cents: cost (dollars) / contracts * 100
+                        avg_c   = round((cost / max(abs(qty), 1)) * 100, 1) if qty != 0 else 0
+                        # unrealized: market_exposure is current value, cost is what was paid
+                        unrealized = round(mkt_exp - cost, 2)
                         positions.append({
-                            "ticker":        p.get("ticker", ""),
-                            "market_title":  p.get("market_title", "") or p.get("ticker", ""),
-                            "yes_contracts": qty,
-                            "avg_yes_price_c": avg_c,     # in cents for display
-                            "avg_yes_price": round(cost / max(qty, 1), 4),  # in dollars
-                            "market_value":  round(mkt_exp, 2),
-                            "realized_pnl":  round(r_pnl, 2),
-                            "unrealized_pnl": 0.0,
-                            "total_cost":    round(cost, 2),
-                            "payout_if_right": round(qty * 1.0, 2),  # $1 per contract
-                            "fees":          round(fees, 2),
+                            "ticker":          ticker,
+                            "market_title":    p.get("market_title", "") or ticker,
+                            "yes_contracts":   qty,
+                            "avg_yes_price_c": avg_c,
+                            "avg_yes_price":   round(cost / max(abs(qty), 1), 4) if qty != 0 else 0,
+                            "market_value":    round(mkt_exp, 2),
+                            "realized_pnl":    round(r_pnl, 2),
+                            "unrealized_pnl":  unrealized,
+                            "total_cost":      round(cost, 2),
+                            "payout_if_right": round(abs(qty) * 1.0, 2),
+                            "fees":            round(fees, 2),
                         })
 
                     self.send_json({
