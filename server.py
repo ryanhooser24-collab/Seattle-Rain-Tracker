@@ -783,20 +783,35 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
         # Σ-adjusted edge ratio: signal strength independent of σ level
         edge_ratio = round(gap_c / sigma, 3) if sigma > 0 else 0.0
 
-        # Model spread confidence penalty
-        spread_penalty = spread_hi > 2.0  # cross-model spread > 2°F = less confidence
-
         # Is this bracket below the model center? (tail YES bet — longshot)
-        # e.g. model says 77°F but bracket is <76°F — betting against the most likely outcome
-        bracket_center = ((lo or (hi - 2)) + (hi or (lo + 2))) / 2 if (lo is not None or hi is not None) else mu
         is_tail_bet = (hi is not None and hi <= mu) or (lo is None and hi is not None and hi < mu)
 
-        # Grade: based on edge_ratio threshold (not flat cents)
-        # prob < 0.20 → skip (too much variance even with large edge)
-        # tail bet with prob < 0.35 → skip
-        # A: edge_ratio ≥ 0.12, good liquidity, prob ≥ 0.35
-        # B: edge_ratio ≥ 0.07, ok liquidity
-        # C: edge_ratio ≥ 0.04
+        # ── Structural quality checks ─────────────────────────────────────────
+        # 1. Does any individual model point inside the bracket?
+        #    If no model falls within [lo, hi], the probability comes entirely
+        #    from distribution tails — the models agree the bracket is unlikely.
+        #    Get individual model values from forecast dict.
+        bracket_width = (hi - lo) if (hi is not None and lo is not None) else 99
+        mu_gfs   = forecast.get("gfs_high")   if market_type == "high" else forecast.get("gfs_low")
+        mu_ecmwf = forecast.get("ecmwf_high") if market_type == "high" else forecast.get("ecmwf_low")
+        mu_blend = forecast.get("blend_high") if market_type == "high" else forecast.get("blend_low")
+
+        def _inside(v):
+            if v is None: return False
+            lo_ok = lo is None or v >= lo - 0.5
+            hi_ok = hi is None or v <= hi + 0.5
+            return lo_ok and hi_ok
+
+        any_model_inside = _inside(mu_gfs) or _inside(mu_ecmwf) or _inside(mu_blend)
+
+        # 2. Model spread vs bracket width
+        #    When spread ≥ bracket width, models disagree about which bracket wins
+        #    — the "edge" is really betting on which model is right.
+        raw_spread = spread_hi if spread_hi else 0
+        spread_exceeds_bracket = (raw_spread > 0 and bracket_width < 99 and
+                                  raw_spread >= bracket_width * 0.75)
+
+        # Grade: base rules first, then apply structural penalties
         if net_gap_c <= 0 or liq_grade == "D":
             grade = "skip"
         elif prob < 0.20:
@@ -812,21 +827,32 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
         else:
             grade = "skip"
 
+        # Apply structural penalties after base grade
+        if grade in ("A", "B", "C"):
+            # No model points at the bracket → cap at B
+            if not any_model_inside and grade == "A":
+                grade = "B"
+            # Spread ≥ 75% of bracket width → downgrade one level
+            if spread_exceeds_bracket:
+                grade = {"A": "B", "B": "C", "C": "skip"}.get(grade, grade)
+
         m.update({
-            "model_prob":   prob,
-            "mu":           mu,
-            "sigma":        sigma,
-            "gap_c":        gap_c,
-            "net_gap_c":    net_gap_c,
-            "spread_c":     spr,
-            "kelly_frac":   kelly_h,
-            "kelly_size":   kelly_sz,
-            "edge_ratio":   edge_ratio,
-            "liq_grade":    liq_grade,
-            "liq_pts":      liq_pts,
-            "is_tail_bet":  is_tail_bet,
-            "grade":        grade,
-            "actionable":   grade in ("A", "B"),
+            "model_prob":        prob,
+            "mu":                mu,
+            "sigma":             sigma,
+            "gap_c":             gap_c,
+            "net_gap_c":         net_gap_c,
+            "spread_c":          spr,
+            "kelly_frac":        kelly_h,
+            "kelly_size":        kelly_sz,
+            "edge_ratio":        edge_ratio,
+            "liq_grade":         liq_grade,
+            "liq_pts":           liq_pts,
+            "is_tail_bet":       is_tail_bet,
+            "any_model_inside":  any_model_inside,
+            "spread_exceeds_bracket": spread_exceeds_bracket,
+            "grade":             grade,
+            "actionable":        grade in ("A", "B"),
         })
         analyzed.append(m)
 
