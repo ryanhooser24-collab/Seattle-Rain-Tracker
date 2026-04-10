@@ -1322,8 +1322,11 @@ function renderTempCard(b){
           <div class="mdl-bar"><div class="mdl-fill m-best" style="width:${Math.min(95,Math.max(5,((muBest||50)/120)*100))}%"></div></div></div>
         <div style="margin-top:10px;font-size:10px;color:var(--muted);padding:8px;background:var(--paper);border:0.5px solid var(--border);border-radius:4px;line-height:1.7;">
           <b style="color:var(--ink);">Station bias applied</b><br>
-          GFS: <b style="color:var(--ink);">−${(fc.gfs_bias_applied||0).toFixed(1)}°F</b> ·
-          ECMWF: <b style="color:var(--ink);">−${(fc.ecmwf_bias_applied||0).toFixed(1)}°F</b><br>
+          ${b.market_type==='low'
+            ? `<span style="color:var(--warn,#ba7517);">⚠ LOW markets: bias not yet calibrated — raw model output used</span><br>`
+            : `GFS: <b style="color:var(--ink);">−${(fc.gfs_bias_applied||0).toFixed(1)}°F</b> ·
+               ECMWF: <b style="color:var(--ink);">−${(fc.ecmwf_bias_applied||0).toFixed(1)}°F</b><br>`
+          }
           σ (${tempHorizon==='d0'?'D+0':'D+1'}): <b style="color:var(--ink);">${sigma}°F</b><br>
           Settlement: <b style="color:var(--hot,#993c1d);">NWS CLI ${fc.nws_station||''}</b>
         </div>

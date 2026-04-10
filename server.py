@@ -396,18 +396,25 @@ def fetch_temp_forecast(city_key, horizon="d1"):
             return {"ok": False, "error": "; ".join(errors)}
 
         # Apply station bias corrections from cache (fall back to config defaults)
+        # NOTE: bias_cache contains gfs_bias calibrated on HIGH temperatures only.
+        # Applying the same bias to LOW forecasts is incorrect — GFS warm bias on
+        # afternoon highs does not reliably predict bias on overnight lows.
+        # LOW forecasts use zero bias correction until a separate low calibration
+        # is implemented. HIGH forecasts use the full calibrated bias.
         bias_cache = _TEMP_BIAS_CACHE.get(city_key, {})
-        gfs_bias   = bias_cache.get("gfs_bias",   cfg.get("warm_bias_gfs", 0.0))
-        ecmwf_bias = bias_cache.get("ecmwf_bias", cfg.get("warm_bias_ecmwf", 0.0))
+        gfs_bias_high   = bias_cache.get("gfs_bias",   cfg.get("warm_bias_gfs",   0.0))
+        ecmwf_bias_high = bias_cache.get("ecmwf_bias", cfg.get("warm_bias_ecmwf", 0.0))
+        gfs_bias_low    = 0.0   # TODO: calibrate separately from temperature_2m_min archive
+        ecmwf_bias_low  = 0.0
 
         gfs_raw    = results.get("gfs",   {})
         ecmwf_raw  = results.get("ecmwf", {})
         best_raw   = results.get("best",  {})
 
-        gfs_hi_adj   = round(gfs_raw.get("high",  0) - gfs_bias,   1) if gfs_raw   else None
-        gfs_lo_adj   = round(gfs_raw.get("low",   0) - gfs_bias,   1) if gfs_raw   else None
-        ecmwf_hi_adj = round(ecmwf_raw.get("high",0) - ecmwf_bias, 1) if ecmwf_raw else None
-        ecmwf_lo_adj = round(ecmwf_raw.get("low", 0) - ecmwf_bias, 1) if ecmwf_raw else None
+        gfs_hi_adj   = round(gfs_raw.get("high",  0) - gfs_bias_high,   1) if gfs_raw   else None
+        gfs_lo_adj   = round(gfs_raw.get("low",   0) - gfs_bias_low,    1) if gfs_raw   else None
+        ecmwf_hi_adj = round(ecmwf_raw.get("high",0) - ecmwf_bias_high, 1) if ecmwf_raw else None
+        ecmwf_lo_adj = round(ecmwf_raw.get("low", 0) - ecmwf_bias_low,  1) if ecmwf_raw else None
 
         # Best = average of all available adj. forecasts
         hi_vals = [v for v in [gfs_hi_adj, ecmwf_hi_adj,
@@ -444,8 +451,13 @@ def fetch_temp_forecast(city_key, horizon="d1"):
             "best_low":     best_lo,
             "spread_high":  spread_hi,
             "spread_low":   spread_lo,
-            "gfs_bias_applied":   gfs_bias,
-            "ecmwf_bias_applied": ecmwf_bias,
+            "gfs_bias_applied":      gfs_bias_high,
+            "ecmwf_bias_applied":    ecmwf_bias_high,
+            "gfs_bias_high":         gfs_bias_high,
+            "ecmwf_bias_high":       ecmwf_bias_high,
+            "gfs_bias_low":          gfs_bias_low,
+            "ecmwf_bias_low":        ecmwf_bias_low,
+            "low_bias_note":         "Low bias not yet calibrated — using raw model output",
             "sigma":        σ,
             "errors":       errors,
             "fetched_at":   _t.time(),
