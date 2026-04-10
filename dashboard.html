@@ -1271,7 +1271,6 @@ function renderTempCard(b){
   const dotLeft  = muBest!=null ? pct(muBest) : '50';
   const bLeft    = pct(bLo);
   const bWidth   = ((bHi-bLo)/axRange*100).toFixed(2);
-  const TS = 'display:none;position:absolute;bottom:calc(100% + 4px);left:50%;transform:translateX(-50%);background:var(--paper);border:0.5px solid var(--border);border-radius:6px;padding:6px 10px;font-size:10px;color:var(--muted);white-space:nowrap;z-index:10;line-height:1.6;pointer-events:none;';
   const WE = 'onmouseenter="this.querySelector(\'.tt\').style.display=\'block\'" onmouseleave="this.querySelector(\'.tt\').style.display=\'none\'"';
 
   const rows = [
@@ -1283,7 +1282,7 @@ function renderTempCard(b){
 
   let probHtml = '';
   for(let i=0;i<rows.length;i++){
-    probHtml += '<div style="position:relative;cursor:default;" '+WE+'>'+rows[i]+'<div class="tt" style="'+TS+'">'+tips[i]+'</div></div>';
+    probHtml += '<div title="'+tips[i]+'">'+rows[i]+'</div>';
   }
 
   const statsData = [
@@ -1294,7 +1293,7 @@ function renderTempCard(b){
   let statsHtml = '';
   for(let i=0;i<statsData.length;i++){
     const s=statsData[i];
-    statsHtml += '<div style="position:relative;cursor:default;" '+WE+'><div style="background:var(--paper);border:0.5px solid var(--border);border-radius:6px;padding:7px 10px;"><div style="font-size:9px;color:var(--muted);margin-bottom:2px;text-transform:uppercase;letter-spacing:0.5px;">'+s.l+'</div><div style="font-size:13px;font-weight:500;color:'+(s.green?'#3B6D11':'var(--ink)')+';">'+s.v+'</div></div><div class="tt" style="'+TS+'">'+s.t+'</div></div>';
+    statsHtml += '<div title="'+s.t+'"><div style="background:var(--paper);border:0.5px solid var(--border);border-radius:6px;padding:7px 10px;"><div style="font-size:9px;color:var(--muted);margin-bottom:2px;text-transform:uppercase;letter-spacing:0.5px;">'+s.l+'</div><div style="font-size:13px;font-weight:500;color:'+(s.green?'#3B6D11':'var(--ink)')+';">'+s.v+'</div></div></div>';
   }
 
   return '<div class="temp-opp grade-'+b.grade+'" onclick="this.classList.toggle(\'open\')">'
@@ -1311,9 +1310,8 @@ function renderTempCard(b){
     +'<div class="bracket-detail"><div style="display:flex;flex-direction:column;gap:12px;">'
     +'<div>'+probHtml+'</div>'
     +'<div>'
-    +'<div style="position:relative;cursor:default;display:inline-block;" '+WE+'>'
+    +'<div title="GFS '+gfsLbl+' \u00b7 ECMWF '+ecLbl+' \u00b7 bias-corrected \u2192 '+bestLbl+'" style="display:inline-block;">'
     +'<div style="font-size:9px;color:var(--muted);letter-spacing:0.5px;text-transform:uppercase;margin-bottom:6px;">Model center vs bracket</div>'
-    +'<div class="tt" style="'+TS+'">GFS '+gfsLbl+' \u00b7 ECMWF '+ecLbl+' \u00b7 bias-corrected \u2192 '+bestLbl+'</div>'
     +'</div>'
     +'<div style="position:relative;height:32px;margin:0 4px;">'
     +'<div style="position:absolute;top:12px;left:0;right:0;height:4px;background:var(--border);border-radius:2px;"></div>'
