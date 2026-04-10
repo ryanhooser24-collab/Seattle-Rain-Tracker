@@ -1245,91 +1245,129 @@ function renderTempScanner(data){
 }
 
 function renderTempCard(b){
-  const fc=b.forecast||{};
-  const mtype=b.market_type;
-  const mu=mtype==='high'?fc.gfs_high:fc.gfs_low;
-  const muEc=mtype==='high'?fc.ecmwf_high:fc.ecmwf_low;
-  const muBest=mtype==='high'?fc.best_high:fc.best_low;
-  const spr=(b.spread_models||0).toFixed(1);
-  const sigma=(b.sigma||2.0).toFixed(1);
-  const askC=Math.round((b.yes_ask||0)*100);
-  const probC=Math.round((b.model_prob||0)*100);
-  const gfsLbl=mu!=null?mu.toFixed(1)+'°F':'—';
-  const ecLbl=muEc!=null?muEc.toFixed(1)+'°F':'—';
-  const bestLbl=muBest!=null?muBest.toFixed(1)+'°F':'—';
-  const confCl=(b.spread_models||0)<1.5?'conf-hi':'conf-lo';
-  const kdol=((b.kelly_size||0)).toFixed(2);
+  const fc     = b.forecast||{};
+  const mtype  = b.market_type;
+  const muBest = mtype==='high' ? fc.best_high : fc.best_low;
+  const muGfs  = mtype==='high' ? fc.gfs_high  : fc.gfs_low;
+  const muEc   = mtype==='high' ? fc.ecmwf_high: fc.ecmwf_low;
+  const sigma  = (b.sigma||2.0).toFixed(1);
+  const askC   = Math.round((b.yes_ask||0)*100);
+  const probC  = Math.round((b.model_prob||0)*100);
+  const bestLbl= muBest!=null ? muBest.toFixed(1)+'°' : '—';
+  const gfsLbl = muGfs!=null  ? muGfs.toFixed(1)+'°'  : '—';
+  const ecLbl  = muEc!=null   ? muEc.toFixed(1)+'°'   : '—';
+  const kdol   = ((b.kelly_size||0)).toFixed(2);
+  const kpct   = ((b.kelly_frac||0)*100).toFixed(1);
+  const barMkt = Math.max(3,Math.min(95,askC));
+  const barMdl = Math.max(3,Math.min(95,probC));
 
-  // Simple bracket bar — market price vs model prob
-  const barMkt=Math.max(3,Math.min(95,askC));
-  const barMdl=Math.max(3,Math.min(95,probC));
-  let needlePct=50;
-  if(muBest!=null&&b.lo_temp!=null&&b.hi_temp!=null&&b.hi_temp>b.lo_temp){
-    needlePct=Math.min(95,Math.max(5,((muBest-b.lo_temp)/(b.hi_temp-b.lo_temp))*100));
-  }
+  // Temp axis — dynamic range centred on model, spanning ±4°F or bracket±2 whichever wider
+  const lo = b.lo_temp, hi = b.hi_temp;
+  const center = muBest || ((lo!=null&&hi!=null)?(lo+hi)/2:64);
+  const bLo = lo!=null ? lo : center-2;
+  const bHi = hi!=null ? hi : center+2;
+  const axMin = Math.floor(Math.min(center-3, bLo-1));
+  const axMax = Math.ceil(Math.max(center+3, bHi+1));
+  const axRange = axMax - axMin || 1;
+  const pct = v => ((v-axMin)/axRange*100).toFixed(2);
+
+  // Axis ticks — just bracket edges + one outside each side
+  const ticks = [axMin, bLo, bHi, axMax];
+  const tickHtml = [...new Set(ticks)].map(t=>
+    `<div style="position:absolute;top:18px;left:${pct(t)}%;font-size:9px;color:var(--muted);transform:translateX(-50%);white-space:nowrap;">${t}°</div>`
+  ).join('');
+
+  const dotLeft = muBest!=null ? pct(muBest) : '50';
+  const bracketLeft = pct(bLo);
+  const bracketWidth = ((bHi-bLo)/axRange*100).toFixed(2);
+
+  const tipStyle = `display:none;position:absolute;bottom:calc(100% + 4px);left:50%;transform:translateX(-50%);background:var(--paper);border:0.5px solid var(--border);border-radius:6px;padding:6px 10px;font-size:10px;color:var(--muted);white-space:nowrap;z-index:10;line-height:1.6;pointer-events:none;`;
+  const tip = (content, inner) =>
+    `<div style="position:relative;cursor:default;" onmouseenter="this.querySelector('.tt').style.display='block'" onmouseleave="this.querySelector('.tt').style.display='none'">
+      ${inner}
+      <div class="tt" style="${tipStyle}">${content}</div>
+    </div>`;
 
   return `<div class="temp-opp grade-${b.grade}" onclick="this.classList.toggle('open')">
   <div class="temp-opp-inner">
     <div class="temp-opp-left">
-      <div class="temp-opp-city">${b.city_label} · ${mtype.toUpperCase()} · ${fc.target_date||''} · ${fc.nws_station||''}</div>
+      <div class="temp-opp-city">${b.city_label} · ${(fc.target_date||'').replace('2026-','')} · ${fc.nws_station||''}</div>
       <div class="temp-opp-decision">Buy ${b.bracket_label||''} YES <span class="gbadge g${b.grade}">${b.grade}</span></div>
-      <div class="temp-opp-ctx">GFS <b>${gfsLbl}</b> · ECMWF <b>${ecLbl}</b> · spread <b>${spr}°F</b> · σ=${sigma}°F</div>
+      <div class="temp-opp-ctx">mkt ${askC}¢ · model ${probC}% · σ ${sigma}°F</div>
     </div>
     <div class="temp-opp-right">
       <div class="temp-opp-edge">+${b.net_gap_c}¢</div>
-      <div class="temp-opp-meta">mkt ${askC}¢ / model ${probC}%<br>liq ${b.liq_grade||'?'} · ratio ${(b.edge_ratio||0).toFixed(2)}</div>
+      <div class="temp-opp-meta">liq ${b.liq_grade||'?'}</div>
       <button class="temp-opp-btn" onclick="event.stopPropagation();placeTempBet('${b.ticker||''}','${b.city_key}',${askC})">Size ↗</button>
     </div>
   </div>
   <div class="bracket-detail">
-    <div class="bkt-grid">
+    <div style="display:flex;flex-direction:column;gap:12px;">
+
+      <!-- PROBABILITY BARS -->
       <div>
-        <div style="font-size:10px;color:var(--muted);margin-bottom:6px;">Bracket · ${b.ticker||''}</div>
-        <div class="bkt-row" style="background:var(--yes-lt);border-radius:4px;padding:3px 4px;">
-          <div class="bkt-range" style="font-weight:500;color:#27500A;">${b.bracket_label||''}</div>
-          <div class="bkt-wrap">
-            <div class="bkt-fill" style="width:${barMkt}%;background:#3B6D11;"></div>
-            <div class="bkt-needle" style="left:${needlePct}%;background:var(--ink);"></div>
-          </div>
-          <div class="bkt-prob" style="color:#27500A;font-weight:500;">${askC}¢</div>
-        </div>
-        <div class="bkt-row">
-          <div class="bkt-range" style="font-size:9px;color:var(--muted);">Model prob.</div>
-          <div class="bkt-wrap"><div class="bkt-fill" style="width:${barMdl}%;background:var(--rain,#2e5fa3);opacity:.7;"></div></div>
-          <div class="bkt-prob" style="color:var(--rain,#2e5fa3);">${probC}%</div>
-        </div>
-        <div class="bkt-legend"><span><span class="bkt-dot" style="background:var(--ink);"></span>Model center (${bestLbl})</span></div>
-        <div class="kelly-box" style="margin-top:10px;">
-          <div class="kelly-row"><span class="kelly-lbl">Model prob.</span><span class="kelly-val">${probC}%</span></div>
-          <div class="kelly-row"><span class="kelly-lbl">Market ask</span><span class="kelly-val">${askC}¢</span></div>
-          <div class="kelly-row"><span class="kelly-lbl">Raw edge</span><span class="kelly-val">+${b.gap_c||0}¢</span></div>
-          <div class="kelly-row"><span class="kelly-lbl">Spread cost</span><span class="kelly-val">−${b.spread_c||0}¢</span></div>
-          <div class="kelly-row"><span class="kelly-lbl">Net edge</span><span class="kelly-val">+${b.net_gap_c||0}¢</span></div>
-          <div class="kelly-row"><span class="kelly-lbl">Half-Kelly</span><span class="kelly-val">${((b.kelly_frac||0)*100).toFixed(1)}% → $${kdol}/unit</span></div>
-          <div class="kelly-row"><span class="kelly-lbl">σ edge ratio</span><span class="kelly-val">${(b.edge_ratio||0).toFixed(3)} (A≥0.12, B≥0.07)</span></div>
+        ${tip('Kalshi ask price — what you pay per contract.',
+          `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+            <div style="font-size:10px;color:var(--muted);width:52px;flex-shrink:0;">Market</div>
+            <div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden;"><div style="width:${barMkt}%;height:100%;background:#888780;border-radius:3px;"></div></div>
+            <div style="font-size:11px;font-weight:500;width:28px;text-align:right;color:var(--muted);">${askC}¢</div>
+          </div>`
+        )}
+        ${tip('GFS + ECMWF + blend, bias-corrected.',
+          `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+            <div style="font-size:10px;color:var(--muted);width:52px;flex-shrink:0;">Model</div>
+            <div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden;"><div style="width:${barMdl}%;height:100%;background:#3B6D11;border-radius:3px;"></div></div>
+            <div style="font-size:11px;font-weight:500;width:28px;text-align:right;color:#3B6D11;">${probC}%</div>
+          </div>`
+        )}
+        ${tip(`Model% minus market¢, minus spread cost (${b.spread_c||0}¢).`,
+          `<div style="padding-left:60px;font-size:10px;color:#3B6D11;margin-top:2px;">+${b.net_gap_c||0}¢ net edge</div>`
+        )}
+      </div>
+
+      <!-- TEMP AXIS -->
+      <div>
+        ${tip(`GFS ${gfsLbl} · ECMWF ${ecLbl} · bias-corrected → ${bestLbl}`,
+          `<div style="font-size:9px;color:var(--muted);letter-spacing:0.5px;text-transform:uppercase;margin-bottom:6px;">Model center vs bracket</div>`
+        )}
+        <div style="position:relative;height:32px;margin:0 4px;">
+          <div style="position:absolute;top:12px;left:0;right:0;height:4px;background:var(--border);border-radius:2px;"></div>
+          <div style="position:absolute;top:12px;left:${bracketLeft}%;width:${bracketWidth}%;height:4px;background:#C0DD97;"></div>
+          <div style="position:absolute;top:8px;left:${bracketLeft}%;height:12px;border-left:1.5px solid #3B6D11;"></div>
+          <div style="position:absolute;top:8px;left:${pct(bHi)}%;height:12px;border-left:1.5px solid #3B6D11;"></div>
+          <div style="position:absolute;top:0;left:${dotLeft}%;font-size:10px;font-weight:500;color:#3B6D11;transform:translateX(-50%);white-space:nowrap;">${bestLbl}</div>
+          <div style="position:absolute;top:8px;left:${dotLeft}%;width:12px;height:12px;border-radius:50%;background:var(--paper);border:2.5px solid #3B6D11;transform:translateX(-50%);"></div>
+          ${tickHtml}
         </div>
       </div>
-      <div>
-        <div style="font-size:10px;color:var(--muted);margin-bottom:6px;">Model consensus</div>
-        <div class="mdl-row"><div class="mdl-name">GFS</div><div class="mdl-temp">${gfsLbl}</div>
-          <div class="mdl-bar"><div class="mdl-fill m-gfs" style="width:${Math.min(95,Math.max(5,((mu||50)/120)*100))}%"></div></div>
-          <span class="mdl-conf ${confCl}">±${spr}°F</span></div>
-        <div class="mdl-row"><div class="mdl-name">ECMWF</div><div class="mdl-temp">${ecLbl}</div>
-          <div class="mdl-bar"><div class="mdl-fill m-ecmwf" style="width:${Math.min(95,Math.max(5,((muEc||50)/120)*100))}%"></div></div></div>
-        <div class="mdl-row"><div class="mdl-name">Adj. best</div><div class="mdl-temp">${bestLbl}</div>
-          <div class="mdl-bar"><div class="mdl-fill m-best" style="width:${Math.min(95,Math.max(5,((muBest||50)/120)*100))}%"></div></div></div>
-        <div style="margin-top:10px;font-size:10px;color:var(--muted);padding:8px;background:var(--paper);border:0.5px solid var(--border);border-radius:4px;line-height:1.7;">
-          <b style="color:var(--ink);">Station bias applied</b><br>
-          ${b.market_type==='low'
-            ? `<span style="color:var(--warn,#ba7517);">⚠ LOW markets: bias not yet calibrated — raw model output used</span><br>`
-            : `GFS: <b style="color:var(--ink);">−${(fc.gfs_bias_applied||0).toFixed(1)}°F</b> ·
-               ECMWF: <b style="color:var(--ink);">−${(fc.ecmwf_bias_applied||0).toFixed(1)}°F</b><br>`
-          }
-          σ (${tempHorizon==='d0'?'D+0':'D+1'}): <b style="color:var(--ink);">${sigma}°F</b><br>
-          Settlement: <b style="color:var(--hot,#993c1d);">NWS CLI ${fc.nws_station||''}</b>
-        </div>
-        ${b.spread_penalty?`<div style="margin-top:8px;font-size:10px;padding:6px 8px;background:var(--warn-lt,#faeeda);border-radius:4px;color:#854f0b;">⚠ Model spread &gt;2°F — confidence reduced.</div>`:''}
+
+      <!-- STATS -->
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">
+        ${tip('Recommended bet size as % of bankroll unit.',
+          `<div style="background:var(--paper);border:0.5px solid var(--border);border-radius:6px;padding:7px 10px;">
+            <div style="font-size:9px;color:var(--muted);margin-bottom:2px;text-transform:uppercase;letter-spacing:0.5px;">Half-Kelly</div>
+            <div style="font-size:13px;font-weight:500;color:var(--ink);">${kpct}%</div>
+          </div>`
+        )}
+        ${tip('Dollar amount per $100 unit at half-Kelly.',
+          `<div style="background:var(--paper);border:0.5px solid var(--border);border-radius:6px;padding:7px 10px;">
+            <div style="font-size:9px;color:var(--muted);margin-bottom:2px;text-transform:uppercase;letter-spacing:0.5px;">Size</div>
+            <div style="font-size:13px;font-weight:500;color:var(--ink);">$${kdol}</div>
+          </div>`
+        )}
+        ${tip('Gap ÷ σ. A≥0.12  B≥0.07. Higher = stronger signal.',
+          `<div style="background:var(--paper);border:0.5px solid var(--border);border-radius:6px;padding:7px 10px;">
+            <div style="font-size:9px;color:var(--muted);margin-bottom:2px;text-transform:uppercase;letter-spacing:0.5px;">Edge ratio</div>
+            <div style="font-size:13px;font-weight:500;color:#3B6D11;">${(b.edge_ratio||0).toFixed(2)}</div>
+          </div>`
+        )}
       </div>
+
+      <!-- TICKER -->
+      <div style="font-size:9px;color:var(--muted);padding-top:2px;">
+        ${b.ticker||''} · NWS CLI ${fc.nws_station||''} · bias −${(fc.gfs_bias_applied||0).toFixed(1)}°F
+      </div>
+
     </div>
   </div>
 </div>`;
