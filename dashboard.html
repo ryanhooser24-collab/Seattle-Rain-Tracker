@@ -353,11 +353,11 @@ body{max-width:900px;margin:0 auto;}
 
 /* Timing track */
 .timing-track{display:flex;align-items:stretch;height:26px;border-radius:4px;overflow:hidden;}
-.tt-d1open{flex:2;background:#e6f1fb;color:#0c447c;display:flex;align-items:center;justify-content:center;font-size:9px;letter-spacing:.8px;text-transform:uppercase;font-weight:500;}
-.tt-d1ec  {flex:1;background:#e6f4ec;color:#0f4d2a;display:flex;align-items:center;justify-content:center;font-size:9px;letter-spacing:.8px;text-transform:uppercase;font-weight:500;}
-.tt-d0gfs {flex:1;background:#faeeda;color:#633806;display:flex;align-items:center;justify-content:center;font-size:9px;letter-spacing:.8px;text-transform:uppercase;font-weight:500;}
-.tt-hrrr  {flex:1;background:#faece7;color:#712b13;display:flex;align-items:center;justify-content:center;font-size:9px;letter-spacing:.8px;text-transform:uppercase;font-weight:500;}
-.tt-close {flex:0.5;background:#f1efe8;color:#444441;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:500;}
+.tt-d1open{flex:2;background:var(--color-background-info,#e6f1fb);color:var(--color-text-info,#0c447c);display:flex;align-items:center;justify-content:center;font-size:9px;letter-spacing:.8px;text-transform:uppercase;font-weight:500;}
+.tt-d1ec  {flex:1;background:var(--yes-lt,#eaf3de);color:var(--yes,#3B6D11);display:flex;align-items:center;justify-content:center;font-size:9px;letter-spacing:.8px;text-transform:uppercase;font-weight:500;}
+.tt-d0gfs {flex:1;background:var(--warn-lt,#faeeda);color:var(--warn,#854f0b);display:flex;align-items:center;justify-content:center;font-size:9px;letter-spacing:.8px;text-transform:uppercase;font-weight:500;}
+.tt-hrrr  {flex:1;background:var(--hot-lt,#faece7);color:var(--hot,#993c1d);display:flex;align-items:center;justify-content:center;font-size:9px;letter-spacing:.8px;text-transform:uppercase;font-weight:500;}
+.tt-close {flex:0.5;background:var(--paper);color:var(--muted);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:500;border-left:0.5px solid var(--border);}
 .timing-now-track{height:4px;background:var(--border);border-radius:2px;position:relative;margin-top:4px;}
 .timing-now-dot{position:absolute;top:-4px;width:10px;height:10px;border-radius:50%;background:var(--hot);border:2px solid var(--paper);}
 
@@ -510,8 +510,6 @@ body{max-width:900px;margin:0 auto;}
       </div>
       <button class="sf on" id="tsf-all"   onclick="setTempFilter('all')">All</button>
       <button class="sf"    id="tsf-A"     onclick="setTempFilter('A')">A only</button>
-      <button class="sf"    id="tsf-high"  onclick="setTempFilter('high')">HIGH</button>
-      <button class="sf"    id="tsf-agree" onclick="setTempFilter('agree')">Models agree</button>
       <span id="temp-scan-meta" style="font-size:10px;color:var(--muted);margin-left:auto;"></span>
     </div>
     <div style="padding:10px 16px 6px;font-size:9px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);" id="temp-sec-A">A-grade edges</div>
@@ -1108,7 +1106,7 @@ function setTempHorizon(h){
 
 function setTempFilter(f){
   tempFilter=f;
-  ['all','A','high','low','agree'].forEach(k=>{
+  ['all','A'].forEach(k=>{
     const el=document.getElementById('tsf-'+k);
     if(el)el.className='sf'+(k===f?' on':'');
   });
@@ -1204,9 +1202,7 @@ function renderTempScanner(data){
   }
 
   const filtered=allBkts.filter(b=>{
-    if(tempFilter==='A')    return b.grade==='A';
-    if(tempFilter==='high') return b.market_type==='high';
-    if(tempFilter==='agree')return(b.spread_models||0)<1.5;
+    if(tempFilter==='A') return b.grade==='A';
     return true;
   });
 
@@ -1298,7 +1294,6 @@ function renderTempCard(b){
     <div class="temp-opp-right">
       <div class="temp-opp-edge">+${b.net_gap_c}¢</div>
       <div class="temp-opp-meta">liq ${b.liq_grade||'?'}</div>
-      <button class="temp-opp-btn" onclick="event.stopPropagation();placeTempBet('${b.ticker||''}','${b.city_key}',${askC})">Size ↗</button>
     </div>
   </div>
   <div class="bracket-detail">
@@ -1373,8 +1368,6 @@ function renderTempCard(b){
 </div>`;
 }
 
-function placeTempBet(ticker,city,price_c){
-  if(!ticker){alert('No ticker for this bracket');return;}
   const k=`temp-${ticker}`;
   betSlip[k]=(betSlip[k]||0)+1;
   updatePlaceBtn();
