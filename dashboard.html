@@ -1245,13 +1245,15 @@ function renderTempCard(b){
   const mtype  = b.market_type;
   const muBest = mtype==='high' ? fc.best_high : fc.best_low;
   const muGfs  = mtype==='high' ? fc.gfs_high  : fc.gfs_low;
-  const muEc   = mtype==='high' ? fc.ecmwf_high: fc.ecmwf_low;
+  const muEc    = mtype==='high' ? fc.ecmwf_high : fc.ecmwf_low;
+  const muBlend = mtype==='high' ? fc.blend_high : fc.blend_low;
   const sigma  = (b.sigma||2.0).toFixed(1);
   const askC   = Math.round((b.yes_ask||0)*100);
   const probC  = Math.round((b.model_prob||0)*100);
-  const bestLbl= muBest!=null ? muBest.toFixed(1)+'\u00b0' : '\u2014';
-  const gfsLbl = muGfs!=null  ? muGfs.toFixed(1)+'\u00b0'  : '\u2014';
-  const ecLbl  = muEc!=null   ? muEc.toFixed(1)+'\u00b0'   : '\u2014';
+  const bestLbl  = muBest!=null  ? muBest.toFixed(1)+'\u00b0'  : '\u2014';
+  const gfsLbl   = muGfs!=null   ? muGfs.toFixed(1)+'\u00b0'   : '\u2014';
+  const ecLbl    = muEc!=null    ? muEc.toFixed(1)+'\u00b0'    : '\u2014';
+  const blendLbl = muBlend!=null ? muBlend.toFixed(1)+'\u00b0' : '\u2014';
   const kdol   = ((b.kelly_size||0)).toFixed(2);
   const kpct   = ((b.kelly_frac||0)*100).toFixed(1);
   const barMkt = Math.max(3,Math.min(95,askC));
@@ -1262,15 +1264,17 @@ function renderTempCard(b){
   const isOpenLo = lo==null;
   const bLo = lo!=null ? lo : center-2;
   const bHi = hi!=null ? hi : center+2;
-  const axMin = Math.floor(Math.min(center-3, bLo-1));
-  const axMax = Math.ceil(Math.max(center+3, bHi+1));
+  const modelMin = Math.min(muGfs||center, muEc||center, muBlend||center, center);
+  const modelMax = Math.max(muGfs||center, muEc||center, muBlend||center, center);
+  const axMin = Math.floor(Math.min(modelMin - 0.5, bLo - 0.5));
+  const axMax = Math.ceil(Math.max(modelMax + 0.5, bHi + 0.5));
   const axRange = axMax - axMin || 1;
   const pct = function(v){ return ((v-axMin)/axRange*100).toFixed(2); };
   const ticks = [axMin, axMax];
   if(!isOpenLo) ticks.push(bLo);
   if(!isOpenHi) ticks.push(bHi);
   const seen = {}; const tickHtml = ticks.filter(function(t){ if(seen[t]) return false; seen[t]=true; return true; }).map(function(t){
-    return '<div style="position:absolute;top:18px;left:'+pct(t)+'%;font-size:9px;color:var(--muted);transform:translateX(-50%);white-space:nowrap;">'+t+'°</div>';
+    return '<div style="position:absolute;top:54px;left:'+pct(t)+'%;font-size:9px;color:var(--muted);transform:translateX(-50%);white-space:nowrap;">'+t+'°</div>';
   }).join('');
   const dotLeft = muBest!=null ? pct(muBest) : '50';
   const bLeft   = isOpenLo ? '0' : pct(bLo);
@@ -1317,15 +1321,28 @@ function renderTempCard(b){
     +'<div title="GFS '+gfsLbl+' \u00b7 ECMWF '+ecLbl+' \u00b7 bias-corrected \u2192 '+bestLbl+'" data-tip="GFS '+gfsLbl+' \u00b7 ECMWF '+ecLbl+' \u00b7 bias-corrected \u2192 '+bestLbl+'" style="display:inline-block;cursor:default;">'
     +'<div style="font-size:9px;color:var(--muted);letter-spacing:0.5px;text-transform:uppercase;margin-bottom:6px;">Model center vs bracket</div>'
     +'</div>'
-    +'<div style="position:relative;height:32px;margin:0 4px;">'
-    +'<div style="position:absolute;top:12px;left:0;right:0;height:4px;background:var(--border);border-radius:2px;"></div>'
-    +'<div style="position:absolute;top:12px;left:'+bLeft+'%;width:'+bWidth+'%;height:4px;background:#C0DD97;"></div>'
-    +(isOpenLo ? '' : '<div style="position:absolute;top:8px;left:'+bLeft+'%;height:12px;border-left:1.5px solid #3B6D11;"></div>')
-    +(isOpenHi ? '' : '<div style="position:absolute;top:8px;left:'+pct(bHi)+'%;height:12px;border-left:1.5px solid #3B6D11;"></div>')
-    +'<div style="position:absolute;top:0;left:'+dotLeft+'%;font-size:10px;font-weight:500;color:#3B6D11;transform:translateX(-50%);white-space:nowrap;">'+bestLbl+'</div>'
-    +'<div style="position:absolute;top:8px;left:'+dotLeft+'%;width:12px;height:12px;border-radius:50%;background:var(--paper);border:2.5px solid #3B6D11;transform:translateX(-50%);"></div>'
+    +'<div style="position:relative;height:68px;margin:0 4px;">'
+    +'<div style="position:absolute;top:34px;left:0;right:0;height:4px;background:var(--border);border-radius:2px;"></div>'
+    +'<div style="position:absolute;top:34px;left:'+bLeft+'%;width:'+bWidth+'%;height:4px;background:#C0DD97;"></div>'
+    +(isOpenLo ? '' : '<div style="position:absolute;top:30px;left:'+bLeft+'%;height:12px;border-left:1.5px solid #3B6D11;"></div>')
+    +(isOpenHi ? '' : '<div style="position:absolute;top:30px;left:'+pct(bHi)+'%;height:12px;border-left:1.5px solid #3B6D11;"></div>')
+    +(muEc!=null ? '<div style="position:absolute;top:26px;left:'+pct(muEc)+'%;width:1.5px;height:14px;background:#D85A30;border-radius:1px;transform:translateX(-50%);"></div>' : '')
+    +(muEc!=null ? '<div style="position:absolute;top:14px;left:'+pct(muEc)+'%;font-size:9px;color:#D85A30;transform:translateX(-50%);white-space:nowrap;">'+ecLbl+'</div>' : '')
+    +(muBlend!=null ? '<div style="position:absolute;top:26px;left:'+pct(muBlend)+'%;width:1.5px;height:14px;background:#7F77DD;border-radius:1px;transform:translateX(-50%);"></div>' : '')
+    +(muBlend!=null ? '<div style="position:absolute;top:2px;left:'+pct(muBlend)+'%;font-size:9px;color:#7F77DD;transform:translateX(-50%);white-space:nowrap;">'+blendLbl+'</div>' : '')
+    +(muGfs!=null ? '<div style="position:absolute;top:26px;left:'+pct(muGfs)+'%;width:1.5px;height:14px;background:#378ADD;border-radius:1px;transform:translateX(-50%);"></div>' : '')
+    +(muGfs!=null ? '<div style="position:absolute;top:14px;left:'+pct(muGfs)+'%;font-size:9px;color:#378ADD;transform:translateX(-50%);white-space:nowrap;">'+gfsLbl+'</div>' : '')
+    +'<div style="position:absolute;top:30px;left:'+dotLeft+'%;width:12px;height:12px;border-radius:50%;background:var(--paper);border:2.5px solid #3B6D11;transform:translateX(-50%);"></div>'
+    +'<div style="position:absolute;top:48px;left:'+dotLeft+'%;font-size:9px;font-weight:500;color:#3B6D11;transform:translateX(-50%);white-space:nowrap;">'+bestLbl+' avg</div>'
     +tickHtml
-    +'</div></div>'
+    +'</div>'
+    +'<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:6px;font-size:9px;color:var(--muted);">'
+    +'<span style="display:flex;align-items:center;gap:4px;"><span style="width:2px;height:9px;background:#378ADD;display:inline-block;border-radius:1px;"></span>GFS</span>'
+    +'<span style="display:flex;align-items:center;gap:4px;"><span style="width:2px;height:9px;background:#D85A30;display:inline-block;border-radius:1px;"></span>ECMWF</span>'
+    +'<span style="display:flex;align-items:center;gap:4px;"><span style="width:2px;height:9px;background:#7F77DD;display:inline-block;border-radius:1px;"></span>Blend</span>'
+    +'<span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;border-radius:50%;background:var(--paper);border:2px solid #3B6D11;display:inline-block;"></span>Avg</span>'
+    +'</div>'
+    +'</div>'
     +'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">'+statsHtml+'</div>'
     +'<div style="font-size:9px;color:var(--muted);padding-top:2px;">'+(b.ticker||'')+' \u00b7 NWS CLI '+(fc.nws_station||'')+' \u00b7 bias \u2212'+(fc.gfs_bias_applied||0).toFixed(1)+'\u00b0F</div>'
     +'</div></div></div>';

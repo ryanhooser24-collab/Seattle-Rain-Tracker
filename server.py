@@ -447,6 +447,8 @@ def fetch_temp_forecast(city_key, horizon="d1"):
             "gfs_low":      gfs_lo_adj,
             "ecmwf_high":   ecmwf_hi_adj,
             "ecmwf_low":    ecmwf_lo_adj,
+            "blend_high":   best_raw.get("high"),
+            "blend_low":    best_raw.get("low"),
             "best_high":    best_hi,
             "best_low":     best_lo,
             "spread_high":  spread_hi,
@@ -661,6 +663,19 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
     sigma = forecast.get("sigma", 2.0)
     spread_hi = forecast.get("spread_high" if market_type == "high" else "spread_low", 0)
 
+    # Inflate σ by model spread in quadrature.
+    # When GFS and ECMWF disagree, today's forecast is genuinely harder than
+    # the historical RMSE baseline. A 2°F spread adds real uncertainty on top
+    # of σ — the probability distribution should be wider.
+    # Formula: σ_eff = sqrt(σ² + (spread/2)²)
+    # spread/2 because the spread is the full range between models; the
+    # uncertainty contribution is half that (one standard deviation of model disagreement).
+    # This makes "Models agree" redundant as a filter — agreement is already
+    # rewarded with higher probability and larger Kelly sizing automatically.
+    from math import sqrt as _sqrt
+    if spread_hi and spread_hi > 0:
+        sigma = round(_sqrt(sigma**2 + (spread_hi / 2)**2), 2)
+
     if mu is None:
         for m in markets:
             m["model_prob"] = None; m["gap_c"] = 0; m["net_gap_c"] = 0
@@ -777,19 +792,18 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
         is_tail_bet = (hi is not None and hi <= mu) or (lo is None and hi is not None and hi < mu)
 
         # Grade: based on edge_ratio threshold (not flat cents)
-        # Additional rules:
-        #   - Require model_prob >= 0.35 for A-grade (market must agree bracket is plausible)
-        #   - Tail bets (bracket below model center) capped at B regardless of edge ratio
-        #   - Very low model prob (<20%) skipped even with large edge — too much variance
+        # prob < 0.20 → skip (too much variance even with large edge)
+        # tail bet with prob < 0.35 → skip
+        # A: edge_ratio ≥ 0.12, good liquidity, prob ≥ 0.35
+        # B: edge_ratio ≥ 0.07, ok liquidity
+        # C: edge_ratio ≥ 0.04
         if net_gap_c <= 0 or liq_grade == "D":
             grade = "skip"
         elif prob < 0.20:
-            # Model says less than 20% chance — even with edge, skip (high variance longshot)
             grade = "skip"
         elif is_tail_bet and prob < 0.35:
-            # Bracket below model center AND low probability — skip
             grade = "skip"
-        elif edge_ratio >= 0.12 and not spread_penalty and liq_grade in ("A","B") and prob >= 0.35:
+        elif edge_ratio >= 0.12 and liq_grade in ("A","B") and prob >= 0.35:
             grade = "A"
         elif edge_ratio >= 0.07 and liq_grade in ("A","B","C"):
             grade = "B"
@@ -810,7 +824,6 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
             "edge_ratio":   edge_ratio,
             "liq_grade":    liq_grade,
             "liq_pts":      liq_pts,
-            "spread_penalty": spread_penalty,
             "is_tail_bet":  is_tail_bet,
             "grade":        grade,
             "actionable":   grade in ("A", "B"),
