@@ -499,6 +499,23 @@ def fetch_temp_kalshi_markets(city_key, market_type="high"):
             ticker  = m.get("ticker", "")
             title   = m.get("title", "")
 
+            # Parse settlement date from ticker e.g. KXHIGHMIA-26APR10-B76.5
+            # Format is YYMMMDD where MMM = JAN/FEB/MAR/APR etc.
+            ticker_date = None
+            td_match = re.search(r"-(\d{2})([A-Z]{3})(\d{2})-", ticker, re.IGNORECASE)
+            if td_match:
+                try:
+                    from datetime import datetime as _dtp
+                    yr  = int(td_match.group(1)) + 2000
+                    mon = td_match.group(2).upper()
+                    day = int(td_match.group(3))
+                    mon_map = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+                               "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}
+                    if mon in mon_map:
+                        ticker_date = f"{yr:04d}-{mon_map[mon]:02d}-{day:02d}"
+                except Exception:
+                    pass
+
             # Parse bracket from title e.g. "54° to 55°F" or "Above 57°F" or "Below 50°F"
             lo_temp = hi_temp = None
             bracket_label = title
@@ -580,6 +597,7 @@ def fetch_temp_kalshi_markets(city_key, market_type="high"):
                 "volume_24h":    vol_24h,
                 "volume":        volume,
                 "close_time":    close_time,
+                "ticker_date":   ticker_date,
             })
 
         # Sort by lo_temp ascending
@@ -710,6 +728,19 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
             analyzed.append(m)
             continue
 
+        # ── Guard: skip if ticker date doesn't match forecast target_date ────
+        # Kalshi opens next-day markets before midnight. If the scanner is running
+        # at 12:11 AM on April 10, it might see April 11 markets already listed
+        # as "open". We only want markets for our forecast's target date.
+        ticker_date = m.get("ticker_date")
+        fc_target   = forecast.get("target_date", "")
+        if ticker_date and fc_target and ticker_date != fc_target:
+            m["model_prob"] = None; m["gap_c"] = 0; m["net_gap_c"] = 0
+            m["grade"] = "skip"; m["edge_ratio"] = 0
+            m["skip_reason"] = f"wrong_date:{ticker_date}"
+            analyzed.append(m)
+            continue
+
         prob     = bracket_prob(lo, hi, mu, sigma)
         gap_c    = round((prob - ask) * 100)
         net_gap_c = max(0, gap_c - spr)
@@ -740,10 +771,25 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
         # Model spread confidence penalty
         spread_penalty = spread_hi > 2.0  # cross-model spread > 2°F = less confidence
 
+        # Is this bracket below the model center? (tail YES bet — longshot)
+        # e.g. model says 77°F but bracket is <76°F — betting against the most likely outcome
+        bracket_center = ((lo or (hi - 2)) + (hi or (lo + 2))) / 2 if (lo is not None or hi is not None) else mu
+        is_tail_bet = (hi is not None and hi <= mu) or (lo is None and hi is not None and hi < mu)
+
         # Grade: based on edge_ratio threshold (not flat cents)
+        # Additional rules:
+        #   - Require model_prob >= 0.35 for A-grade (market must agree bracket is plausible)
+        #   - Tail bets (bracket below model center) capped at B regardless of edge ratio
+        #   - Very low model prob (<20%) skipped even with large edge — too much variance
         if net_gap_c <= 0 or liq_grade == "D":
             grade = "skip"
-        elif edge_ratio >= 0.12 and not spread_penalty and liq_grade in ("A","B"):
+        elif prob < 0.20:
+            # Model says less than 20% chance — even with edge, skip (high variance longshot)
+            grade = "skip"
+        elif is_tail_bet and prob < 0.35:
+            # Bracket below model center AND low probability — skip
+            grade = "skip"
+        elif edge_ratio >= 0.12 and not spread_penalty and liq_grade in ("A","B") and prob >= 0.35:
             grade = "A"
         elif edge_ratio >= 0.07 and liq_grade in ("A","B","C"):
             grade = "B"
@@ -765,6 +811,7 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
             "liq_grade":    liq_grade,
             "liq_pts":      liq_pts,
             "spread_penalty": spread_penalty,
+            "is_tail_bet":  is_tail_bet,
             "grade":        grade,
             "actionable":   grade in ("A", "B"),
         })
