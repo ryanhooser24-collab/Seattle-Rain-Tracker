@@ -1258,31 +1258,35 @@ function renderTempCard(b){
   const barMdl = Math.max(3,Math.min(95,probC));
   const lo = b.lo_temp, hi = b.hi_temp;
   const center = muBest || ((lo!=null&&hi!=null)?(lo+hi)/2:64);
+  const isOpenHi = hi==null;
+  const isOpenLo = lo==null;
   const bLo = lo!=null ? lo : center-2;
   const bHi = hi!=null ? hi : center+2;
   const axMin = Math.floor(Math.min(center-3, bLo-1));
   const axMax = Math.ceil(Math.max(center+3, bHi+1));
   const axRange = axMax - axMin || 1;
   const pct = function(v){ return ((v-axMin)/axRange*100).toFixed(2); };
-  const ticks = [axMin, bLo, bHi, axMax];
+  const ticks = [axMin, axMax];
+  if(!isOpenLo) ticks.push(bLo);
+  if(!isOpenHi) ticks.push(bHi);
   const seen = {}; const tickHtml = ticks.filter(function(t){ if(seen[t]) return false; seen[t]=true; return true; }).map(function(t){
-    return '<div style="position:absolute;top:18px;left:'+pct(t)+'%;font-size:9px;color:var(--muted);transform:translateX(-50%);white-space:nowrap;">'+t+'\u00b0</div>';
+    return '<div style="position:absolute;top:18px;left:'+pct(t)+'%;font-size:9px;color:var(--muted);transform:translateX(-50%);white-space:nowrap;">'+t+'°</div>';
   }).join('');
-  const dotLeft  = muBest!=null ? pct(muBest) : '50';
-  const bLeft    = pct(bLo);
-  const bWidth   = ((bHi-bLo)/axRange*100).toFixed(2);
-  const WE = 'onmouseenter="this.querySelector(\'.tt\').style.display=\'block\'" onmouseleave="this.querySelector(\'.tt\').style.display=\'none\'"';
-
+  const dotLeft = muBest!=null ? pct(muBest) : '50';
+  const bLeft   = isOpenLo ? '0' : pct(bLo);
+  const bWidth  = isOpenHi ? (100 - parseFloat(bLeft) - 0.5).toFixed(2)
+                : isOpenLo ? parseFloat(pct(bHi)).toFixed(2)
+                : ((bHi-bLo)/axRange*100).toFixed(2);
   const rows = [
-    '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><div style="font-size:10px;color:var(--muted);width:52px;flex-shrink:0;">Market</div><div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden;"><div style="width:'+barMkt+'%;height:100%;background:#888780;border-radius:3px;"></div></div><div style="font-size:11px;font-weight:500;width:28px;text-align:right;color:var(--muted);">'+askC+'\u00a2</div></div>',
-    '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><div style="font-size:10px;color:var(--muted);width:52px;flex-shrink:0;">Model</div><div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden;"><div style="width:'+barMdl+'%;height:100%;background:#3B6D11;border-radius:3px;"></div></div><div style="font-size:11px;font-weight:500;width:28px;text-align:right;color:#3B6D11;">'+probC+'%</div></div>',
-    '<div style="padding-left:60px;font-size:10px;color:#3B6D11;margin-top:2px;">+'+(b.net_gap_c||0)+'\u00a2 net edge</div>'
+    '<div data-tip="Kalshi ask price — what you pay per contract." style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><div style="font-size:10px;color:var(--muted);width:52px;flex-shrink:0;">Market</div><div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden;"><div style="width:'+barMkt+'%;height:100%;background:#888780;border-radius:3px;"></div></div><div style="font-size:11px;font-weight:500;width:28px;text-align:right;color:var(--muted);">'+askC+'\u00a2</div></div>',
+    '<div data-tip="GFS + ECMWF + blend, bias-corrected." style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><div style="font-size:10px;color:var(--muted);width:52px;flex-shrink:0;">Model</div><div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden;"><div style="width:'+barMdl+'%;height:100%;background:#3B6D11;border-radius:3px;"></div></div><div style="font-size:11px;font-weight:500;width:28px;text-align:right;color:#3B6D11;">'+probC+'%</div></div>',
+    '<div data-tip="Model% minus market¢, minus spread cost." style="padding-left:60px;font-size:10px;color:#3B6D11;margin-top:2px;">+'+(b.net_gap_c||0)+'\u00a2 net edge</div>'
   ];
   const tips = ['Kalshi ask price \u2014 what you pay per contract.','GFS + ECMWF + blend, bias-corrected.','Model% minus market\u00a2, minus spread cost ('+(b.spread_c||0)+'\u00a2).'];
 
   let probHtml = '';
   for(let i=0;i<rows.length;i++){
-    probHtml += '<div title="'+tips[i]+'">'+rows[i]+'</div>';
+    probHtml += '<div>'+rows[i]+'</div>';
   }
 
   const statsData = [
@@ -1293,7 +1297,7 @@ function renderTempCard(b){
   let statsHtml = '';
   for(let i=0;i<statsData.length;i++){
     const s=statsData[i];
-    statsHtml += '<div title="'+s.t+'"><div style="background:var(--paper);border:0.5px solid var(--border);border-radius:6px;padding:7px 10px;"><div style="font-size:9px;color:var(--muted);margin-bottom:2px;text-transform:uppercase;letter-spacing:0.5px;">'+s.l+'</div><div style="font-size:13px;font-weight:500;color:'+(s.green?'#3B6D11':'var(--ink)')+';">'+s.v+'</div></div></div>';
+    statsHtml += '<div data-tip="'+s.t+'"><div style="background:var(--paper);border:0.5px solid var(--border);border-radius:6px;padding:7px 10px;"><div style="font-size:9px;color:var(--muted);margin-bottom:2px;text-transform:uppercase;letter-spacing:0.5px;">'+s.l+'</div><div style="font-size:13px;font-weight:500;color:'+(s.green?'#3B6D11':'var(--ink)')+';">'+s.v+'</div></div></div>';
   }
 
   return '<div class="temp-opp grade-'+b.grade+'" onclick="this.classList.toggle(\'open\')">'
@@ -1310,14 +1314,14 @@ function renderTempCard(b){
     +'<div class="bracket-detail"><div style="display:flex;flex-direction:column;gap:12px;">'
     +'<div>'+probHtml+'</div>'
     +'<div>'
-    +'<div title="GFS '+gfsLbl+' \u00b7 ECMWF '+ecLbl+' \u00b7 bias-corrected \u2192 '+bestLbl+'" style="display:inline-block;">'
+    +'<div title="GFS '+gfsLbl+' \u00b7 ECMWF '+ecLbl+' \u00b7 bias-corrected \u2192 '+bestLbl+'" data-tip="GFS '+gfsLbl+' \u00b7 ECMWF '+ecLbl+' \u00b7 bias-corrected \u2192 '+bestLbl+'" style="display:inline-block;cursor:default;">'
     +'<div style="font-size:9px;color:var(--muted);letter-spacing:0.5px;text-transform:uppercase;margin-bottom:6px;">Model center vs bracket</div>'
     +'</div>'
     +'<div style="position:relative;height:32px;margin:0 4px;">'
     +'<div style="position:absolute;top:12px;left:0;right:0;height:4px;background:var(--border);border-radius:2px;"></div>'
     +'<div style="position:absolute;top:12px;left:'+bLeft+'%;width:'+bWidth+'%;height:4px;background:#C0DD97;"></div>'
-    +'<div style="position:absolute;top:8px;left:'+bLeft+'%;height:12px;border-left:1.5px solid #3B6D11;"></div>'
-    +'<div style="position:absolute;top:8px;left:'+pct(bHi)+'%;height:12px;border-left:1.5px solid #3B6D11;"></div>'
+    +(isOpenLo ? '' : '<div style="position:absolute;top:8px;left:'+bLeft+'%;height:12px;border-left:1.5px solid #3B6D11;"></div>')
+    +(isOpenHi ? '' : '<div style="position:absolute;top:8px;left:'+pct(bHi)+'%;height:12px;border-left:1.5px solid #3B6D11;"></div>')
     +'<div style="position:absolute;top:0;left:'+dotLeft+'%;font-size:10px;font-weight:500;color:#3B6D11;transform:translateX(-50%);white-space:nowrap;">'+bestLbl+'</div>'
     +'<div style="position:absolute;top:8px;left:'+dotLeft+'%;width:12px;height:12px;border-radius:50%;background:var(--paper);border:2.5px solid #3B6D11;transform:translateX(-50%);"></div>'
     +tickHtml
@@ -2596,5 +2600,38 @@ async function loadBacktestResults(){
 
 </script>
 
+<div id="g-tip" style="display:none;position:fixed;background:var(--paper);border:0.5px solid var(--border);border-radius:6px;padding:6px 10px;font-size:10px;color:var(--muted);white-space:nowrap;z-index:9999;line-height:1.6;pointer-events:none;font-family:'DM Mono',monospace;max-width:280px;white-space:normal;"></div>
+<script>
+(function(){
+  const tip = document.getElementById('g-tip');
+  let cur = null;
+  document.addEventListener('mouseover', function(e){
+    const el = e.target.closest('[data-tip]');
+    if(el && el !== cur){
+      cur = el;
+      tip.textContent = el.getAttribute('data-tip');
+      tip.style.display = 'block';
+    } else if(!el){
+      cur = null;
+      tip.style.display = 'none';
+    }
+  });
+  document.addEventListener('mousemove', function(e){
+    if(tip.style.display === 'none') return;
+    const x = e.clientX + 14;
+    const y = e.clientY - 28;
+    const w = tip.offsetWidth;
+    const h = tip.offsetHeight;
+    tip.style.left = (x + w > window.innerWidth ? e.clientX - w - 8 : x) + 'px';
+    tip.style.top  = (y < 0 ? e.clientY + 14 : y) + 'px';
+  });
+  document.addEventListener('mouseout', function(e){
+    if(!e.relatedTarget || !e.relatedTarget.closest('[data-tip]')){
+      cur = null;
+      tip.style.display = 'none';
+    }
+  });
+})();
+</script>
 </body>
 </html>
