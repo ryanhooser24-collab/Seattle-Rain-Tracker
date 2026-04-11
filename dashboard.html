@@ -674,21 +674,8 @@ body{max-width:900px;margin:0 auto;}
 <!-- HISTORY -->
 <div id="p-hist" style="display:none">
   <div class="main">
-    <div class="hist-summary" style="margin-bottom:12px;">
-      <div class="bal-card"><div class="bal-lbl">Total P&L</div><div class="bal-val c-profit">+$87.42</div></div>
-      <div class="bal-card"><div class="bal-lbl">Win rate</div><div class="bal-val">71%</div></div>
-      <div class="bal-card"><div class="bal-lbl">Trades</div><div class="bal-val">14</div></div>
-      <div class="bal-card"><div class="bal-lbl">Avg win</div><div class="bal-val c-profit">+$49</div></div>
-    </div>
-    <div class="month-lbl">March 2026</div>
-    <div class="hist-row"><div><div class="hist-strike">Above 5 inches YES</div><div class="hist-meta">Mar 13 · 142 contracts @ 91¢ · $129.22</div></div><div style="text-align:right"><div class="hist-pnl hist-win">+$12.78</div><div class="hist-stat">Settled ✓</div></div></div>
-    <div class="hist-row"><div><div class="hist-strike">Above 6 inches YES</div><div class="hist-meta">Mar 13 · 142 contracts @ 71¢ · $100.82</div></div><div style="text-align:right"><div class="hist-pnl hist-open">Open</div><div class="hist-stat">+$24.14 unrealized</div></div></div>
-    <div class="hist-row"><div><div class="hist-strike">Above 7 inches NO</div><div class="hist-meta">Mar 15 · 98 contracts @ 62¢ · $60.76</div></div><div style="text-align:right"><div class="hist-pnl hist-open">Open</div><div class="hist-stat">-$6.86 unrealized</div></div></div>
-    <div class="month-lbl" style="margin-top:12px">February 2026</div>
-    <div class="hist-row"><div><div class="hist-strike">Above 4 inches YES</div><div class="hist-meta">Feb 19 · 200 contracts @ 49¢ · $98.00</div></div><div style="text-align:right"><div class="hist-pnl hist-win">+$102.00</div><div class="hist-stat">Settled ✓</div></div></div>
-    <div class="hist-row"><div><div class="hist-strike">Above 6 inches NO</div><div class="hist-meta">Feb 19 · 83 contracts @ 60¢ · $49.80</div></div><div style="text-align:right"><div class="hist-pnl hist-win">+$33.20</div><div class="hist-stat">Settled ✓</div></div></div>
-    <div class="hist-row"><div><div class="hist-strike">Above 7 inches YES</div><div class="hist-meta">Feb 22 · 200 contracts @ 24¢ · $48.00</div></div><div style="text-align:right"><div class="hist-pnl hist-loss">-$48.00</div><div class="hist-stat">Settled ✗</div></div></div>
-    <div class="footer" style="margin-top:12px">* Live history via Kalshi API · Integration coming in next release</div>
+    <div id="hist-summary" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px;"></div>
+    <div id="hist-list"><div style="color:var(--muted);font-size:11px;padding:16px 0;">Loading…</div></div>
   </div>
 </div>
 
@@ -1062,7 +1049,136 @@ function sw(t){
   if(t==='scan'&&!tempScanCache&&currentScanMode==='temp')loadTempScanner();
   if(t==='scan'&&currentScanMode==='temp')loadTempStatus();
   if(t==='pos')loadPortfolio();
+  if(t==='hist')loadHistory();
 }
+
+
+// ── HISTORY TAB — Kalshi settlements + model snapshots ───────────────────
+async function loadHistory(){
+  const summary=document.getElementById('hist-summary');
+  const list=document.getElementById('hist-list');
+  if(!list)return;
+  list.innerHTML='<div style="color:var(--muted);font-size:11px;padding:16px 0;">Loading…</div>';
+  try{
+    const [pnlRes,posRes,histRes]=await Promise.all([
+      fetch(SERVER+'/pnl?limit=200').then(r=>r.json()),
+      fetch(SERVER+'/portfolio').then(r=>r.json()),
+      fetch(SERVER+'/temp/history?limit=500').then(r=>r.json()),
+    ]);
+    const settled  = pnlRes.ok ? pnlRes.trades    : [];
+    const open     = posRes.ok ? posRes.positions  : [];
+    const snapshots= histRes.ok? histRes.snapshots : [];
+
+    // Build ticker->snapshot map from DB
+    const snapMap={};
+    snapshots.forEach(function(s){ snapMap[s.ticker]=s; });
+
+    // Enrich settled with DB snapshot + actual settlement temp
+    settled.forEach(function(t){
+      const s=snapMap[t.ticker];
+      if(s){ t.snap=s; }
+      if(s&&s.settled_temp!=null) t.actual_f=parseFloat(s.settled_temp);
+    });
+
+    const weather   = settled.filter(t=>/RAIN|KXHIGH|KXLOWT/.test(t.ticker||''));
+    const wins      = weather.filter(t=>t.outcome==='win');
+    const winRate   = weather.length?Math.round(wins.length/weather.length*100):null;
+    const weatherPnl= weather.reduce((s,t)=>s+(t.pnl||0),0);
+
+    if(summary)summary.innerHTML=
+      '<div class="bal-card"><div class="bal-lbl">Weather P&L</div>'
+      +'<div class="bal-val '+(weatherPnl>=0?'c-profit':'c-loss')+'">'+(weatherPnl>=0?'+':'')+'$'+weatherPnl.toFixed(2)+'</div></div>'
+      +'<div class="bal-card"><div class="bal-lbl">Win rate</div><div class="bal-val">'+(winRate!==null?winRate+'%':'—')+'</div></div>'
+      +'<div class="bal-card"><div class="bal-lbl">Weather trades</div><div class="bal-val">'+weather.length+'</div></div>'
+      +'<div class="bal-card"><div class="bal-lbl">Open positions</div><div class="bal-val">'+open.length+'</div></div>';
+
+    let html='';
+
+    // Model analysis — weather trades that have both snap and actual temp
+    const withData=weather.filter(t=>t.snap&&t.snap.best_forecast!=null&&t.actual_f!=null);
+    if(withData.length>=1){
+      const avgMiss=withData.reduce((s,t)=>s+(t.actual_f-parseFloat(t.snap.best_forecast)),0)/withData.length;
+      const ranHot=withData.filter(t=>t.actual_f>parseFloat(t.snap.best_forecast)).length;
+      const ranCold=withData.filter(t=>t.actual_f<parseFloat(t.snap.best_forecast)).length;
+      const missByCity={};
+      withData.forEach(function(t){
+        const city=t.snap.city||t.snap.nws_station||'?';
+        if(!missByCity[city])missByCity[city]={sum:0,n:0,losses:0};
+        missByCity[city].sum+=(t.actual_f-parseFloat(t.snap.best_forecast));
+        missByCity[city].n++;
+        if(t.outcome==='loss')missByCity[city].losses++;
+      });
+      html+='<div style="background:var(--paper);border:0.5px solid var(--border);border-radius:8px;padding:12px;margin-bottom:16px;">'
+        +'<div style="font-size:10px;color:var(--muted);letter-spacing:0.8px;text-transform:uppercase;margin-bottom:10px;">Model analysis — '+withData.length+' weather trade'+(withData.length>1?'s':'')+'</div>'
+        +'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px;">'
+        +'<div class="bal-card"><div class="bal-lbl">Avg miss</div><div style="font-size:15px;font-weight:500;color:'+(avgMiss>0?'#c0392b':'#378ADD')+';">'+(avgMiss>0?'+':'')+avgMiss.toFixed(1)+'°F</div></div>'
+        +'<div class="bal-card"><div class="bal-lbl">Ran hot</div><div style="font-size:15px;font-weight:500;">'+ranHot+'/'+withData.length+'</div></div>'
+        +'<div class="bal-card"><div class="bal-lbl">Ran cold</div><div style="font-size:15px;font-weight:500;">'+ranCold+'/'+withData.length+'</div></div>'
+        +'</div>'
+        +'<div style="font-size:10px;color:var(--muted);margin-bottom:6px;">Miss by city (actual − model center):</div>';
+      Object.keys(missByCity).forEach(function(city){
+        const m=missByCity[city];
+        const avg=m.sum/m.n;
+        html+='<div style="display:flex;justify-content:space-between;font-size:11px;padding:4px 0;border-bottom:0.5px solid var(--border);">'
+          +'<span>'+city+'</span>'
+          +'<span style="color:'+(avg>0?'#c0392b':'#378ADD')+';">'+(avg>0?'+':'')+avg.toFixed(1)+'°F avg · '+m.n+' trade'+(m.n>1?'s':'')+' · '+m.losses+' loss'+(m.losses!==1?'es':'')+'</span>'
+          +'</div>';
+      });
+      html+='</div>';
+    }
+
+    // Open positions
+    if(open.length){
+      html+='<div style="font-size:10px;color:var(--muted);letter-spacing:0.8px;text-transform:uppercase;margin-bottom:8px;">Open positions</div>';
+      open.forEach(function(p){
+        const isW=/RAIN|KXHIGH|KXLOWT/.test(p.ticker||'');
+        const unr=p.unrealized_pnl||0;
+        html+='<div class="hist-row">'
+          +'<div><div style="font-size:12px;font-weight:500;color:var(--ink);">'+(p.market_title||p.ticker)+'</div>'
+          +'<div style="font-size:10px;color:var(--muted);margin-top:2px;">'+p.ticker+' · '+p.yes_contracts+' contracts @ '+p.avg_yes_price_c+'¢ · $'+p.total_cost+(isW?' · <span style="color:#3B6D11;">weather</span>':'')+'</div></div>'
+          +'<div style="text-align:right;flex-shrink:0;">'
+          +'<div style="font-size:11px;font-weight:500;color:var(--muted);">Open</div>'
+          +'<div style="font-size:10px;color:'+(unr>=0?'var(--gain)':'var(--loss)')+';">'+(unr>=0?'+':'')+'$'+unr.toFixed(2)+' unrealized</div>'
+          +'</div></div>';
+      });
+    }
+
+    // Settled trades
+    if(settled.length){
+      html+='<div style="font-size:10px;color:var(--muted);letter-spacing:0.8px;text-transform:uppercase;margin:16px 0 8px;">Settled trades</div>';
+      let lastDate='';
+      settled.forEach(function(t){
+        if(t.date!==lastDate){html+='<div class="month-lbl">'+t.date+'</div>';lastDate=t.date;}
+        const win=t.outcome==='win';
+        const isW=/RAIN|KXHIGH|KXLOWT/.test(t.ticker||'');
+        const s=t.snap;
+        const mu=s?parseFloat(s.best_forecast):null;
+        const miss=(mu!=null&&t.actual_f!=null)?(t.actual_f-mu):null;
+        html+='<div class="hist-row" style="border-left:3px solid '+(win?'#3B6D11':'#c0392b')+';">'
+          +'<div style="flex:1;min-width:0;">'
+          +'<div style="font-size:12px;font-weight:500;color:var(--ink);">'+(t.market_title||t.ticker)+'</div>'
+          +'<div style="font-size:10px;color:var(--muted);margin-top:2px;">'+t.ticker+' · '+t.side+' · '+t.contracts+' @ '+t.avg_entry_c+'¢'+(isW?' · <span style="color:#3B6D11;">weather</span>':'')+'</div>'
+          +(s?'<div style="font-size:10px;color:var(--muted);margin-top:3px;">'
+            +'model '+(mu!=null?mu.toFixed(1)+'°':'?')+' / '+(s.model_prob?Math.round(s.model_prob*100)+'%':'?')+' / grade '+(s.grade||'?')
+            +(t.actual_f!=null?' · settled '+t.actual_f+'°F':'')
+            +(miss!=null?' · <span style="color:'+(Math.abs(miss)>2?'#c0392b':'var(--muted)')+';">miss '+(miss>0?'+':'')+miss.toFixed(1)+'°</span>':'')
+            +'</div>':'')
+          +'</div>'
+          +'<div style="text-align:right;flex-shrink:0;margin-left:12px;">'
+          +'<div style="font-size:13px;font-weight:500;color:'+(win?'var(--gain)':'var(--loss)')+';">'+(t.pnl>=0?'+':'')+'$'+t.pnl+'</div>'
+          +'<div style="font-size:10px;color:var(--muted);">'+(win?'✓ Win':'✗ Loss')+'</div>'
+          +'</div></div>';
+      });
+    }
+
+    if(!settled.length&&!open.length)
+      html='<div style="color:var(--muted);font-size:11px;padding:16px 0;">No trades found. Kalshi API key required.</div>';
+    list.innerHTML=html;
+  }catch(e){
+    list.innerHTML='<div style="color:var(--loss);font-size:11px;padding:16px 0;">Error: '+e+'</div>';
+  }
+}
+
 
 let currentScanMode = 'rain';
 
@@ -1314,6 +1430,7 @@ function renderTempCard(b){
     +'<div class="temp-opp-right">'
     +'<div class="temp-opp-edge">+'+b.net_gap_c+'\u00a2</div>'
     +'<div class="temp-opp-meta">liq '+(b.liq_grade||'?')+'</div>'
+
     +'</div></div>'
     +'<div class="bracket-detail"><div style="display:flex;flex-direction:column;gap:12px;">'
     +'<div>'+probHtml+'</div>'

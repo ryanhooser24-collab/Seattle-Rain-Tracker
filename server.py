@@ -396,15 +396,11 @@ def fetch_temp_forecast(city_key, horizon="d1"):
             return {"ok": False, "error": "; ".join(errors)}
 
         # Apply station bias corrections from cache (fall back to config defaults)
-        # NOTE: bias_cache contains gfs_bias calibrated on HIGH temperatures only.
-        # Applying the same bias to LOW forecasts is incorrect — GFS warm bias on
-        # afternoon highs does not reliably predict bias on overnight lows.
-        # LOW forecasts use zero bias correction until a separate low calibration
-        # is implemented. HIGH forecasts use the full calibrated bias.
         bias_cache = _TEMP_BIAS_CACHE.get(city_key, {})
         gfs_bias_high   = bias_cache.get("gfs_bias",   cfg.get("warm_bias_gfs",   0.0))
         ecmwf_bias_high = bias_cache.get("ecmwf_bias", cfg.get("warm_bias_ecmwf", 0.0))
-        gfs_bias_low    = 0.0   # TODO: calibrate separately from temperature_2m_min archive
+        blend_bias_high = bias_cache.get("blend_bias", 0.0)
+        gfs_bias_low    = 0.0
         ecmwf_bias_low  = 0.0
 
         gfs_raw    = results.get("gfs",   {})
@@ -415,18 +411,35 @@ def fetch_temp_forecast(city_key, horizon="d1"):
         gfs_lo_adj   = round(gfs_raw.get("low",   0) - gfs_bias_low,    1) if gfs_raw   else None
         ecmwf_hi_adj = round(ecmwf_raw.get("high",0) - ecmwf_bias_high, 1) if ecmwf_raw else None
         ecmwf_lo_adj = round(ecmwf_raw.get("low", 0) - ecmwf_bias_low,  1) if ecmwf_raw else None
+        blend_hi_adj = round(best_raw.get("high", 0) - blend_bias_high, 1) if best_raw  else None
+        blend_lo_adj = round(best_raw.get("low",  0) - 0.0,             1) if best_raw  else None
 
-        # Best = average of all available adj. forecasts
-        hi_vals = [v for v in [gfs_hi_adj, ecmwf_hi_adj,
-                                best_raw.get("high") if best_raw else None] if v is not None]
-        lo_vals = [v for v in [gfs_lo_adj, ecmwf_lo_adj,
-                                best_raw.get("low")  if best_raw else None] if v is not None]
+        # ── Use best model per city as the primary forecast center (mu) ──────
+        # Calibration picks the model with lowest bias-corrected RMSE per city.
+        # Fall back to 3-way average if calibration not yet run.
+        best_model = bias_cache.get("best_model", "average")
 
-        best_hi = round(sum(hi_vals) / len(hi_vals), 1) if hi_vals else None
-        best_lo = round(sum(lo_vals) / len(lo_vals), 1) if lo_vals else None
+        if best_model == "gfs" and gfs_hi_adj is not None:
+            best_hi = gfs_hi_adj
+            best_lo = gfs_lo_adj
+        elif best_model == "ecmwf" and ecmwf_hi_adj is not None:
+            best_hi = ecmwf_hi_adj
+            best_lo = ecmwf_lo_adj
+        elif best_model == "blend" and blend_hi_adj is not None:
+            best_hi = blend_hi_adj
+            best_lo = blend_lo_adj
+        else:
+            # No calibration yet — fall back to 3-way average
+            hi_vals = [v for v in [gfs_hi_adj, ecmwf_hi_adj, blend_hi_adj] if v is not None]
+            lo_vals = [v for v in [gfs_lo_adj, ecmwf_lo_adj, blend_lo_adj] if v is not None]
+            best_hi = round(sum(hi_vals) / len(hi_vals), 1) if hi_vals else None
+            best_lo = round(sum(lo_vals) / len(lo_vals), 1) if lo_vals else None
 
-        spread_hi = round(max(hi_vals) - min(hi_vals), 1) if len(hi_vals) >= 2 else 0.0
-        spread_lo = round(max(lo_vals) - min(lo_vals), 1) if len(lo_vals) >= 2 else 0.0
+        # Spread still computed across all three (shows disagreement regardless of which is best)
+        hi_all = [v for v in [gfs_hi_adj, ecmwf_hi_adj, blend_hi_adj] if v is not None]
+        lo_all = [v for v in [gfs_lo_adj, ecmwf_lo_adj, blend_lo_adj] if v is not None]
+        spread_hi = round(max(hi_all) - min(hi_all), 1) if len(hi_all) >= 2 else 0.0
+        spread_lo = round(max(lo_all) - min(lo_all), 1) if len(lo_all) >= 2 else 0.0
 
         # σ for this horizon from cache, else config fallback
         σ_key = "σ_d0" if horizon == "d0" else "σ_d1"
@@ -447,19 +460,16 @@ def fetch_temp_forecast(city_key, horizon="d1"):
             "gfs_low":      gfs_lo_adj,
             "ecmwf_high":   ecmwf_hi_adj,
             "ecmwf_low":    ecmwf_lo_adj,
-            "blend_high":   best_raw.get("high"),
-            "blend_low":    best_raw.get("low"),
+            "blend_high":   blend_hi_adj,
+            "blend_low":    blend_lo_adj,
             "best_high":    best_hi,
             "best_low":     best_lo,
+            "best_model":   best_model,
             "spread_high":  spread_hi,
             "spread_low":   spread_lo,
-            "gfs_bias_applied":      gfs_bias_high,
-            "ecmwf_bias_applied":    ecmwf_bias_high,
-            "gfs_bias_high":         gfs_bias_high,
-            "ecmwf_bias_high":       ecmwf_bias_high,
-            "gfs_bias_low":          gfs_bias_low,
-            "ecmwf_bias_low":        ecmwf_bias_low,
-            "low_bias_note":         "Low bias not yet calibrated — using raw model output",
+            "gfs_bias_applied":   gfs_bias_high,
+            "ecmwf_bias_applied": ecmwf_bias_high,
+            "blend_bias_applied": blend_bias_high,
             "sigma":        σ,
             "errors":       errors,
             "fetched_at":   _t.time(),
@@ -811,18 +821,22 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
         spread_exceeds_bracket = (raw_spread > 0 and bracket_width < 99 and
                                   raw_spread >= bracket_width * 0.75)
 
-        # Grade: base rules first, then apply structural penalties
+        # Grade: base rules
+        # A: strong edge ratio, good liquidity, model says >50% likely (favorite mispricing)
+        # B: decent edge ratio, OR model says 35-50% (edge exists but model not confident)
+        # C: weak edge, borderline
+        # skip: no edge, too uncertain, or structurally weak
         if net_gap_c <= 0 or liq_grade == "D":
             grade = "skip"
         elif prob < 0.20:
             grade = "skip"
         elif is_tail_bet and prob < 0.35:
             grade = "skip"
-        elif edge_ratio >= 0.12 and liq_grade in ("A","B") and prob >= 0.35:
-            grade = "A"
-        elif edge_ratio >= 0.07 and liq_grade in ("A","B","C"):
+        elif edge_ratio >= 0.12 and liq_grade in ("A","B") and prob >= 0.50:
+            grade = "A"   # model says likely AND strong edge signal
+        elif edge_ratio >= 0.07 and liq_grade in ("A","B","C") and prob >= 0.35:
             grade = "B"
-        elif edge_ratio >= 0.04:
+        elif edge_ratio >= 0.04 and prob >= 0.25:
             grade = "C"
         else:
             grade = "skip"
@@ -1379,24 +1393,28 @@ def maybe_auto_calibrate():
                             result[date_str] = round(val_c * 9/5 + 32, 1)
                     return result
 
-                # Fetch all three in parallel — no loop, no closures over loop vars
-                ex2 = _cf.ThreadPoolExecutor(max_workers=3)
+                # Fetch all four in parallel: GFS, ECMWF, Blend, Archive actuals
+                ex2 = _cf.ThreadPoolExecutor(max_workers=4)
                 try:
                     fg = ex2.submit(_fetch_bulk, "gfs_seamless",  False)
                     fe = ex2.submit(_fetch_bulk, "ecmwf_ifs",     False)
-                    fa = ex2.submit(_fetch_bulk, None,            True)   # archive = actual
+                    fb = ex2.submit(_fetch_bulk, "best_match",    False)
+                    fa = ex2.submit(_fetch_bulk, None,            True)
                     gfs_map    = fg.result(timeout=30)
                     ecmwf_map  = fe.result(timeout=30)
+                    blend_map  = fb.result(timeout=30)
                     actual_map = fa.result(timeout=30)
                 finally:
                     ex2.shutdown(wait=False)
 
-                errs_gfs = []; errs_ecmwf = []
+                errs_gfs = []; errs_ecmwf = []; errs_blend = []
                 for date_s, actual in actual_map.items():
                     if date_s in gfs_map:
                         errs_gfs.append(gfs_map[date_s] - actual)
                     if date_s in ecmwf_map:
                         errs_ecmwf.append(ecmwf_map[date_s] - actual)
+                    if date_s in blend_map:
+                        errs_blend.append(blend_map[date_s] - actual)
 
                 def _stats(e):
                     if not e: return 0.0, cfg["σ_d1"]
@@ -1405,28 +1423,56 @@ def maybe_auto_calibrate():
 
                 gb, gr = _stats(errs_gfs)
                 eb, er = _stats(errs_ecmwf)
+                bb, br = _stats(errs_blend)
 
-                # ECMWF RMSE < 0.3°F across 7+ days means Open-Meteo is returning
-                # the same underlying data for both "forecast" and "archive" on recent
-                # dates — ERA5 isn't available yet so they share the analysis.
-                # Exclude from σ calculation; use GFS RMSE only.
+                # ECMWF mirror detection — RMSE < 0.3°F means same data as archive
                 ecmwf_is_mirror = (er < 0.3 and len(errs_ecmwf) >= 5)
                 if ecmwf_is_mirror:
-                    eb = 0.0  # don't apply a fake bias
-                    er = 0.0  # exclude from σ
+                    eb = 0.0; er = 99.0  # exclude from best-model selection
 
-                rmse_vals = [v for v in [gr, er] if v > 0.1]  # exclude 0 and near-0
-                σ_d1 = round(sum(rmse_vals)/len(rmse_vals), 2) if rmse_vals else cfg["σ_d1"]
+                # ── Pick best model per city based on lowest bias-corrected RMSE ──
+                # Bias-corrected RMSE: after removing the mean error, what's left?
+                # This is the true forecast skill — a biased model can still be
+                # good after correction. We want the model with tightest residuals.
+                def _bc_rmse(errs, bias):
+                    if not errs or len(errs) < 5: return 99.0
+                    bc = [e - bias for e in errs]
+                    return round(sqrt(sum(x**2 for x in bc) / len(bc)), 2)
+
+                bc_rmse_gfs   = _bc_rmse(errs_gfs,   gb)
+                bc_rmse_ecmwf = _bc_rmse(errs_ecmwf, eb) if not ecmwf_is_mirror else 99.0
+                bc_rmse_blend = _bc_rmse(errs_blend, bb)
+
+                candidates = {
+                    "gfs":   (bc_rmse_gfs,   gb, gr),
+                    "ecmwf": (bc_rmse_ecmwf, eb, er),
+                    "blend": (bc_rmse_blend, bb, br),
+                }
+                best_model = min(candidates, key=lambda k: candidates[k][0])
+                best_bc_rmse, best_bias, best_rmse = candidates[best_model]
+
+                # σ_d1 = RMSE of the best model (already bias-corrected = bc_rmse)
+                σ_d1 = round(best_bc_rmse, 2) if best_bc_rmse < 90 else cfg["σ_d1"]
 
                 _TEMP_BIAS_CACHE[city_key] = {
-                    "gfs_bias":   gb,
-                    "ecmwf_bias": eb,
-                    "σ_d1":       σ_d1,
-                    "σ_d0":       round(σ_d1 * 0.70, 2),
-                    "n_days":     len(errs_gfs),
-                    "calibrated_at": _t.time(),
+                    "gfs_bias":       gb,
+                    "ecmwf_bias":     eb,
+                    "blend_bias":     bb,
+                    "gfs_rmse":       gr,
+                    "ecmwf_rmse":     er if not ecmwf_is_mirror else 0.0,
+                    "blend_rmse":     br,
+                    "gfs_bc_rmse":    bc_rmse_gfs,
+                    "ecmwf_bc_rmse":  bc_rmse_ecmwf,
+                    "blend_bc_rmse":  bc_rmse_blend,
+                    "best_model":     best_model,   # "gfs", "ecmwf", or "blend"
+                    "best_model_bias": best_bias,
+                    "σ_d1":           σ_d1,
+                    "σ_d0":           round(σ_d1 * 0.70, 2),
+                    "n_days":         len(errs_gfs),
+                    "calibrated_at":  _t.time(),
                 }
-                print(f"    ✓ {city_key}: gfs_bias={gb:+.1f}°F ecmwf_bias={eb:+.1f}°F σ_d1={σ_d1}°F n={len(errs_gfs)}")
+                print(f"    ✓ {city_key}: best={best_model} (bc_rmse={best_bc_rmse}°F) "
+                      f"gfs={bc_rmse_gfs} ecmwf={bc_rmse_ecmwf} blend={bc_rmse_blend} σ={σ_d1}°F")
                 return city_key, True
             except Exception as e:
                 print(f"    ✗ {city_key} calibration failed: {e}")
@@ -4050,6 +4096,69 @@ class Handler(BaseHTTPRequestHandler):
                 "last_settle_run": _LAST_SETTLE_RUN,
             })
 
+        elif path == "/temp/history":
+            # Return weather trade history by joining Kalshi settlements
+            # with temp_snapshots to get model predictions + actual temps.
+            # The frontend merges this with /pnl for P&L data.
+            conn = get_db()
+            if not conn:
+                self.send_json({"ok": False, "error": "No DB"})
+            else:
+                try:
+                    qs    = parse_qs(urlparse(self.path).query)
+                    limit = int(qs.get("limit", [200])[0])
+                    with conn.cursor() as cur:
+                        # Get best snapshot per ticker (most recent scan)
+                        cur.execute("""
+                            SELECT DISTINCT ON (ticker)
+                                ticker, city, nws_station, target_date,
+                                bracket_label, lo_temp, hi_temp,
+                                gfs_forecast, ecmwf_forecast, best_forecast,
+                                sigma, model_prob, yes_ask,
+                                gap_c, net_gap_c, edge_ratio, kelly_frac,
+                                grade, liq_grade,
+                                settled_temp, settled_correct, scan_ts
+                            FROM temp_snapshots
+                            WHERE grade IN ('A','B','C')
+                            ORDER BY ticker, scan_ts DESC
+                            LIMIT %s
+                        """, (limit,))
+                        cols = [d[0] for d in cur.description]
+                        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+                    conn.close()
+                    # Serialize dates/decimals
+                    for r in rows:
+                        for k, v in r.items():
+                            if hasattr(v, 'isoformat'): r[k] = v.isoformat()
+                            elif hasattr(v, '__float__'): r[k] = float(v)
+                    self.send_json({"ok": True, "snapshots": rows, "count": len(rows)})
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/temp/cli":
+            # Fetch NWS CLI for a station and return settlement integer.
+            # Used by the dashboard trade log to auto-fill settlement.
+            # Query params: station=KMIA  (required)
+            # Returns: { ok, station, high, low, date, is_final }
+            qs      = parse_qs(urlparse(self.path).query)
+            station = qs.get("station", [None])[0]
+            if not station:
+                self.send_json({"ok": False, "error": "station param required"})
+            else:
+                cli = fetch_nws_temp_cli(station.upper())
+                if cli.get("ok"):
+                    self.send_json({
+                        "ok":       True,
+                        "station":  station.upper(),
+                        "high":     cli.get("high"),
+                        "low":      cli.get("low"),
+                        "date":     cli.get("date"),
+                        "is_final": cli.get("is_final", False),
+                        "issued":   cli.get("issued"),
+                    })
+                else:
+                    self.send_json({"ok": False, "error": cli.get("error", "CLI fetch failed")})
+
         elif path == "/temp/status":
             # Quick system health for the temp pipeline
             import pytz
@@ -4262,13 +4371,13 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/pnl":
             # Fetch trade history for P&L chart
-            # Returns settled trades grouped by date for charting
+            # Returns settled trades for history tab
             if not KALSHI_KEY_ID:
                 self.send_json({"ok": False, "error": "No Kalshi API key"})
             else:
                 try:
                     qs     = parse_qs(urlparse(self.path).query)
-                    limit  = int(qs.get("limit", [100])[0])
+                    limit  = int(qs.get("limit", [200])[0])
                     r = requests.get(
                         f"{KALSHI_BASE}/portfolio/settlements",
                         headers=kalshi_auth_headers("GET", "/trade-api/v2/portfolio/settlements"),
@@ -4281,22 +4390,47 @@ class Handler(BaseHTTPRequestHandler):
                     trades = []
                     cumulative = 0.0
                     for s in reversed(data.get("settlements", [])):
-                        pnl = float(s.get("revenue", 0) or 0) / 100
+                        pnl        = float(s.get("revenue", 0) or 0) / 100
+                        yes_cost   = float(s.get("yes_total_cost", 0) or 0) / 100
+                        no_cost    = float(s.get("no_total_cost",  0) or 0) / 100
+                        yes_count  = float(s.get("yes_count", 0) or 0)
+                        no_count   = float(s.get("no_count",  0) or 0)
+                        ticker     = s.get("ticker", "")
                         cumulative += pnl
+
+                        # Determine side and avg entry price
+                        if yes_count > 0:
+                            side   = "YES"
+                            contracts = yes_cost
+                            avg_c  = round((yes_cost / max(yes_count, 1)) * 100, 1)
+                        else:
+                            side   = "NO"
+                            contracts = no_cost
+                            avg_c  = round((no_cost / max(no_count, 1)) * 100, 1)
+
+                        # Win/loss: positive revenue = win
+                        outcome = "win" if pnl > 0 else ("loss" if pnl < 0 else "push")
+
                         trades.append({
-                            "date":       s.get("updated_ts", "")[:10],
-                            "ticker":     s.get("ticker", ""),
-                            "pnl":        round(pnl, 2),
-                            "cumulative": round(cumulative, 2),
-                            "no_total":   float(s.get("no_total_cost", 0) or 0) / 100,
-                            "yes_total":  float(s.get("yes_total_cost", 0) or 0) / 100,
+                            "date":        s.get("updated_ts", "")[:10],
+                            "ticker":      ticker,
+                            "market_title": s.get("market_title", "") or ticker,
+                            "side":        side,
+                            "contracts":   round(yes_count if side=="YES" else no_count, 0),
+                            "avg_entry_c": avg_c,
+                            "cost":        round(yes_cost if side=="YES" else no_cost, 2),
+                            "pnl":         round(pnl, 2),
+                            "cumulative":  round(cumulative, 2),
+                            "outcome":     outcome,
                         })
 
+                    # Return newest first
+                    trades.reverse()
                     self.send_json({
-                        "ok": True,
-                        "trades":     trades,
-                        "total_pnl":  round(cumulative, 2),
-                        "count":      len(trades),
+                        "ok":        True,
+                        "trades":    trades,
+                        "total_pnl": round(cumulative, 2),
+                        "count":     len(trades),
                     })
                 except Exception as e:
                     self.send_json({"ok": False, "error": str(e)})
