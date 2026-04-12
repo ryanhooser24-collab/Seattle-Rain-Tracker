@@ -238,26 +238,38 @@ body{max-width:900px;margin:0 auto;}
 .pos-btn-yes{border-color:var(--yes);color:var(--yes);background:var(--yes-lt);}
 .pos-btn-no{border-color:var(--no);color:var(--no);background:var(--no-lt);}
 
-/* RULES TAB */
-.rules-list{display:grid;gap:10px;}
-.rule-card{background:var(--paper);border:0.5px solid var(--border);border-radius:8px;overflow:hidden;}
-.rule-card.rule-on{border-color:var(--yes-border);}
-.rule-hdr{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:0.5px solid var(--border);}
-.rule-card.rule-on .rule-hdr{background:var(--yes-lt);}
-.rule-name{font-size:13px;font-weight:500;}
-.rule-tog-wrap{display:flex;align-items:center;gap:8px;font-size:10px;color:var(--muted);}
-.rule-tog{width:32px;height:18px;border-radius:9px;border:none;cursor:pointer;position:relative;background:var(--border);}
-.rule-tog.on{background:var(--yes);}
-.rule-thumb{position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;transition:left .15s;}
-.rule-tog.on .rule-thumb{left:16px;}
-.rule-body{padding:12px 14px;}
-.rule-conds{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:8px;}
-.rule-cond{background:var(--bg);border-radius:4px;padding:7px 9px;}
-.rule-cond-lbl{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:2px;}
-.rule-cond-val{font-size:12px;font-weight:500;}
-.rule-desc{font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:8px;}
-.rule-log{font-size:10px;color:var(--muted);padding:6px 8px;background:var(--bg);border-radius:4px;line-height:1.7;}
-.log-yes{color:var(--yes);font-weight:500;}
+/* AUTO-TRADER TAB */
+.at-stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;}
+.at-stat{background:var(--bg);border-radius:6px;padding:10px 12px;}
+.at-stat-lbl{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:3px;}
+.at-stat-val{font-size:18px;font-weight:500;}
+.at-card{background:var(--paper);border:0.5px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:10px;}
+.at-row{display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:0.5px solid var(--border);}
+.at-row:last-child{border-bottom:none;}
+.at-row-lbl{font-size:12px;color:var(--muted);}
+.at-param{display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:0.5px solid var(--border);position:relative;}
+.at-param:last-child{border-bottom:none;}
+.at-param-lbl{font-size:11px;color:var(--muted);width:160px;flex-shrink:0;display:flex;align-items:center;gap:4px;}
+.at-param-val{font-size:11px;font-weight:500;width:48px;text-align:right;flex-shrink:0;}
+.at-tip-icon{width:13px;height:13px;border-radius:50%;background:var(--bg);border:0.5px solid var(--border);font-size:9px;color:var(--muted);display:inline-flex;align-items:center;justify-content:center;cursor:default;flex-shrink:0;}
+.at-tip-icon:hover+.at-tip-box,.at-tip-icon:focus+.at-tip-box{display:block;}
+.at-tip-box{display:none;position:absolute;left:0;top:calc(100% + 2px);background:var(--paper);border:0.5px solid var(--border);border-radius:6px;padding:7px 10px;font-size:10px;color:var(--muted);line-height:1.6;z-index:20;width:260px;box-shadow:none;}
+.at-order-row{display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:0.5px solid var(--border);}
+.at-order-row:last-child{border-bottom:none;}
+.at-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;margin-top:4px;}
+.at-dot-open{background:#378ADD;}
+.at-dot-win{background:#3B6D11;}
+.at-dot-loss{background:#A32D2D;}
+.at-log-line{font-size:10px;color:var(--muted);font-family:monospace;padding:3px 0;border-bottom:0.5px solid var(--border);line-height:1.5;}
+.at-log-line:last-child{border-bottom:none;}
+.at-log-ts{color:var(--muted);opacity:0.6;margin-right:6px;}
+.at-log-ok{color:#3B6D11;}
+.at-log-skip{color:#854F0B;}
+.at-log-err{color:#A32D2D;}
+.at-toggle{width:32px;height:18px;background:var(--border);border-radius:9px;position:relative;cursor:pointer;transition:background .15s;border:none;padding:0;flex-shrink:0;}
+.at-toggle.on{background:var(--yes);}
+.at-toggle::after{content:'';position:absolute;top:2px;left:2px;width:14px;height:14px;background:#fff;border-radius:50%;transition:transform .15s;}
+.at-toggle.on::after{transform:translateX(14px);}
 .log-warn{color:#BA7517;font-weight:500;}
 .log-info{color:var(--rain);font-weight:500;}
 .add-rule-btn{width:100%;padding:12px;font-size:11px;letter-spacing:1px;text-transform:uppercase;cursor:pointer;border-radius:8px;border:0.5px dashed var(--border);background:transparent;color:var(--muted);font-family:inherit;}
@@ -443,7 +455,7 @@ body{max-width:900px;margin:0 auto;}
   <div class="tab active" id="t-scan" onclick="sw('scan')">Scanner</div>
   <div class="tab" id="t-dash" onclick="sw('dash')">Rainfall Tracker</div>
   <div class="tab" id="t-pos" onclick="sw('pos')">Positions</div>
-  <div class="tab" id="t-rules" onclick="sw('rules')">Rules</div>
+  <div class="tab" id="t-rules" onclick="sw('rules')">Auto-trader</div>
   <div class="tab" id="t-hist" onclick="sw('hist')">History</div>
   <div class="tab" id="t-bt" onclick="sw('bt')">Backtest</div>
 </div>
@@ -604,69 +616,95 @@ body{max-width:900px;margin:0 auto;}
   </div>
 </div>
 
-<!-- RULES -->
+<!-- AUTO-TRADER -->
 <div id="p-rules" style="display:none">
   <div class="main">
-    <div class="section-lbl">Auto-trade rules</div>
-    <div class="rules-list" style="margin-bottom:12px;">
-      <div class="rule-card rule-on">
-        <div class="rule-hdr">
-          <div class="rule-name">Strong YES entry</div>
-          <div class="rule-tog-wrap"><span>Active</span><div class="rule-tog on" onclick="togRule(this)"><div class="rule-thumb"></div></div></div>
+    <div id="at-stats" class="at-stat-grid">
+      <div class="at-stat"><div class="at-stat-lbl">Status</div><div class="at-stat-val" id="at-status-val" style="color:var(--muted);">Stopped</div></div>
+      <div class="at-stat"><div class="at-stat-lbl">Today's bets</div><div class="at-stat-val" id="at-bets-val">—</div></div>
+      <div class="at-stat"><div class="at-stat-lbl">Deployed</div><div class="at-stat-val" id="at-deployed-val">—</div></div>
+      <div class="at-stat"><div class="at-stat-lbl">Daily limit</div><div class="at-stat-val" id="at-limit-val">—</div></div>
+    </div>
+
+    <div class="at-card">
+      <div class="section-lbl" style="margin-bottom:10px;">Engine</div>
+      <div class="at-row">
+        <div>
+          <div style="font-size:13px;font-weight:500;color:var(--ink);">Auto-trader</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px;">Scans every 5 min · waits for settlement before re-entry</div>
         </div>
-        <div class="rule-body">
-          <div class="rule-conds">
-            <div class="rule-cond"><div class="rule-cond-lbl">Weighted edge</div><div class="rule-cond-val">&gt;= +0.40</div></div>
-            <div class="rule-cond"><div class="rule-cond-lbl">Days remaining</div><div class="rule-cond-val">3 – 7</div></div>
-            <div class="rule-cond"><div class="rule-cond-lbl">Max bet</div><div class="rule-cond-val">$150</div></div>
-            <div class="rule-cond"><div class="rule-cond-lbl">Profit target</div><div class="rule-cond-val">+15¢</div></div>
-            <div class="rule-cond"><div class="rule-cond-lbl">Stop loss</div><div class="rule-cond-val">-10¢</div></div>
-            <div class="rule-cond"><div class="rule-cond-lbl">Proj stop</div><div class="rule-cond-val">-0.50"</div></div>
-          </div>
-          <div class="rule-desc">Enter YES when weighted edge &gt;= 0.40 and 3–7 days remain. Exit at +15¢ profit, -10¢ stop, or if projection drops &gt;0.50" from entry.</div>
-          <div class="rule-log">Last triggered: <span class="log-yes">Mar 13 · Above 6" YES at 71¢</span> · +$24.14 unrealized · <span class="log-info">target hit</span></div>
+        <button class="at-toggle" id="at-master-toggle" onclick="atToggleMaster(this)"></button>
+      </div>
+      <div class="at-row">
+        <div class="at-row-lbl">Min grade</div>
+        <select id="at-min-grade" style="font-size:11px;border:0.5px solid var(--border);border-radius:5px;padding:3px 8px;background:var(--paper);color:var(--ink);font-family:inherit;">
+          <option value="A">A only</option>
+          <option value="AB">A or B</option>
+        </select>
+      </div>
+      <div class="at-row">
+        <div class="at-row-lbl">Horizons</div>
+        <div style="display:flex;gap:6px;">
+          <button id="at-d0-btn" onclick="atToggleHorizon('d0',this)" style="font-size:10px;padding:3px 10px;border-radius:4px;border:0.5px solid var(--yes-border);background:var(--yes-lt);color:#27500A;cursor:pointer;font-family:inherit;">D+0</button>
+          <button id="at-d1-btn" onclick="atToggleHorizon('d1',this)" style="font-size:10px;padding:3px 10px;border-radius:4px;border:0.5px solid var(--yes-border);background:var(--yes-lt);color:#27500A;cursor:pointer;font-family:inherit;">D+1</button>
         </div>
       </div>
-      <div class="rule-card rule-on">
-        <div class="rule-hdr">
-          <div class="rule-name">Strong NO entry</div>
-          <div class="rule-tog-wrap"><span>Active</span><div class="rule-tog on" onclick="togRule(this)"><div class="rule-thumb"></div></div></div>
-        </div>
-        <div class="rule-body">
-          <div class="rule-conds">
-            <div class="rule-cond"><div class="rule-cond-lbl">Weighted edge</div><div class="rule-cond-val">&lt;= -0.40</div></div>
-            <div class="rule-cond"><div class="rule-cond-lbl">Days remaining</div><div class="rule-cond-val">3 – 7</div></div>
-            <div class="rule-cond"><div class="rule-cond-lbl">Max bet</div><div class="rule-cond-val">$100</div></div>
-            <div class="rule-cond"><div class="rule-cond-lbl">Profit target</div><div class="rule-cond-val">+15¢</div></div>
-            <div class="rule-cond"><div class="rule-cond-lbl">Stop loss</div><div class="rule-cond-val">-10¢</div></div>
-            <div class="rule-cond"><div class="rule-cond-lbl">Proj stop</div><div class="rule-cond-val">+0.50"</div></div>
-          </div>
-          <div class="rule-desc">Enter NO when weighted edge &lt;= -0.40 and 3–7 days remain. Exit if projection rises &gt;0.50" from entry — thesis broken.</div>
-          <div class="rule-log">Last triggered: <span class="log-warn">Mar 15 · Above 7" NO at 62¢</span> · <span class="log-warn">approaching proj stop</span></div>
-        </div>
-      </div>
-      <div class="rule-card">
-        <div class="rule-hdr">
-          <div class="rule-name">Lean entry — longer window</div>
-          <div class="rule-tog-wrap"><span style="color:var(--muted)">Paused</span><div class="rule-tog" onclick="togRule(this)"><div class="rule-thumb"></div></div></div>
-        </div>
-        <div class="rule-body">
-          <div class="rule-conds">
-            <div class="rule-cond"><div class="rule-cond-lbl">Weighted edge</div><div class="rule-cond-val">&gt;= +0.20</div></div>
-            <div class="rule-cond"><div class="rule-cond-lbl">Days remaining</div><div class="rule-cond-val">7 – 10</div></div>
-            <div class="rule-cond"><div class="rule-cond-lbl">Max bet</div><div class="rule-cond-val">$75</div></div>
-          </div>
-          <div class="rule-desc">Looser entry when edge is moderate and WU is less reliable. Smaller size, wider stops.</div>
-          <div class="rule-log">Last triggered: <span class="log-info">never · paused pending backtest</span></div>
-        </div>
+      <div class="at-row">
+        <div class="at-row-lbl">Next scan</div>
+        <div id="at-next-scan" style="font-size:12px;font-weight:500;color:var(--ink);">—</div>
       </div>
     </div>
-    <button class="add-rule-btn" style="margin-bottom:16px;">+ New rule</button>
-    <div class="section-lbl">Expansion markets</div>
-    <div class="exp-grid">
-      <div class="exp-card"><div class="exp-city">Portland, OR</div><div class="exp-market">KXRAINPDXM</div><span class="exp-badge exp-soon">Deploying</span><div class="exp-note">Same Pacific climate. Config swap only — CITY=portland.</div></div>
-      <div class="exp-card"><div class="exp-city">Los Angeles, CA</div><div class="exp-market">KXRAINLAXM</div><span class="exp-badge exp-soon">Deploying</span><div class="exp-note">Mediterranean. Nov–Apr only. Binary storm events.</div></div>
-      <div class="exp-card"><div class="exp-city">San Francisco, CA</div><div class="exp-market">KXRAINSFO</div><span class="exp-badge exp-research">Verifying ticker</span><div class="exp-note">Frontal seasonal. Nov–Apr tradeable. Confirm Kalshi series.</div></div>
+
+    <div class="at-card">
+      <div class="section-lbl" style="margin-bottom:4px;">Sizing &amp; limits</div>
+      <div class="at-param">
+        <span class="at-param-lbl">Kelly multiplier <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Fraction of full Kelly to use. Full Kelly (1.0×) maximizes long-run growth but has high variance. Half-Kelly (0.5×) is the standard conservative choice — cuts variance significantly with modest EV loss.</div></span>
+        <input type="range" min="10" max="100" step="5" value="50" style="flex:1;" oninput="document.getElementById('at-kelly-val').textContent=(this.value/100).toFixed(2)+'×';atSaveSetting('kelly_mult',this.value/100)">
+        <span class="at-param-val" id="at-kelly-val">0.50×</span>
+      </div>
+      <div class="at-param">
+        <span class="at-param-lbl">Bankroll unit <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">The dollar amount Kelly sizing is applied against. Kelly size = multiplier × unit. E.g. 0.5× Kelly on a $100 unit with 40% Kelly fraction = $20 bet. Increase this as your account grows.</div></span>
+        <input type="range" min="50" max="1000" step="50" value="100" style="flex:1;" oninput="document.getElementById('at-unit-val').textContent='$'+this.value;atSaveSetting('bankroll_unit',this.value)">
+        <span class="at-param-val" id="at-unit-val">$100</span>
+      </div>
+      <div class="at-param">
+        <span class="at-param-lbl">Max per bet <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Hard dollar cap per order regardless of Kelly output. Prevents outsized bets on very high-confidence signals where Kelly would suggest a large position. Acts as a safety ceiling.</div></span>
+        <input type="range" min="10" max="500" step="10" value="50" style="flex:1;" oninput="document.getElementById('at-maxbet-val').textContent='$'+this.value;atSaveSetting('max_bet',this.value)">
+        <span class="at-param-val" id="at-maxbet-val">$50</span>
+      </div>
+      <div class="at-param">
+        <span class="at-param-lbl">Daily loss limit <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Auto-trader pauses for the rest of the day once realized losses hit this threshold. Resets at midnight. Prevents a bad model day from compounding into a large drawdown.</div></span>
+        <input type="range" min="25" max="500" step="25" value="200" style="flex:1;" oninput="document.getElementById('at-losslim-val').textContent='$'+this.value;atSaveSetting('daily_loss_limit',this.value)">
+        <span class="at-param-val" id="at-losslim-val">$200</span>
+      </div>
+      <div class="at-param">
+        <span class="at-param-lbl">Max open positions <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Maximum number of unsettled weather positions at once. New bets are skipped when this limit is reached, even if an A-grade signal appears. Keeps total exposure bounded.</div></span>
+        <input type="range" min="1" max="20" step="1" value="5" style="flex:1;" oninput="document.getElementById('at-maxpos-val').textContent=this.value;atSaveSetting('max_positions',this.value)">
+        <span class="at-param-val" id="at-maxpos-val">5</span>
+      </div>
+      <div class="at-param">
+        <span class="at-param-lbl">Max per city <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Max concurrent open positions in a single city. Prevents doubling up on multiple brackets in Miami when the model is wrong about Miami — losses would be correlated.</div></span>
+        <input type="range" min="1" max="5" step="1" value="2" style="flex:1;" oninput="document.getElementById('at-percity-val').textContent=this.value;atSaveSetting('max_per_city',this.value)">
+        <span class="at-param-val" id="at-percity-val">2</span>
+      </div>
+      <div class="at-param">
+        <span class="at-param-lbl">Min 24h volume <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Skip D+1 markets where 24h volume is below this threshold. Early D+1 markets often have thin books and unreliable pricing. Volume builds through the day as more traders enter.</div></span>
+        <input type="range" min="0" max="2000" step="100" value="500" style="flex:1;" oninput="document.getElementById('at-vol-val').textContent='$'+this.value;atSaveSetting('min_volume',this.value)">
+        <span class="at-param-val" id="at-vol-val">$500</span>
+      </div>
+    </div>
+
+    <div class="at-card">
+      <div class="section-lbl" style="margin-bottom:10px;">Active orders</div>
+      <div id="at-orders"><div style="font-size:11px;color:var(--muted);">No orders today.</div></div>
+    </div>
+
+    <div class="at-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <div class="section-lbl" style="margin-bottom:0;">Execution log <span style="font-weight:400;color:var(--muted);">— last 3 days</span></div>
+        <button onclick="loadAutoTrader()" style="font-size:9px;padding:3px 8px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;">↻</button>
+      </div>
+      <div id="at-log"><div style="font-size:11px;color:var(--muted);">Not yet implemented.</div></div>
     </div>
   </div>
 </div>
@@ -1050,6 +1088,77 @@ function sw(t){
   if(t==='scan'&&currentScanMode==='temp')loadTempStatus();
   if(t==='pos')loadPortfolio();
   if(t==='hist')loadHistory();
+  if(t==='rules')loadAutoTrader();
+}
+
+// ── AUTO-TRADER TAB ───────────────────────────────────────────────────────
+const AT_HORIZONS = {d0: true, d1: true};
+
+function atToggleMaster(btn){
+  btn.classList.toggle('on');
+  const on = btn.classList.contains('on');
+  document.getElementById('at-status-val').textContent = on ? 'Running' : 'Stopped';
+  document.getElementById('at-status-val').style.color = on ? 'var(--yes)' : 'var(--muted)';
+}
+
+function atToggleHorizon(hz, btn){
+  AT_HORIZONS[hz] = !AT_HORIZONS[hz];
+  const on = AT_HORIZONS[hz];
+  btn.style.background = on ? 'var(--yes-lt)' : 'var(--bg)';
+  btn.style.borderColor = on ? 'var(--yes-border)' : 'var(--border)';
+  btn.style.color = on ? '#27500A' : 'var(--muted)';
+}
+
+function atSaveSetting(key, val){
+  // Will POST to /auto-trader/config when endpoint is built
+  // For now stores in sessionStorage for UI state
+  try { sessionStorage.setItem('at_'+key, val); } catch(e){}
+}
+
+async function loadAutoTrader(){
+  // Load open positions for today's orders section
+  const ordersEl = document.getElementById('at-orders');
+  const logEl    = document.getElementById('at-log');
+  const betsEl   = document.getElementById('at-bets-val');
+  const deployEl = document.getElementById('at-deployed-val');
+  const limitEl  = document.getElementById('at-limit-val');
+
+  try {
+    const posRes = await fetch(SERVER+'/portfolio').then(r=>r.json());
+    const positions = posRes.ok ? posRes.positions : [];
+    const weatherPos = positions.filter(p=>/RAIN|KXHIGH|KXLOWT|KXLOWS/.test(p.ticker||''));
+
+    if(betsEl) betsEl.textContent = weatherPos.length;
+    const deployed = weatherPos.reduce((s,p)=>s+(p.total_cost||0),0);
+    if(deployEl) deployEl.textContent = '$'+deployed.toFixed(2);
+
+    if(ordersEl){
+      if(!weatherPos.length){
+        ordersEl.innerHTML='<div style="font-size:11px;color:var(--muted);">No open weather positions.</div>';
+      } else {
+        ordersEl.innerHTML = weatherPos.map(function(p){
+          return '<div class="at-order-row">'
+            +'<div class="at-dot at-dot-open"></div>'
+            +'<div style="flex:1;">'
+            +'<div style="font-size:12px;font-weight:500;color:var(--ink);">'+(p.market_title||p.ticker)+'</div>'
+            +'<div style="font-size:10px;color:var(--muted);margin-top:2px;">'+p.ticker
+            +' \u00b7 '+p.yes_contracts+' contracts @ '+p.avg_yes_price_c+'\u00a2'
+            +' \u00b7 $'+p.total_cost+'</div>'
+            +'</div>'
+            +'<span style="font-size:10px;padding:2px 7px;border-radius:3px;background:var(--bg);color:var(--muted);border:0.5px solid var(--border);">Open</span>'
+            +'</div>';
+        }).join('');
+      }
+    }
+  } catch(e) {
+    if(ordersEl) ordersEl.innerHTML='<div style="font-size:11px;color:var(--loss);">'+e+'</div>';
+  }
+
+  // Execution log — will pull from /auto-trader/log once endpoint exists
+  if(logEl){
+    logEl.innerHTML='<div class="at-log-line"><span class="at-log-ts">—</span>'
+      +'<span style="color:var(--muted);">Execution log available once auto-trader is live.</span></div>';
+  }
 }
 
 
