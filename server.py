@@ -414,9 +414,8 @@ def fetch_temp_forecast(city_key, horizon="d1"):
         blend_hi_adj = round(best_raw.get("high", 0) - blend_bias_high, 1) if best_raw  else None
         blend_lo_adj = round(best_raw.get("low",  0) - 0.0,             1) if best_raw  else None
 
-        # ── Use best model per city as the primary forecast center (mu) ──────
-        # Calibration picks the model with lowest bias-corrected RMSE per city.
-        # Fall back to 3-way average if calibration not yet run.
+        # ── Use best model per city (GFS vs ECMWF, by lowest bc_rmse) ─────────
+        # Simple selection until trigger-moment data justifies seasonal/spread rules.
         best_model = bias_cache.get("best_model", "average")
 
         if best_model == "gfs" and gfs_hi_adj is not None:
@@ -429,11 +428,13 @@ def fetch_temp_forecast(city_key, horizon="d1"):
             best_hi = blend_hi_adj
             best_lo = blend_lo_adj
         else:
-            # No calibration yet — fall back to 3-way average
             hi_vals = [v for v in [gfs_hi_adj, ecmwf_hi_adj, blend_hi_adj] if v is not None]
             lo_vals = [v for v in [gfs_lo_adj, ecmwf_lo_adj, blend_lo_adj] if v is not None]
             best_hi = round(sum(hi_vals) / len(hi_vals), 1) if hi_vals else None
             best_lo = round(sum(lo_vals) / len(lo_vals), 1) if lo_vals else None
+            best_model = "average"
+
+        # Outlier override: REMOVED — implement analytically once trigger-moment data justifies it.
 
         # Spread still computed across all three (shows disagreement regardless of which is best)
         hi_all = [v for v in [gfs_hi_adj, ecmwf_hi_adj, blend_hi_adj] if v is not None]
@@ -827,8 +828,12 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
         #    When spread ≥ bracket width, models disagree about which bracket wins
         #    — the "edge" is really betting on which model is right.
         raw_spread = spread_hi if spread_hi else 0
-        spread_exceeds_bracket = (raw_spread > 0 and bracket_width < 99 and
-                                  raw_spread >= bracket_width * 0.75)
+        # For open-ended brackets (no lo or no hi), use 2°F as reference width
+        # since that's the standard bracket width. A 6°F spread on <66°F is
+        # just as dangerous as a 6°F spread on a 66–68°F bracket.
+        bracket_width_ref = (hi - lo) if (hi is not None and lo is not None) else 2.0
+        spread_exceeds_bracket = (raw_spread > 0 and
+                                  raw_spread >= bracket_width_ref * 0.75)
 
         # Grade: base rules
         # A: strong edge ratio, good liquidity, model says >50% likely (favorite mispricing)
@@ -2488,6 +2493,65 @@ def ensure_tables():
                     UNIQUE (city, target_date, horizon, ticker, DATE(scan_ts))
                 );
             """)
+            # Multi-model forecast accuracy table.
+            # One row per city per date. Stores all model forecasts + actual.
+            # Used for per-city per-model RMSE analysis across spread buckets.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS model_forecasts (
+                    id              SERIAL PRIMARY KEY,
+                    city            TEXT NOT NULL,
+                    nws_station     TEXT NOT NULL,
+                    target_date     DATE NOT NULL,
+                    actual_high     NUMERIC(5,1),    -- NWS CLI actual
+                    gfs_high        NUMERIC(5,1),    -- GFS seamless
+                    ecmwf_high      NUMERIC(5,1),    -- ECMWF IFS
+                    nbm_high        NUMERIC(5,1),    -- NOAA National Blend of Models
+                    graphcast_high  NUMERIC(5,1),    -- Google GraphCast
+                    gem_high        NUMERIC(5,1),    -- Canadian GEM
+                    icon_high       NUMERIC(5,1),    -- German ICON
+                    spread_gfs_ecmwf NUMERIC(5,2),  -- abs(gfs - ecmwf)
+                    fetched_at      TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE (city, target_date)
+                );
+            """)
+            # Add new model columns if upgrading from older schema
+            for col in ['nbm_high','graphcast_high','gem_high','icon_high','spread_gfs_ecmwf']:
+                cur.execute(f"""
+                    ALTER TABLE model_forecasts
+                        ADD COLUMN IF NOT EXISTS {col} NUMERIC(5,1);
+                """)
+            # View: per-model RMSE by city and spread bucket
+            cur.execute("""
+                CREATE OR REPLACE VIEW model_accuracy AS
+                SELECT
+                    city,
+                    CASE
+                        WHEN spread_gfs_ecmwf <= 1.0 THEN '0-1°F'
+                        WHEN spread_gfs_ecmwf <= 2.0 THEN '1-2°F'
+                        WHEN spread_gfs_ecmwf <= 3.0 THEN '2-3°F'
+                        WHEN spread_gfs_ecmwf <= 4.0 THEN '3-4°F'
+                        WHEN spread_gfs_ecmwf <= 5.0 THEN '4-5°F'
+                        ELSE '5°F+'
+                    END AS spread_bucket,
+                    COUNT(*) AS n,
+                    ROUND(SQRT(AVG(POWER(gfs_high - actual_high, 2))), 2)       AS gfs_rmse,
+                    ROUND(SQRT(AVG(POWER(ecmwf_high - actual_high, 2))), 2)     AS ecmwf_rmse,
+                    ROUND(SQRT(AVG(POWER(nbm_high - actual_high, 2))), 2)       AS nbm_rmse,
+                    ROUND(SQRT(AVG(POWER(graphcast_high - actual_high, 2))), 2) AS graphcast_rmse,
+                    ROUND(SQRT(AVG(POWER(gem_high - actual_high, 2))), 2)       AS gem_rmse,
+                    ROUND(SQRT(AVG(POWER(icon_high - actual_high, 2))), 2)      AS icon_rmse,
+                    ROUND(AVG(gfs_high - actual_high), 2)                       AS gfs_bias,
+                    ROUND(AVG(ecmwf_high - actual_high), 2)                     AS ecmwf_bias,
+                    ROUND(AVG(nbm_high - actual_high), 2)                       AS nbm_bias,
+                    ROUND(AVG(graphcast_high - actual_high), 2)                 AS graphcast_bias,
+                    ROUND(AVG(gem_high - actual_high), 2)                       AS gem_bias,
+                    ROUND(AVG(icon_high - actual_high), 2)                      AS icon_bias
+                FROM model_forecasts
+                WHERE actual_high IS NOT NULL
+                  AND spread_gfs_ecmwf IS NOT NULL
+                GROUP BY city, spread_bucket
+                ORDER BY city, spread_bucket;
+            """)
             # View: model accuracy by city, horizon, grade
             cur.execute("""
                 CREATE OR REPLACE VIEW temp_backtest AS
@@ -3402,7 +3466,7 @@ class Handler(BaseHTTPRequestHandler):
                         headers=kalshi_auth_headers("GET", "/trade-api/v2/portfolio/balance"), timeout=8)
                     bal_r.raise_for_status(); bal = bal_r.json()
                     cash    = float(bal.get("balance", 0) or 0) / 100
-                    port    = float(bal.get("portfolio_value", 0) or 0)  # already in dollars
+                    port    = float(bal.get("portfolio_value", 0) or 0) / 100  # in cents like balance
                     budget  = min(cash, port * MAX_PCT)
                     ob_r = requests.get(f"{KALSHI_BASE}/markets/{ticker}/orderbook",
                         headers=kalshi_auth_headers("GET", f"/trade-api/v2/markets/{ticker}/orderbook"), timeout=8)
@@ -3963,9 +4027,9 @@ class Handler(BaseHTTPRequestHandler):
                     import concurrent.futures as _cf2
                     ex2 = _cf2.ThreadPoolExecutor(max_workers=3)
                     try:
-                        fg = ex2.submit(_bulk, "gfs_seamless",  False)
-                        fe = ex2.submit(_bulk, "ecmwf_ifs",     False)
-                        fa = ex2.submit(_bulk, None,            True)
+                        fg = ex2.submit(_bulk, "gfs_seamless", False)
+                        fe = ex2.submit(_bulk, "ecmwf_ifs",    False)
+                        fa = ex2.submit(_bulk, None,           True)
                         gfs_map    = fg.result(timeout=30)
                         ecmwf_map  = fe.result(timeout=30)
                         actual_map = fa.result(timeout=30)
@@ -3974,52 +4038,94 @@ class Handler(BaseHTTPRequestHandler):
 
                     errors_high_gfs   = []
                     errors_high_ecmwf = []
-                    for ds, actual in actual_map.items():
-                        if ds in gfs_map:
-                            errors_high_gfs.append(gfs_map[ds] - actual)
-                        if ds in ecmwf_map:
-                            errors_high_ecmwf.append(ecmwf_map[ds] - actual)
+                    # Consensus/divergence split — days where GFS and ECMWF agree within 2°F
+                    # vs days where they diverge by >3°F. Separate RMSE per bucket tells us
+                    # which model to trust when they disagree.
+                    errors_gfs_consensus   = []
+                    errors_ecmwf_consensus = []
+                    errors_gfs_diverge     = []
+                    errors_ecmwf_diverge   = []
 
-                    if not errors_high_gfs and not errors_high_ecmwf:
-                        return {"city": city_key, "ok": False, "error": "No matching dates in response"}
+                    for ds, actual in actual_map.items():
+                        gfs_v   = gfs_map.get(ds)
+                        ecmwf_v = ecmwf_map.get(ds)
+                        if gfs_v is not None:
+                            errors_high_gfs.append(gfs_v - actual)
+                        if ecmwf_v is not None:
+                            errors_high_ecmwf.append(ecmwf_v - actual)
+                        # Split by model agreement
+                        if gfs_v is not None and ecmwf_v is not None:
+                            spread = abs(gfs_v - ecmwf_v)
+                            if spread <= 2.0:
+                                errors_gfs_consensus.append(gfs_v - actual)
+                                errors_ecmwf_consensus.append(ecmwf_v - actual)
+                            elif spread >= 3.0:
+                                errors_gfs_diverge.append(gfs_v - actual)
+                                errors_ecmwf_diverge.append(ecmwf_v - actual)
+
+                    if not any(actual_map.values()):
+                        return {"city": city_key, "ok": False, "error": "No actuals"}
 
                     def stats(errs):
-                        if not errs: return None, None, None
+                        if not errs or len(errs) < 3: return None, None
                         n    = len(errs)
                         bias = round(sum(errs) / n, 2)
                         rmse = round(sqrt(sum(e**2 for e in errs) / n), 2)
-                        mae  = round(sum(abs(e) for e in errs) / n, 2)
-                        return bias, rmse, mae
+                        return bias, rmse
 
-                    gfs_bias, gfs_rmse, gfs_mae       = stats(errors_high_gfs)
-                    ecmwf_bias, ecmwf_rmse, ecmwf_mae = stats(errors_high_ecmwf)
+                    errors_gfs   = []
+                    errors_ecmwf = []
 
-                    # Exclude ECMWF if it mirrors the archive (< 0.3°F RMSE = same data source)
+                    for ds, actual in actual_map.items():
+                        if actual is None: continue
+                        gfs_v   = gfs_map.get(ds)
+                        ecmwf_v = ecmwf_map.get(ds)
+                        if gfs_v   is not None: errors_gfs.append(gfs_v - actual)
+                        if ecmwf_v is not None: errors_ecmwf.append(ecmwf_v - actual)
+
+                    gfs_bias,   gfs_rmse   = stats(errors_gfs)
+                    ecmwf_bias, ecmwf_rmse = stats(errors_ecmwf)
+
+                    # Exclude ECMWF if it mirrors archive (same data source)
                     ecmwf_is_mirror = (ecmwf_rmse is not None and ecmwf_rmse < 0.3
-                                       and len(errors_high_ecmwf) >= 5)
+                                       and len(errors_ecmwf) >= 5)
                     if ecmwf_is_mirror:
                         ecmwf_bias = 0.0
                         ecmwf_rmse = None
+
+                    # Best model: lowest RMSE wins
+                    if gfs_rmse and ecmwf_rmse:
+                        best_model = "gfs" if gfs_rmse <= ecmwf_rmse else "ecmwf"
+                    elif gfs_rmse:
+                        best_model = "gfs"
+                    elif ecmwf_rmse:
+                        best_model = "ecmwf"
+                    else:
+                        best_model = "average"
 
                     rmse_vals = [v for v in [gfs_rmse, ecmwf_rmse] if v and v > 0.1]
                     σ_d1 = round(sum(rmse_vals) / len(rmse_vals), 2) if rmse_vals else cfg["σ_d1"]
                     σ_d0 = round(σ_d1 * 0.70, 2)
 
                     _TEMP_BIAS_CACHE[city_key] = {
-                        "gfs_bias":   gfs_bias   or 0.0,
-                        "ecmwf_bias": ecmwf_bias or 0.0,
-                        "σ_d1":       σ_d1,
-                        "σ_d0":       σ_d0,
-                        "n_days":     len(errors_high_gfs),
+                        "gfs_bias":    gfs_bias   or 0.0,
+                        "ecmwf_bias":  ecmwf_bias or 0.0,
+                        "gfs_rmse":    gfs_rmse,
+                        "ecmwf_rmse":  ecmwf_rmse,
+                        "best_model":  best_model,
+                        "σ_d1":        σ_d1,
+                        "σ_d0":        σ_d0,
+                        "n_days":      len(errors_gfs),
                         "calibrated_at": _t.time(),
                     }
 
                     return {
                         "city":        city_key,
                         "ok":          True,
-                        "n_days":      len(errors_high_gfs),
+                        "n_days":      len(errors_gfs),
                         "gfs_bias":    gfs_bias,   "gfs_rmse":   gfs_rmse,
                         "ecmwf_bias":  ecmwf_bias, "ecmwf_rmse": ecmwf_rmse,
+                        "best_model":  best_model,
                         "σ_d1":        σ_d1,       "σ_d0":       σ_d0,
                     }
 
@@ -4121,6 +4227,31 @@ class Handler(BaseHTTPRequestHandler):
                 "scheduler_alive": _SETTLE_THREAD is not None and _SETTLE_THREAD.is_alive(),
                 "last_settle_run": _LAST_SETTLE_RUN,
             })
+
+        elif path == "/temp/model-accuracy":
+            # Query model_accuracy view — RMSE per model per city per spread bucket.
+            # Used to analytically determine which model to trust on high-spread days.
+            conn = get_db()
+            if not conn:
+                self.send_json({"ok": False, "error": "No DB"})
+            else:
+                try:
+                    qs   = parse_qs(urlparse(self.path).query)
+                    city = qs.get("city", [None])[0]
+                    with conn.cursor() as cur:
+                        if city:
+                            cur.execute("SELECT * FROM model_accuracy WHERE city=%s ORDER BY spread_bucket", (city,))
+                        else:
+                            cur.execute("SELECT * FROM model_accuracy ORDER BY city, spread_bucket")
+                        cols = [d[0] for d in cur.description]
+                        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+                    conn.close()
+                    for r in rows:
+                        for k, v in r.items():
+                            if hasattr(v, '__float__'): r[k] = float(v)
+                    self.send_json({"ok": True, "rows": rows, "count": len(rows)})
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)})
 
         elif path == "/temp/history":
             # Return weather trade history by joining Kalshi settlements
@@ -4388,7 +4519,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({
                         "ok": True,
                         "balance":    float(bal.get("balance", 0) or 0) / 100,
-                        "portfolio_value": float(bal.get("portfolio_value", 0) or 0),  # already in dollars
+                        "portfolio_value": float(bal.get("portfolio_value", 0) or 0) / 100,
                         "positions":  positions,
                         "count":      len(positions),
                     })

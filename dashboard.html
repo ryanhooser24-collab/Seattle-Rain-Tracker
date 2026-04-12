@@ -1355,6 +1355,30 @@ function renderTempScanner(data){
   if(meta)meta.textContent=`${cities.length} cities · ${filtered.length} brackets · ${grA.length+grB.length} actionable`;
 }
 
+function wuUrl(station){
+  const m={
+    'KNYC':'us/ny/new-york-city/KNYC',
+    'KMDW':'us/il/chicago/KMDW',
+    'KMIA':'us/fl/miami/KMIA',
+    'KLAX':'us/ca/los-angeles/KLAX',
+    'KAUS':'us/tx/austin/KAUS',
+    'KPHX':'us/az/phoenix/KPHX',
+    'KSFO':'us/ca/san-francisco/KSFO',
+    'KATL':'us/ga/atlanta/KATL',
+    'KDCA':'us/dc/washington/KDCA',
+    'KDEN':'us/co/denver/KDEN',
+    'KHOU':'us/tx/houston/KHOU',
+    'KMSP':'us/mn/minneapolis/KMSP',
+    'KBOS':'us/ma/boston/KBOS',
+    'KLAS':'us/nv/las-vegas/KLAS',
+    'KPHL':'us/pa/philadelphia/KPHL',
+    'KOKC':'us/ok/oklahoma-city/KOKC',
+    'KSEA':'us/wa/seattle/KSEA',
+  };
+  const path=m[station]||('us/'+station.toLowerCase()+'/'+station);
+  return 'https://www.wunderground.com/history/daily/'+path;
+}
+
 function renderTempCard(b){
   const fc     = b.forecast||{};
   const mtype  = b.market_type;
@@ -1465,9 +1489,11 @@ function renderTempCard(b){
     +'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">'+statsHtml+'</div>'
     +'<div style="font-size:9px;color:var(--muted);padding-top:2px;">'
     +(b.ticker
-      ? '<a href="https://kalshi.com/markets/'+b.ticker.split('-')[0].toLowerCase()+'" target="_blank" style="color:var(--muted);text-decoration:none;" onmouseover="this.style.color=\'#3B6D11\'" onmouseout="this.style.color=\'\'">'+b.ticker+' \u2197</a>'
+      ? '<button onclick="event.stopPropagation();navigator.clipboard.writeText(\''+b.ticker+'\').then(function(){var el=event.target;var orig=el.textContent;el.textContent=\'✓ Copied\';el.style.color=\'#3B6D11\';setTimeout(function(){el.textContent=orig;el.style.color=\'\';},1500);})" style="font-size:9px;background:none;border:none;padding:0;cursor:pointer;color:var(--muted);font-family:inherit;" data-tip="Copy ticker to paste in Kalshi search">'+b.ticker+' \u29c9</button> \u00b7 '
       : '')
-    +' \u00b7 NWS CLI '+(fc.nws_station||'')+' \u00b7 bias \u2212'+(fc.gfs_bias_applied||0).toFixed(1)+'\u00b0F</div>'
+    +'NWS CLI '+(fc.nws_station||'')
+    +' \u00b7 <a href="'+wuUrl(fc.nws_station||'')+'" target="_blank" style="color:var(--muted);text-decoration:none;" onmouseover="this.style.color=\'#378ADD\'" onmouseout="this.style.color=\'\'">WU \u2197</a>'
+    +' \u00b7 bias \u2212'+(fc.gfs_bias_applied||0).toFixed(1)+'\u00b0F</div>'
     +'</div></div></div>';
 }
 
