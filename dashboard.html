@@ -1371,7 +1371,10 @@ function renderTempCard(b){
   const ecLbl    = muEc!=null    ? muEc.toFixed(1)+'\u00b0'    : '\u2014';
   const blendLbl = muBlend!=null ? muBlend.toFixed(1)+'\u00b0' : '\u2014';
   const kdol   = ((b.kelly_size||0)).toFixed(2);
+  const kdolUncapped = ((b.kelly_size_uncapped||b.kelly_size||0)).toFixed(2);
   const kpct   = ((b.kelly_frac||0)*100).toFixed(1);
+  const bookLimited = b.book_limited && b.kelly_size_uncapped > b.kelly_size;
+  const askSz  = b.ask_size||0;
   const barMkt = Math.max(3,Math.min(95,askC));
   const barMdl = Math.max(3,Math.min(95,probC));
   const lo = b.lo_temp, hi = b.hi_temp;
@@ -1411,7 +1414,7 @@ function renderTempCard(b){
 
   const statsData = [
     {l:'Half-Kelly',v:kpct+'%',t:'Recommended bet size as % of bankroll unit.'},
-    {l:'Size',v:'$'+kdol,t:'Dollar amount per $100 unit at half-Kelly.'},
+    {l:'Size',v:'$'+kdol+(bookLimited?' \u26a0':''),t:bookLimited?'Capped by order book depth ('+askSz+' contracts available). Uncapped: $'+kdolUncapped+'.':'Dollar amount per $100 unit at half-Kelly.'},
     {l:'Edge ratio',v:(b.edge_ratio||0).toFixed(2),t:'Gap \u00f7 \u03c3. A\u22650.12  B\u22650.07. Higher = stronger signal.',green:true}
   ];
   let statsHtml = '';
@@ -1450,14 +1453,14 @@ function renderTempCard(b){
     +(muGfs!=null ? '<div style="position:absolute;top:26px;left:'+pct(muGfs)+'%;width:1.5px;height:14px;background:#378ADD;border-radius:1px;transform:translateX(-50%);"></div>' : '')
     +(muGfs!=null ? '<div style="position:absolute;top:14px;left:'+pct(muGfs)+'%;font-size:9px;color:#378ADD;transform:translateX(-50%);white-space:nowrap;">'+gfsLbl+'</div>' : '')
     +'<div style="position:absolute;top:30px;left:'+dotLeft+'%;width:12px;height:12px;border-radius:50%;background:var(--paper);border:2.5px solid #3B6D11;transform:translateX(-50%);"></div>'
-    +'<div style="position:absolute;top:48px;left:'+dotLeft+'%;font-size:9px;font-weight:500;color:#3B6D11;transform:translateX(-50%);white-space:nowrap;">'+bestLbl+' avg</div>'
+    +'<div style="position:absolute;top:48px;left:'+dotLeft+'%;font-size:9px;font-weight:500;color:#3B6D11;transform:translateX(-50%);white-space:nowrap;">'+bestLbl+' ('+(fc.best_model||'avg')+')</div>'
     +tickHtml
     +'</div>'
     +'<div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:6px;font-size:9px;color:var(--muted);">'
     +'<span style="display:flex;align-items:center;gap:4px;"><span style="width:2px;height:9px;background:#378ADD;display:inline-block;border-radius:1px;"></span>GFS</span>'
     +'<span style="display:flex;align-items:center;gap:4px;"><span style="width:2px;height:9px;background:#D85A30;display:inline-block;border-radius:1px;"></span>ECMWF</span>'
     +'<span style="display:flex;align-items:center;gap:4px;"><span style="width:2px;height:9px;background:#7F77DD;display:inline-block;border-radius:1px;"></span>Blend</span>'
-    +'<span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;border-radius:50%;background:var(--paper);border:2px solid #3B6D11;display:inline-block;"></span>Avg</span>'
+    +'<span style="display:flex;align-items:center;gap:4px;"><span style="width:9px;height:9px;border-radius:50%;background:var(--paper);border:2px solid #3B6D11;display:inline-block;"></span>Best ('+(fc.best_model||'avg')+')</span>'
     +'</div>'
     +'</div>'
     +'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">'+statsHtml+'</div>'

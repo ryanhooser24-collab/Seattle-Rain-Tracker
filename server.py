@@ -790,6 +790,17 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
                    (10 if vol_24h >= 500 else 5 if vol_24h >= 100 else 0)
         liq_grade = "A" if liq_pts >= 55 else "B" if liq_pts >= 35 else "C" if liq_pts >= 18 else "D"
 
+        # Cap kelly_sz by available order book depth.
+        # If ask_sz = 8 contracts at 24¢, max fillable = $1.92.
+        # Betting more than that moves the book and degrades the edge.
+        # We cap at 80% of available depth to leave some buffer.
+        if ask_sz > 0 and ask > 0:
+            max_fill_dollars = round(ask_sz * ask * 0.80, 2)
+            kelly_sz_capped  = min(kelly_sz, max_fill_dollars)
+        else:
+            kelly_sz_capped  = kelly_sz
+        book_limited = kelly_sz_capped < kelly_sz
+
         # Σ-adjusted edge ratio: signal strength independent of σ level
         edge_ratio = round(gap_c / sigma, 3) if sigma > 0 else 0.0
 
@@ -858,7 +869,10 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
             "net_gap_c":         net_gap_c,
             "spread_c":          spr,
             "kelly_frac":        kelly_h,
-            "kelly_size":        kelly_sz,
+            "kelly_size":        kelly_sz_capped,
+            "kelly_size_uncapped": kelly_sz,
+            "book_limited":      book_limited,
+            "ask_size":          ask_sz,
             "edge_ratio":        edge_ratio,
             "liq_grade":         liq_grade,
             "liq_pts":           liq_pts,
