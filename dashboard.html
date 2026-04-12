@@ -1080,7 +1080,7 @@ async function loadHistory(){
       if(s&&s.settled_temp!=null) t.actual_f=parseFloat(s.settled_temp);
     });
 
-    const weather   = settled.filter(t=>/RAIN|KXHIGH|KXLOWT/.test(t.ticker||''));
+    const weather   = settled.filter(t=>/RAIN|KXHIGH|KXLOWT|KXLOWS/.test(t.ticker||''));
     const wins      = weather.filter(t=>t.outcome==='win');
     const winRate   = weather.length?Math.round(wins.length/weather.length*100):null;
     const weatherPnl= weather.reduce((s,t)=>s+(t.pnl||0),0);
@@ -1131,7 +1131,7 @@ async function loadHistory(){
     if(open.length){
       html+='<div style="font-size:10px;color:var(--muted);letter-spacing:0.8px;text-transform:uppercase;margin-bottom:8px;">Open positions</div>';
       open.forEach(function(p){
-        const isW=/RAIN|KXHIGH|KXLOWT/.test(p.ticker||'');
+        const isW=/RAIN|KXHIGH|KXLOWT|KXLOWS/.test(p.ticker||'');
         const unr=p.unrealized_pnl||0;
         html+='<div class="hist-row">'
           +'<div><div style="font-size:12px;font-weight:500;color:var(--ink);">'+(p.market_title||p.ticker)+'</div>'
@@ -1150,7 +1150,7 @@ async function loadHistory(){
       settled.forEach(function(t){
         if(t.date!==lastDate){html+='<div class="month-lbl">'+t.date+'</div>';lastDate=t.date;}
         const win=t.outcome==='win';
-        const isW=/RAIN|KXHIGH|KXLOWT/.test(t.ticker||'');
+        const isW=/RAIN|KXHIGH|KXLOWT|KXLOWS/.test(t.ticker||'');
         const s=t.snap;
         const mu=s?parseFloat(s.best_forecast):null;
         const miss=(mu!=null&&t.actual_f!=null)?(t.actual_f-mu):null;

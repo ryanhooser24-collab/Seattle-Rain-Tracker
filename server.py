@@ -790,15 +790,13 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
                    (10 if vol_24h >= 500 else 5 if vol_24h >= 100 else 0)
         liq_grade = "A" if liq_pts >= 55 else "B" if liq_pts >= 35 else "C" if liq_pts >= 18 else "D"
 
-        # Cap kelly_sz by available order book depth.
-        # If ask_sz = 8 contracts at 24¢, max fillable = $1.92.
-        # Betting more than that moves the book and degrades the edge.
-        # We cap at 80% of available depth to leave some buffer.
+        # Cap kelly_sz at the full available depth at current ask price.
+        # ask_sz contracts × ask price = max dollars fillable without moving the book.
         if ask_sz > 0 and ask > 0:
-            max_fill_dollars = round(ask_sz * ask * 0.80, 2)
-            kelly_sz_capped  = min(kelly_sz, max_fill_dollars)
+            max_fill   = round(ask_sz * ask, 2)
+            kelly_sz_capped = min(kelly_sz, max_fill)
         else:
-            kelly_sz_capped  = kelly_sz
+            kelly_sz_capped = kelly_sz
         book_limited = kelly_sz_capped < kelly_sz
 
         # Σ-adjusted edge ratio: signal strength independent of σ level
@@ -3497,6 +3495,20 @@ class Handler(BaseHTTPRequestHandler):
                 raw = pos_r.json()
                 self.send_json({"ok": True, "raw_positions": raw.get("market_positions", [])[:3],
                     "count": len(raw.get("market_positions", []))})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/debug/settlements":
+            try:
+                r = requests.get(f"{KALSHI_BASE}/portfolio/settlements",
+                    headers=kalshi_auth_headers("GET", "/trade-api/v2/portfolio/settlements"),
+                    timeout=10, params={"limit": 3})
+                r.raise_for_status()
+                raw = r.json()
+                settlements = raw.get("settlements", [])
+                self.send_json({"ok": True, "raw_settlements": settlements[:2],
+                    "keys": list(settlements[0].keys()) if settlements else [],
+                    "count": len(settlements)})
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
