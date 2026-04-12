@@ -4417,10 +4417,10 @@ class Handler(BaseHTTPRequestHandler):
                     cumulative = 0.0
                     for s in reversed(data.get("settlements", [])):
                         revenue    = float(s.get("revenue", 0) or 0) / 100
-                        yes_cost   = float(s.get("yes_total_cost", 0) or 0) / 100
-                        no_cost    = float(s.get("no_total_cost",  0) or 0) / 100
-                        yes_count  = float(s.get("yes_count", 0) or 0)
-                        no_count   = float(s.get("no_count",  0) or 0)
+                        yes_cost   = float(s.get("yes_total_cost_dollars", 0) or 0)
+                        no_cost    = float(s.get("no_total_cost_dollars",  0) or 0)
+                        yes_count  = float(s.get("yes_count_fp", 0) or 0)
+                        no_count   = float(s.get("no_count_fp",  0) or 0)
                         ticker     = s.get("ticker", "")
 
                         # Determine side, cost, avg price
@@ -4447,7 +4447,7 @@ class Handler(BaseHTTPRequestHandler):
                         cumulative += pnl
 
                         trades.append({
-                            "date":         s.get("updated_ts", "")[:10],
+                            "date":         s.get("settled_time", "")[:10],
                             "ticker":       ticker,
                             "market_title": s.get("market_title", "") or ticker,
                             "side":         side,
