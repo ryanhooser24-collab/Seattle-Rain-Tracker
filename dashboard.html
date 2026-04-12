@@ -658,44 +658,49 @@ body{max-width:900px;margin:0 auto;}
     <div class="at-card">
       <div class="section-lbl" style="margin-bottom:4px;">Sizing &amp; limits</div>
       <div class="at-param">
-        <span class="at-param-lbl">Kelly multiplier <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Fraction of full Kelly to use per fill. Full Kelly (1.0×) maximizes long-run growth but has high variance. Half-Kelly (0.5×) is the standard conservative choice — cuts variance significantly with modest EV loss.</div></span>
-        <input type="range" min="10" max="100" step="5" value="50" style="flex:1;" oninput="document.getElementById('at-kelly-val').textContent=(this.value/100).toFixed(2)+'×';atSaveSetting('kelly_mult',this.value/100)">
-        <span class="at-param-val" id="at-kelly-val">0.50×</span>
+        <span class="at-param-lbl">Max per fill <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Hard dollar cap on each individual order placement. Each time the execution loop fills at a price level, this is the ceiling — regardless of Kelly output or book depth. Start small while testing, scale up as win rate confirms the model.</div></span>
+        <input type="range" min="10" max="200" step="5" value="25" style="flex:1;" oninput="document.getElementById('at-maxbet-val').textContent='$'+this.value;atSaveSetting('max_per_fill',this.value)">
+        <span class="at-param-val" id="at-maxbet-val">$25</span>
       </div>
       <div class="at-param">
-        <span class="at-param-lbl">Bankroll unit <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">The dollar amount Kelly sizing is applied against per fill. Kelly size = multiplier × unit × Kelly fraction. E.g. 0.5× Kelly on a $100 unit with 40% Kelly fraction = $20 per fill. Increase as your account grows.</div></span>
-        <input type="range" min="50" max="1000" step="50" value="100" style="flex:1;" oninput="document.getElementById('at-unit-val').textContent='$'+this.value;atSaveSetting('bankroll_unit',this.value)">
-        <span class="at-param-val" id="at-unit-val">$100</span>
+        <span class="at-param-lbl">Max per ticker <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Total dollar cap across all fills on a single ticker per session. The loop walks the book while grade holds A — this is the hard stop. Defaults to 3× max per fill.</div></span>
+        <input type="range" min="25" max="500" step="25" value="75" style="flex:1;" oninput="document.getElementById('at-maxticker-val').textContent='$'+this.value;atSaveSetting('max_per_ticker',this.value)">
+        <span class="at-param-val" id="at-maxticker-val">$75</span>
       </div>
-      <div class="at-param">
-        <span class="at-param-lbl">Max per fill <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Hard dollar cap on each individual order placement. Each time the execution loop fills at a price level, this is the ceiling — regardless of Kelly output or book depth. The loop may place multiple fills on the same ticker.</div></span>
-        <input type="range" min="10" max="500" step="10" value="50" style="flex:1;" oninput="document.getElementById('at-maxbet-val').textContent='$'+this.value;atSaveSetting('max_per_fill',this.value)">
-        <span class="at-param-val" id="at-maxbet-val">$50</span>
+      <div style="margin-top:10px;">
+        <button onclick="atToggleAdvanced(this)" style="font-size:10px;color:var(--muted);background:none;border:none;cursor:pointer;padding:0;font-family:inherit;">&#9656; Advanced settings</button>
       </div>
-      <div class="at-param">
-        <span class="at-param-lbl">Max per ticker <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Total dollar cap across all fills on a single ticker in one session. The execution loop walks the book while grade holds A — this stops it from deploying unlimited size into one signal even if the grade never degrades.</div></span>
-        <input type="range" min="25" max="500" step="25" value="150" style="flex:1;" oninput="document.getElementById('at-maxticker-val').textContent='$'+this.value;atSaveSetting('max_per_ticker',this.value)">
-        <span class="at-param-val" id="at-maxticker-val">$150</span>
-      </div>
-      <div class="at-param">
-        <span class="at-param-lbl">Daily loss limit <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Portfolio-level: auto-trader pauses for the rest of the day once total realized losses hit this threshold. Resets at midnight. Prevents a bad model day from compounding into a large drawdown.</div></span>
-        <input type="range" min="25" max="500" step="25" value="200" style="flex:1;" oninput="document.getElementById('at-losslim-val').textContent='$'+this.value;atSaveSetting('daily_loss_limit',this.value)">
-        <span class="at-param-val" id="at-losslim-val">$200</span>
-      </div>
-      <div class="at-param">
-        <span class="at-param-lbl">Max open positions <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Portfolio-level: maximum number of distinct unsettled weather tickers at once. New signals are skipped when this limit is reached regardless of grade. Each ticker counts as one position regardless of how many fills it took.</div></span>
-        <input type="range" min="1" max="20" step="1" value="5" style="flex:1;" oninput="document.getElementById('at-maxpos-val').textContent=this.value;atSaveSetting('max_positions',this.value)">
-        <span class="at-param-val" id="at-maxpos-val">5</span>
-      </div>
-      <div class="at-param">
-        <span class="at-param-lbl">Max per city <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Portfolio-level: max distinct open tickers in a single city. Prevents doubling up on multiple brackets in Miami when the model is wrong about Miami — losses would be correlated across those positions.</div></span>
-        <input type="range" min="1" max="5" step="1" value="2" style="flex:1;" oninput="document.getElementById('at-percity-val').textContent=this.value;atSaveSetting('max_per_city',this.value)">
-        <span class="at-param-val" id="at-percity-val">2</span>
-      </div>
-      <div class="at-param">
-        <span class="at-param-lbl">Min 24h volume <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Market-level filter: skip any ticker where 24h volume is below this threshold before placing any orders. Early D+1 markets often have thin books and unreliable pricing — volume builds through the day.</div></span>
-        <input type="range" min="0" max="2000" step="100" value="500" style="flex:1;" oninput="document.getElementById('at-vol-val').textContent='$'+this.value;atSaveSetting('min_volume',this.value)">
-        <span class="at-param-val" id="at-vol-val">$500</span>
+      <div id="at-advanced" style="display:none;margin-top:4px;">
+        <div class="at-param">
+          <span class="at-param-lbl">Kelly multiplier <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Scales the Kelly formula output. Kelly fraction = (p × b − q) / b, where p = model probability, q = 1−p, b = (1−ask)/ask. E.g. model 60%, ask 40¢ → b=1.5, Kelly=33%. At 0.5× multiplier, bet size = 16.5% of bankroll unit. Use 0.5× until 100+ trades confirm model calibration.</div></span>
+          <input type="range" min="10" max="100" step="5" value="50" style="flex:1;" oninput="document.getElementById('at-kelly-val').textContent=(this.value/100).toFixed(2)+'×';atSaveSetting('kelly_mult',this.value/100)">
+          <span class="at-param-val" id="at-kelly-val">0.50×</span>
+        </div>
+        <div class="at-param">
+          <span class="at-param-lbl">Bankroll unit <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Dollar amount Kelly sizing is applied against. Set to 5–10% of your trading account. Kelly size = 0.5 × unit × Kelly fraction. Update as your account grows.</div></span>
+          <input type="range" min="50" max="1000" step="50" value="100" style="flex:1;" oninput="document.getElementById('at-unit-val').textContent='$'+this.value;atSaveSetting('bankroll_unit',this.value)">
+          <span class="at-param-val" id="at-unit-val">$100</span>
+        </div>
+        <div class="at-param">
+          <span class="at-param-lbl">Daily loss limit <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Auto-trader pauses for the day once realized losses hit this threshold. Set to ~10% of your account. Resets at midnight.</div></span>
+          <input type="range" min="25" max="500" step="25" value="200" style="flex:1;" oninput="document.getElementById('at-losslim-val').textContent='$'+this.value;atSaveSetting('daily_loss_limit',this.value)">
+          <span class="at-param-val" id="at-losslim-val">$200</span>
+        </div>
+        <div class="at-param">
+          <span class="at-param-lbl">Max open positions <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Max distinct unsettled weather tickers at once. Each ticker counts once regardless of fills. Default 5 is conservative for testing.</div></span>
+          <input type="range" min="1" max="20" step="1" value="5" style="flex:1;" oninput="document.getElementById('at-maxpos-val').textContent=this.value;atSaveSetting('max_positions',this.value)">
+          <span class="at-param-val" id="at-maxpos-val">5</span>
+        </div>
+        <div class="at-param">
+          <span class="at-param-lbl">Max per city <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Max open tickers in one city at once. Prevents correlated losses when the model is wrong about a specific city.</div></span>
+          <input type="range" min="1" max="5" step="1" value="2" style="flex:1;" oninput="document.getElementById('at-percity-val').textContent=this.value;atSaveSetting('max_per_city',this.value)">
+          <span class="at-param-val" id="at-percity-val">2</span>
+        </div>
+        <div class="at-param">
+          <span class="at-param-lbl">Min 24h volume <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Skip tickers below this 24h volume. Guards against early D+1 markets with unreliable thin-book pricing.</div></span>
+          <input type="range" min="0" max="2000" step="100" value="500" style="flex:1;" oninput="document.getElementById('at-vol-val').textContent='$'+this.value;atSaveSetting('min_volume',this.value)">
+          <span class="at-param-val" id="at-vol-val">$500</span>
+        </div>
       </div>
     </div>
 
@@ -1098,6 +1103,13 @@ function sw(t){
 
 // ── AUTO-TRADER TAB ───────────────────────────────────────────────────────
 const AT_HORIZONS = {d0: true, d1: true};
+
+function atToggleAdvanced(btn){
+  const el=document.getElementById('at-advanced');
+  const open=el.style.display==='none';
+  el.style.display=open?'block':'none';
+  btn.textContent=(open?'\u25be':'\u25b6')+' Advanced settings';
+}
 
 function atToggleMaster(btn){
   btn.classList.toggle('on');
