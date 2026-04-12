@@ -4416,38 +4416,48 @@ class Handler(BaseHTTPRequestHandler):
                     trades = []
                     cumulative = 0.0
                     for s in reversed(data.get("settlements", [])):
-                        pnl        = float(s.get("revenue", 0) or 0) / 100
+                        revenue    = float(s.get("revenue", 0) or 0) / 100
                         yes_cost   = float(s.get("yes_total_cost", 0) or 0) / 100
                         no_cost    = float(s.get("no_total_cost",  0) or 0) / 100
                         yes_count  = float(s.get("yes_count", 0) or 0)
                         no_count   = float(s.get("no_count",  0) or 0)
                         ticker     = s.get("ticker", "")
+
+                        # Determine side, cost, avg price
+                        if yes_count > 0:
+                            side      = "YES"
+                            cost      = yes_cost
+                            contracts = yes_count
+                            avg_c     = round((yes_cost / max(yes_count, 1)) * 100, 1)
+                        elif no_count > 0:
+                            side      = "NO"
+                            cost      = no_cost
+                            contracts = no_count
+                            avg_c     = round((no_cost / max(no_count, 1)) * 100, 1)
+                        else:
+                            side      = "?"
+                            cost      = 0.0
+                            contracts = 0
+                            avg_c     = 0.0
+
+                        # Kalshi revenue = winnings received (0 for a loss).
+                        # True P&L = revenue - cost paid.
+                        pnl     = round(revenue - cost, 2)
+                        outcome = "win" if pnl > 0 else "loss"
                         cumulative += pnl
 
-                        # Determine side and avg entry price
-                        if yes_count > 0:
-                            side   = "YES"
-                            contracts = yes_cost
-                            avg_c  = round((yes_cost / max(yes_count, 1)) * 100, 1)
-                        else:
-                            side   = "NO"
-                            contracts = no_cost
-                            avg_c  = round((no_cost / max(no_count, 1)) * 100, 1)
-
-                        # Win/loss: positive revenue = win
-                        outcome = "win" if pnl > 0 else ("loss" if pnl < 0 else "push")
-
                         trades.append({
-                            "date":        s.get("updated_ts", "")[:10],
-                            "ticker":      ticker,
+                            "date":         s.get("updated_ts", "")[:10],
+                            "ticker":       ticker,
                             "market_title": s.get("market_title", "") or ticker,
-                            "side":        side,
-                            "contracts":   round(yes_count if side=="YES" else no_count, 0),
-                            "avg_entry_c": avg_c,
-                            "cost":        round(yes_cost if side=="YES" else no_cost, 2),
-                            "pnl":         round(pnl, 2),
-                            "cumulative":  round(cumulative, 2),
-                            "outcome":     outcome,
+                            "side":         side,
+                            "contracts":    round(contracts, 0),
+                            "avg_entry_c":  avg_c,
+                            "cost":         round(cost, 2),
+                            "revenue":      round(revenue, 2),
+                            "pnl":          round(pnl, 2),
+                            "cumulative":   round(cumulative, 2),
+                            "outcome":      outcome,
                         })
 
                     # Return newest first

@@ -1080,7 +1080,8 @@ async function loadHistory(){
       if(s&&s.settled_temp!=null) t.actual_f=parseFloat(s.settled_temp);
     });
 
-    const weather   = settled.filter(t=>/RAIN|KXHIGH|KXLOWT|KXLOWS/.test(t.ticker||''));
+    const weather      = settled.filter(t=>/RAIN|KXHIGH|KXLOWT|KXLOWS/.test(t.ticker||''));
+    const weatherOpen  = open.filter(p=>/RAIN|KXHIGH|KXLOWT|KXLOWS/.test(p.ticker||''));
     const wins      = weather.filter(t=>t.outcome==='win');
     const winRate   = weather.length?Math.round(wins.length/weather.length*100):null;
     const weatherPnl= weather.reduce((s,t)=>s+(t.pnl||0),0);
@@ -1090,7 +1091,7 @@ async function loadHistory(){
       +'<div class="bal-val '+(weatherPnl>=0?'c-profit':'c-loss')+'">'+(weatherPnl>=0?'+':'')+'$'+weatherPnl.toFixed(2)+'</div></div>'
       +'<div class="bal-card"><div class="bal-lbl">Win rate</div><div class="bal-val">'+(winRate!==null?winRate+'%':'—')+'</div></div>'
       +'<div class="bal-card"><div class="bal-lbl">Weather trades</div><div class="bal-val">'+weather.length+'</div></div>'
-      +'<div class="bal-card"><div class="bal-lbl">Open positions</div><div class="bal-val">'+open.length+'</div></div>';
+      +'<div class="bal-card"><div class="bal-lbl">Open positions</div><div class="bal-val">'+weatherOpen.length+'</div></div>';
 
     let html='';
 
@@ -1127,10 +1128,10 @@ async function loadHistory(){
       html+='</div>';
     }
 
-    // Open positions
-    if(open.length){
+    // Open positions — weather only
+    if(weatherOpen.length){
       html+='<div style="font-size:10px;color:var(--muted);letter-spacing:0.8px;text-transform:uppercase;margin-bottom:8px;">Open positions</div>';
-      open.forEach(function(p){
+      weatherOpen.forEach(function(p){
         const isW=/RAIN|KXHIGH|KXLOWT|KXLOWS/.test(p.ticker||'');
         const unr=p.unrealized_pnl||0;
         html+='<div class="hist-row">'
@@ -1143,11 +1144,11 @@ async function loadHistory(){
       });
     }
 
-    // Settled trades
-    if(settled.length){
+    // Settled trades — weather only
+    if(weather.length){
       html+='<div style="font-size:10px;color:var(--muted);letter-spacing:0.8px;text-transform:uppercase;margin:16px 0 8px;">Settled trades</div>';
       let lastDate='';
-      settled.forEach(function(t){
+      weather.forEach(function(t){
         if(t.date!==lastDate){html+='<div class="month-lbl">'+t.date+'</div>';lastDate=t.date;}
         const win=t.outcome==='win';
         const isW=/RAIN|KXHIGH|KXLOWT|KXLOWS/.test(t.ticker||'');
@@ -1171,7 +1172,7 @@ async function loadHistory(){
       });
     }
 
-    if(!settled.length&&!open.length)
+    if(!weather.length&&!weatherOpen.length)
       html='<div style="color:var(--muted);font-size:11px;padding:16px 0;">No trades found. Kalshi API key required.</div>';
     list.innerHTML=html;
   }catch(e){
