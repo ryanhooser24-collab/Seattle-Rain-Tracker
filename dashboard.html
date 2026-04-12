@@ -1464,7 +1464,11 @@ function renderTempCard(b){
     +'</div>'
     +'</div>'
     +'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;">'+statsHtml+'</div>'
-    +'<div style="font-size:9px;color:var(--muted);padding-top:2px;">'+(b.ticker||'')+' \u00b7 NWS CLI '+(fc.nws_station||'')+' \u00b7 bias \u2212'+(fc.gfs_bias_applied||0).toFixed(1)+'\u00b0F</div>'
+    +'<div style="font-size:9px;color:var(--muted);padding-top:2px;">'
+    +(b.ticker
+      ? '<a href="https://kalshi.com/markets/'+b.ticker.split('-')[0].toLowerCase()+'/'+b.ticker+'" target="_blank" style="color:var(--muted);text-decoration:none;" onmouseover="this.style.color=\'#3B6D11\'" onmouseout="this.style.color=\'\'">'+b.ticker+' \u2197</a>'
+      : '')
+    +' \u00b7 NWS CLI '+(fc.nws_station||'')+' \u00b7 bias \u2212'+(fc.gfs_bias_applied||0).toFixed(1)+'\u00b0F</div>'
     +'</div></div></div>';
 }
 
