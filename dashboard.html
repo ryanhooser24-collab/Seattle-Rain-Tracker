@@ -1827,7 +1827,7 @@ function renderPortfolio(port,pnl){
         const mktType = isLow ? 'Low' : 'High';
         const bracketLabel = bracketType==='T'
           ? (t.includes('LOWT')||t.includes('LOWS') ? '>'+bracketVal+'°F' : '<'+bracketVal+'°F')
-          : bracketVal+'°F bracket';
+          : (()=>{ const mid=parseFloat(bracketVal); const lo=mid-0.5; const hi=mid+0.5; return lo+'–'+hi+'°F'; })();
         // City name lookup
         const cityNames = {NY:'New York',MIA:'Miami',PHX:'Phoenix',CHI:'Chicago',LAX:'Los Angeles',
           AUS:'Austin',SFO:'San Francisco',ATL:'Atlanta',DCA:'Washington DC',DEN:'Denver',
