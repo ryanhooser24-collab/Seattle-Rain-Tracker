@@ -1160,6 +1160,403 @@ _SETTLE_LOCK          = _threading.Lock()
 _SETTLE_THREAD        = None
 _LAST_SETTLE_RUN      = {}          # date_str → result dict, prevents duplicate runs
 
+# ── AUTO-TRADER GLOBALS ───────────────────────────────────────────────────────
+_AT_THREAD   = None
+_AT_LOCK     = _threading.Lock()
+_AT_LOG      = []          # in-memory log, last 500 entries
+_AT_ENABLED  = False       # master on/off — persisted in DB config table
+
+# Default config — overridden by DB config table after first UI save
+_AT_CONFIG = {
+    "enabled":        False,
+    "min_grade":      "A",
+    "horizons":       ["d0", "d1"],
+    "kelly_mult":     0.50,
+    "bankroll_unit":  100.0,
+    "max_per_fill":   25.0,
+    "max_per_ticker": 75.0,
+    "max_positions":  5,
+    "max_per_city":   2,
+    "min_volume":     500,
+    "scan_interval":  300,   # seconds between scans
+}
+
+
+def at_log(level, msg, ticker=None, city=None, extra=None):
+    """Append one line to the in-memory AT log and write to DB."""
+    import time as _t
+    entry = {
+        "ts":     _t.time(),
+        "ts_str": __import__("datetime").datetime.utcnow().strftime("%H:%M:%S"),
+        "level":  level,   # OK / SKIP / PLACE / ERR / SCAN / SETTLE
+        "msg":    msg,
+        "ticker": ticker,
+        "city":   city,
+        "extra":  extra or {},
+    }
+    with _AT_LOCK:
+        _AT_LOG.append(entry)
+        if len(_AT_LOG) > 500:
+            _AT_LOG.pop(0)
+
+    # Write to DB (non-blocking — ignore failures)
+    try:
+        conn = get_db()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO auto_trader_log
+                        (ts, level, msg, ticker, city, extra)
+                    VALUES (NOW(), %s, %s, %s, %s, %s)
+                """, (level, msg, ticker, city,
+                      __import__("json").dumps(extra or {})))
+            conn.commit()
+            conn.close()
+    except Exception:
+        pass
+
+
+def at_place_order(ticker, side, count, yes_price_c):
+    """
+    Place a single order on Kalshi. Returns (ok, order_dict, error_str).
+    """
+    try:
+        payload = {
+            "ticker":    ticker,
+            "side":      side,
+            "action":    "buy",
+            "type":      "limit",
+            "count":     count,
+            "yes_price": yes_price_c,
+        }
+        r = requests.post(
+            f"{KALSHI_BASE}/orders",
+            headers=kalshi_auth_headers("POST", "/trade-api/v2/orders"),
+            json=payload, timeout=10
+        )
+        resp = r.json()
+        if r.ok:
+            return True, resp, None
+        else:
+            return False, None, str(resp)
+    except Exception as e:
+        return False, None, str(e)
+
+
+def at_fetch_market(ticker):
+    """Fetch live orderbook for one ticker. Returns dict with yes_ask, yes_ask_size or None."""
+    try:
+        r = requests.get(
+            f"{KALSHI_BASE}/markets/{ticker}/orderbook",
+            headers=kalshi_auth_headers("GET", f"/trade-api/v2/markets/{ticker}/orderbook"),
+            timeout=8
+        )
+        if not r.ok:
+            return None
+        ob = r.json().get("orderbook", {})
+        yes_asks = ob.get("yes", [])   # [[price_c, size], ...]
+        if not yes_asks:
+            return None
+        best = sorted(yes_asks, key=lambda x: x[0])[0]
+        return {"yes_ask": best[0] / 100.0, "yes_ask_size": best[1]}
+    except Exception:
+        return None
+
+
+def at_get_open_positions():
+    """Return list of open weather position tickers and city counts."""
+    try:
+        r = requests.get(
+            f"{KALSHI_BASE}/portfolio/positions",
+            headers=kalshi_auth_headers("GET", "/trade-api/v2/portfolio/positions"),
+            timeout=10, params={"limit": 200, "count_filter": "position"}
+        )
+        if not r.ok:
+            return [], {}
+        positions = r.json().get("market_positions", [])
+        weather = [p for p in positions
+                   if re.search(r"RAIN|KXHIGH|KXLOWT|KXLOWS", p.get("ticker", ""))]
+        city_counts = {}
+        for p in weather:
+            t = p.get("ticker", "")
+            # Extract city from ticker e.g. KXHIGHMIA → MIA
+            m = re.match(r"KXHIGH(\w{2,4})-|KXLOWT(\w{2,4})-|KXLOWS(\w{2,4})-", t)
+            city = (m.group(1) or m.group(2) or m.group(3) or "UNK") if m else "UNK"
+            city_counts[city] = city_counts.get(city, 0) + 1
+        return weather, city_counts
+    except Exception:
+        return [], {}
+
+
+def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
+    """
+    Execute the fill loop for one signal.
+    Walks the order book while grade holds at min_grade.
+    Returns number of fills placed.
+    """
+    ticker    = signal.get("ticker", "")
+    city_key  = signal.get("city_key", "")
+    grade     = signal.get("grade", "")
+    mu        = signal.get("mu")
+    sigma     = signal.get("sigma")
+    forecast  = signal.get("forecast", {})
+
+    # City code for concentration limit
+    m = re.match(r"KXHIGH(\w{2,4})-|KXLOWT(\w{2,4})-|KXLOWS(\w{2,4})-", ticker)
+    city_code = (m.group(1) or m.group(2) or m.group(3) or city_key[:4].upper()) if m else city_key[:4].upper()
+
+    min_grade  = cfg.get("min_grade", "A")
+    grade_rank = {"A": 0, "B": 1, "C": 2, "D": 3, "skip": 99}
+    fills      = 0
+    spent_this_ticker = ticker_spent.get(ticker, 0.0)
+
+    at_log("SCAN", f"Evaluating {ticker} grade={grade} mu={mu}°F", ticker=ticker, city=city_key)
+
+    while True:
+        # Portfolio-level checks
+        if len(open_positions) >= cfg.get("max_positions", 5):
+            at_log("SKIP", f"Max positions reached ({cfg['max_positions']})", ticker=ticker)
+            break
+        if city_counts.get(city_code, 0) >= cfg.get("max_per_city", 2):
+            at_log("SKIP", f"City limit reached for {city_code}", ticker=ticker, city=city_key)
+            break
+        if spent_this_ticker >= cfg.get("max_per_ticker", 75.0):
+            at_log("SKIP", f"Ticker budget exhausted (${spent_this_ticker:.2f})", ticker=ticker)
+            break
+
+        # Fetch live market at current price
+        market = at_fetch_market(ticker)
+        if not market:
+            at_log("ERR", f"Could not fetch orderbook for {ticker}", ticker=ticker)
+            break
+
+        ask       = market["yes_ask"]
+        ask_size  = market["yes_ask_size"]
+        ask_c     = round(ask * 100)
+
+        # Recalculate grade at current ask
+        if mu is not None and sigma and sigma > 0 and ask > 0 and ask < 1:
+            from math import erf, sqrt as _sqrt
+            lo = signal.get("lo_temp")
+            hi = signal.get("hi_temp")
+
+            def _cdf(x):
+                return 0.5 * (1 + erf((x - mu) / (sigma * _sqrt(2))))
+
+            if lo is None and hi is not None:
+                prob = _cdf(hi + 0.5)
+            elif hi is None and lo is not None:
+                prob = 1 - _cdf(lo - 0.5)
+            else:
+                prob = _cdf(hi + 0.5) - _cdf(lo - 0.5)
+
+            gap_c     = round((prob - ask) * 100)
+            net_gap_c = max(0, gap_c - round(signal.get("spread_c", 1)))
+            edge_ratio = round(net_gap_c / sigma, 3) if sigma > 0 else 0
+
+            # Grade using same thresholds as analyze_temp_brackets
+            if net_gap_c <= 0:
+                live_grade = "skip"
+            elif edge_ratio >= 0.12 and prob >= 0.50:
+                live_grade = "A"
+            elif edge_ratio >= 0.07 and prob >= 0.35:
+                live_grade = "B"
+            else:
+                live_grade = "C"
+        else:
+            live_grade = grade   # fall back to scan-time grade
+            prob       = signal.get("model_prob", 0)
+
+        # Stop if grade degraded below threshold
+        if grade_rank.get(live_grade, 99) > grade_rank.get(min_grade, 0):
+            at_log("SKIP", f"{ticker} grade degraded to {live_grade} at {ask_c}¢ — stopping",
+                   ticker=ticker, city=city_key)
+            break
+
+        # Size this fill
+        if ask > 0 and ask < 1:
+            b        = (1 - ask) / ask
+            kelly    = max(0, (prob * b - (1 - prob)) / b)
+            kelly_h  = kelly * cfg.get("kelly_mult", 0.5)
+            kelly_sz = round(kelly_h * cfg.get("bankroll_unit", 100.0), 2)
+        else:
+            kelly_sz = 0.0
+
+        book_cap      = round(ask_size * ask, 2)
+        ticker_remain = cfg.get("max_per_ticker", 75.0) - spent_this_ticker
+        fill_sz       = min(kelly_sz, book_cap, cfg.get("max_per_fill", 25.0), ticker_remain)
+        fill_sz       = round(fill_sz, 2)
+
+        if fill_sz < 1.0:
+            at_log("SKIP", f"{ticker} fill size too small (${fill_sz:.2f}) — stopping",
+                   ticker=ticker)
+            break
+
+        # Convert dollars to contract count
+        count = max(1, int(fill_sz / ask))
+
+        # Place the order
+        ok, order, err = at_place_order(ticker, "yes", count, ask_c)
+        if not ok:
+            at_log("ERR", f"Order failed for {ticker}: {err}", ticker=ticker, city=city_key)
+            break
+
+        cost = round(count * ask, 2)
+        spent_this_ticker += cost
+        ticker_spent[ticker] = spent_this_ticker
+        fills += 1
+
+        # Update open positions count optimistically
+        if ticker not in [p.get("ticker") for p in open_positions]:
+            open_positions.append({"ticker": ticker})
+            city_counts[city_code] = city_counts.get(city_code, 0) + 1
+
+        at_log("PLACE",
+               f"Placed {count} × {ticker} @ {ask_c}¢ = ${cost:.2f} | grade={live_grade} prob={round(prob*100)}%",
+               ticker=ticker, city=city_key,
+               extra={"count": count, "ask_c": ask_c, "cost": cost,
+                      "grade": live_grade, "prob": round(prob, 3)})
+
+        # Write to model_forecasts for later accuracy analysis
+        try:
+            conn = get_db()
+            if conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO model_forecasts
+                            (city, nws_station, target_date, gfs_high, ecmwf_high,
+                             spread_gfs_ecmwf)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (city, target_date) DO UPDATE SET
+                            gfs_high  = COALESCE(EXCLUDED.gfs_high, model_forecasts.gfs_high),
+                            ecmwf_high= COALESCE(EXCLUDED.ecmwf_high, model_forecasts.ecmwf_high)
+                    """, (
+                        city_key,
+                        forecast.get("nws_station", ""),
+                        forecast.get("target_date", ""),
+                        forecast.get("gfs_high"),
+                        forecast.get("ecmwf_high"),
+                        signal.get("spread_models"),
+                    ))
+                conn.commit()
+                conn.close()
+        except Exception:
+            pass
+
+    return fills
+
+
+def run_auto_trader_cycle():
+    """
+    One full scan-and-execute cycle.
+    Called by the scheduler every N seconds.
+    """
+    global _AT_CONFIG
+    cfg = dict(_AT_CONFIG)   # snapshot config
+
+    if not cfg.get("enabled", False):
+        return
+
+    at_log("SCAN", f"Cycle start — scanning {len(TEMP_CITIES)} cities "
+           f"horizons={cfg['horizons']} min_grade={cfg['min_grade']}")
+
+    # Get current open positions
+    open_positions, city_counts = at_get_open_positions()
+
+    if len(open_positions) >= cfg.get("max_positions", 5):
+        at_log("SKIP", f"Max positions already open ({len(open_positions)}) — skipping cycle")
+        return
+
+    total_fills   = 0
+    ticker_spent  = {}   # tracks spend per ticker across fills this cycle
+
+    for horizon in cfg.get("horizons", ["d0", "d1"]):
+        for city_key in TEMP_CITIES:
+            try:
+                fc = fetch_temp_forecast(city_key, horizon)
+                if not fc.get("ok"):
+                    continue
+
+                markets = analyze_temp_brackets(fc, horizon)
+                for signal in markets:
+                    g = signal.get("grade", "skip")
+                    if g == "skip" or not signal.get("actionable"):
+                        continue
+
+                    grade_rank = {"A": 0, "B": 1, "C": 2}
+                    min_rank   = grade_rank.get(cfg.get("min_grade", "A"), 0)
+                    if grade_rank.get(g, 99) > min_rank:
+                        continue
+
+                    # Volume filter
+                    if signal.get("volume_24h", 0) < cfg.get("min_volume", 500):
+                        at_log("SKIP", f"{signal['ticker']} volume too low "
+                               f"({signal.get('volume_24h',0)})", ticker=signal["ticker"])
+                        continue
+
+                    fills = at_execute_signal(
+                        signal, cfg, open_positions, city_counts, ticker_spent)
+                    total_fills += fills
+
+            except Exception as e:
+                at_log("ERR", f"Error scanning {city_key}/{horizon}: {e}", city=city_key)
+
+    at_log("SCAN", f"Cycle complete — {total_fills} fill(s) placed")
+
+
+def _auto_trader_scheduler():
+    """Background thread — runs run_auto_trader_cycle() every scan_interval seconds."""
+    import time as _t
+    at_log("SCAN", "Auto-trader scheduler started")
+    while True:
+        try:
+            if _AT_CONFIG.get("enabled", False):
+                run_auto_trader_cycle()
+        except Exception as e:
+            at_log("ERR", f"Scheduler error: {e}")
+        interval = _AT_CONFIG.get("scan_interval", 300)
+        _t.sleep(interval)
+
+
+def start_auto_trader_scheduler():
+    """Launch the background auto-trader thread (daemon)."""
+    global _AT_THREAD
+    if _AT_THREAD and _AT_THREAD.is_alive():
+        return
+    _AT_THREAD = _threading.Thread(
+        target=_auto_trader_scheduler, daemon=True, name="AutoTrader")
+    _AT_THREAD.start()
+    print("  🤖 Auto-trader scheduler started")
+
+
+def at_load_config_from_db():
+    """Load persisted config from DB on startup."""
+    global _AT_CONFIG
+    try:
+        conn = get_db()
+        if not conn:
+            return
+        with conn.cursor() as cur:
+            cur.execute("SELECT key, value FROM auto_trader_config")
+            rows = cur.fetchall()
+        conn.close()
+        for key, val in rows:
+            if key in _AT_CONFIG:
+                # Cast to correct type
+                orig = _AT_CONFIG[key]
+                if isinstance(orig, bool):
+                    _AT_CONFIG[key] = val == "true"
+                elif isinstance(orig, int):
+                    _AT_CONFIG[key] = int(float(val))
+                elif isinstance(orig, float):
+                    _AT_CONFIG[key] = float(val)
+                elif isinstance(orig, list):
+                    _AT_CONFIG[key] = __import__("json").loads(val)
+                else:
+                    _AT_CONFIG[key] = val
+    except Exception as e:
+        print(f"  ⚠️  at_load_config_from_db: {e}")
+
 
 def run_auto_settlement(force=False):
     """
@@ -2589,6 +2986,30 @@ def ensure_tables():
                 LEFT JOIN month_settlements m USING (month)
                 ORDER BY s.month, s.days_remaining DESC;
             """)
+            # Auto-trader config — one row per setting key
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS auto_trader_config (
+                    key        TEXT PRIMARY KEY,
+                    value      TEXT NOT NULL,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+            """)
+            # Auto-trader execution log — indexed for fast 3-day queries
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS auto_trader_log (
+                    id         BIGSERIAL PRIMARY KEY,
+                    ts         TIMESTAMPTZ DEFAULT NOW(),
+                    level      TEXT NOT NULL,
+                    msg        TEXT NOT NULL,
+                    ticker     TEXT,
+                    city       TEXT,
+                    extra      JSONB DEFAULT '{}'
+                );
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS auto_trader_log_ts_idx
+                    ON auto_trader_log (ts DESC);
+            """)
         conn.commit()
         print("  ✅ DB tables ready")
     except Exception as e:
@@ -3559,6 +3980,84 @@ class Handler(BaseHTTPRequestHandler):
                 raw = pos_r.json()
                 self.send_json({"ok": True, "raw_positions": raw.get("market_positions", [])[:3],
                     "count": len(raw.get("market_positions", []))})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/auto-trader/config":
+            if self.command == "POST":
+                # Save settings from UI
+                try:
+                    length  = int(self.headers.get("Content-Length", 0))
+                    body    = json.loads(self.rfile.read(length))
+                    conn    = get_db()
+                    if not conn:
+                        self.send_json({"ok": False, "error": "No DB"}); return
+                    with conn.cursor() as cur:
+                        for key, val in body.items():
+                            if key in _AT_CONFIG:
+                                cur.execute("""
+                                    INSERT INTO auto_trader_config (key, value, updated_at)
+                                    VALUES (%s, %s, NOW())
+                                    ON CONFLICT (key) DO UPDATE
+                                        SET value=%s, updated_at=NOW()
+                                """, (key, json.dumps(val) if isinstance(val, (list, dict)) else str(val),
+                                      json.dumps(val) if isinstance(val, (list, dict)) else str(val)))
+                                # Update in-memory config immediately
+                                _AT_CONFIG[key] = val
+                    conn.commit()
+                    conn.close()
+                    # Handle enabled toggle
+                    if "enabled" in body:
+                        _AT_CONFIG["enabled"] = bool(body["enabled"])
+                        if body["enabled"]:
+                            start_auto_trader_scheduler()
+                            at_log("SCAN", "Auto-trader enabled via UI")
+                        else:
+                            at_log("SCAN", "Auto-trader disabled via UI")
+                    self.send_json({"ok": True, "config": _AT_CONFIG})
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)})
+            else:
+                # GET — return current config + scheduler status
+                self.send_json({
+                    "ok":     True,
+                    "config": _AT_CONFIG,
+                    "scheduler_alive": _AT_THREAD is not None and _AT_THREAD.is_alive(),
+                })
+
+        elif path == "/auto-trader/log":
+            # Return last 3 days of execution log from DB
+            try:
+                conn = get_db()
+                if not conn:
+                    self.send_json({"ok": False, "error": "No DB"}); return
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT ts, level, msg, ticker, city, extra
+                        FROM auto_trader_log
+                        WHERE ts > NOW() - INTERVAL '3 days'
+                        ORDER BY ts DESC
+                        LIMIT 500
+                    """)
+                    cols = [d[0] for d in cur.description]
+                    rows = []
+                    for r in cur.fetchall():
+                        row = dict(zip(cols, r))
+                        row["ts"] = row["ts"].isoformat() if row["ts"] else None
+                        row["extra"] = row["extra"] or {}
+                        rows.append(row)
+                conn.close()
+                self.send_json({"ok": True, "log": rows, "count": len(rows)})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/auto-trader/run":
+            # Manually trigger one cycle (for testing)
+            try:
+                import threading as _t2
+                t = _t2.Thread(target=run_auto_trader_cycle, daemon=True)
+                t.start()
+                self.send_json({"ok": True, "msg": "Cycle started in background"})
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
@@ -4627,6 +5126,8 @@ if __name__ == "__main__":
     ensure_tables()
     start_settlement_scheduler()   # auto-settle yesterday's temp snapshots each morning
     maybe_auto_calibrate()         # calibrate bias/σ on startup (non-blocking)
+    at_load_config_from_db()       # restore auto-trader config from DB
+    start_auto_trader_scheduler()  # always-on scheduler (runs only when enabled=True)
     print(f"""
 ╔══════════════════════════════════════════╗
 ║   Seattle Rain Kalshi Tracker — Server   ║

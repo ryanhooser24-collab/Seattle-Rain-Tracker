@@ -1106,47 +1106,133 @@ function atToggleAdvanced(btn){
   btn.textContent=(open?'\u25be':'\u25b6')+' Advanced settings';
 }
 
-function atToggleMaster(btn){
-  btn.classList.toggle('on');
-  const on = btn.classList.contains('on');
-  document.getElementById('at-status-val').textContent = on ? 'Running' : 'Stopped';
-  document.getElementById('at-status-val').style.color = on ? 'var(--yes)' : 'var(--muted)';
+function atLockInputs(on){
+  document.querySelectorAll('#at-advanced input, .at-card input[type=range]')
+    .forEach(function(el){ el.disabled=on; el.style.opacity=on?'0.4':'1'; });
+  document.querySelectorAll('#at-min-grade,#at-d0-btn,#at-d1-btn')
+    .forEach(function(el){ el.disabled=on; el.style.opacity=on?'0.4':'1'; });
+}
+
+async function atToggleMaster(btn){
+  const on = !btn.classList.contains('on');
+  btn.classList.toggle('on', on);
+  const statusEl = document.getElementById('at-status-val');
+  statusEl.textContent = on ? 'Starting...' : 'Stopping...';
+  statusEl.style.color = 'var(--muted)';
+  atLockInputs(on);
+  atSaveSetting('master_on', on ? '1' : '0');
+  try {
+    const cfg = atCollectConfig();
+    cfg.enabled = on;
+    const r = await fetch(SERVER+'/auto-trader/config', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(cfg)
+    }).then(x=>x.json());
+    if(r.ok){
+      const alive = r.config && r.config.enabled;
+      statusEl.textContent = alive ? 'Running' : 'Stopped';
+      statusEl.style.color = alive ? 'var(--yes)' : 'var(--muted)';
+    } else {
+      statusEl.textContent = 'Error'; statusEl.style.color = 'var(--loss)';
+    }
+  } catch(e){
+    statusEl.textContent = on ? 'Running' : 'Stopped';
+    statusEl.style.color = on ? 'var(--yes)' : 'var(--muted)';
+  }
 }
 
 function atToggleHorizon(hz, btn){
   AT_HORIZONS[hz] = !AT_HORIZONS[hz];
   const on = AT_HORIZONS[hz];
-  btn.style.background = on ? 'var(--yes-lt)' : 'var(--bg)';
+  btn.style.background  = on ? 'var(--yes-lt)' : 'var(--bg)';
   btn.style.borderColor = on ? 'var(--yes-border)' : 'var(--border)';
-  btn.style.color = on ? '#27500A' : 'var(--muted)';
+  btn.style.color       = on ? '#27500A' : 'var(--muted)';
+  atSaveSetting('horizons', JSON.stringify(Object.keys(AT_HORIZONS).filter(k=>AT_HORIZONS[k])));
+}
+
+function atCollectConfig(){
+  return {
+    enabled:        localStorage.getItem('at_master_on') === '1',
+    min_grade:      document.getElementById('at-min-grade')?.value || 'A',
+    horizons:       Object.keys(AT_HORIZONS).filter(k=>AT_HORIZONS[k]),
+    kelly_mult:     parseFloat(localStorage.getItem('at_kelly_mult') || '0.5'),
+    bankroll_unit:  parseFloat(localStorage.getItem('at_bankroll_unit') || '100'),
+    max_per_fill:   parseFloat(localStorage.getItem('at_max_per_fill') || '25'),
+    max_per_ticker: parseFloat(localStorage.getItem('at_max_per_ticker') || '75'),
+    max_positions:  parseInt(localStorage.getItem('at_max_positions') || '5'),
+    max_per_city:   parseInt(localStorage.getItem('at_max_per_city') || '2'),
+    min_volume:     parseInt(localStorage.getItem('at_min_volume') || '500'),
+  };
 }
 
 function atSaveSetting(key, val){
-  // Will POST to /auto-trader/config when endpoint is built
-  // For now stores in sessionStorage for UI state
-  try { sessionStorage.setItem('at_'+key, val); } catch(e){}
+  try { localStorage.setItem('at_'+key, String(val)); } catch(e){}
+  clearTimeout(window._atSaveTimer);
+  window._atSaveTimer = setTimeout(function(){
+    fetch(SERVER+'/auto-trader/config', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(atCollectConfig())
+    }).catch(function(){});
+  }, 1000);
+}
+
+function atRestoreSettings(){
+  const map = {
+    'max_per_fill':  {id:'at-maxbet-val',   fmt:v=>'$'+v,               slider:true},
+    'max_per_ticker':{id:'at-maxticker-val',fmt:v=>'$'+v,               slider:true},
+    'kelly_mult':    {id:'at-kelly-val',    fmt:v=>(+v).toFixed(2)+'\u00d7', slider:true, scale:100},
+    'bankroll_unit': {id:'at-unit-val',     fmt:v=>'$'+v,               slider:true},
+    'max_positions': {id:'at-maxpos-val',   fmt:v=>v,                   slider:true},
+    'max_per_city':  {id:'at-percity-val',  fmt:v=>v,                   slider:true},
+    'min_volume':    {id:'at-vol-val',      fmt:v=>'$'+v,               slider:true},
+  };
+  Object.keys(map).forEach(function(key){
+    const saved = localStorage.getItem('at_'+key);
+    if(saved === null) return;
+    const m = map[key];
+    const displayEl = document.getElementById(m.id);
+    if(displayEl) displayEl.textContent = m.fmt(saved);
+    if(m.slider && displayEl){
+      const prev = displayEl.previousElementSibling;
+      if(prev && prev.type === 'range')
+        prev.value = m.scale ? Math.round(+saved * m.scale) : saved;
+    }
+  });
 }
 
 async function loadAutoTrader(){
-  // Load open positions for today's orders section
+  atRestoreSettings();
+  // Fetch live config + scheduler status from server
+  try {
+    const cfg = await fetch(SERVER+'/auto-trader/config').then(r=>r.json());
+    if(cfg.ok){
+      const on    = cfg.config.enabled;
+      const alive = cfg.scheduler_alive;
+      const btn   = document.getElementById('at-master-toggle');
+      const statusEl = document.getElementById('at-status-val');
+      if(btn) btn.classList.toggle('on', on);
+      if(statusEl){
+        statusEl.textContent = on && alive ? 'Running' : on ? 'Armed' : 'Stopped';
+        statusEl.style.color = on && alive ? 'var(--yes)' : on ? 'var(--amber,#854F0B)' : 'var(--muted)';
+      }
+      if(on) atLockInputs(true);
+      localStorage.setItem('at_master_on', on ? '1' : '0');
+    }
+  } catch(e){}
+
+  // Load open positions
   const ordersEl = document.getElementById('at-orders');
-  const logEl    = document.getElementById('at-log');
   const betsEl   = document.getElementById('at-bets-val');
   const deployEl = document.getElementById('at-deployed-val');
-  const limitEl  = document.getElementById('at-limit-val');
-
   try {
     const posRes = await fetch(SERVER+'/portfolio').then(r=>r.json());
-    const positions = posRes.ok ? posRes.positions : [];
+    const positions  = posRes.ok ? posRes.positions : [];
     const weatherPos = positions.filter(p=>/RAIN|KXHIGH|KXLOWT|KXLOWS/.test(p.ticker||''));
-
     if(betsEl) betsEl.textContent = weatherPos.length;
-    const deployed = weatherPos.reduce((s,p)=>s+(p.total_cost||0),0);
-    if(deployEl) deployEl.textContent = '$'+deployed.toFixed(2);
-
+    if(deployEl) deployEl.textContent = '$'+weatherPos.reduce((s,p)=>s+(p.total_cost||0),0).toFixed(2);
     if(ordersEl){
       if(!weatherPos.length){
-        ordersEl.innerHTML='<div style="font-size:11px;color:var(--muted);">No open weather positions.</div>';
+        ordersEl.innerHTML = '<div style="font-size:11px;color:var(--muted);">No open weather positions.</div>';
       } else {
         ordersEl.innerHTML = weatherPos.map(function(p){
           return '<div class="at-order-row">'
@@ -1155,25 +1241,39 @@ async function loadAutoTrader(){
             +'<div style="font-size:12px;font-weight:500;color:var(--ink);">'+(p.market_title||p.ticker)+'</div>'
             +'<div style="font-size:10px;color:var(--muted);margin-top:2px;">'+p.ticker
             +' \u00b7 '+p.yes_contracts+' contracts @ '+p.avg_yes_price_c+'\u00a2'
-            +' \u00b7 $'+p.total_cost+'</div>'
-            +'</div>'
+            +' \u00b7 $'+p.total_cost+'</div></div>'
             +'<span style="font-size:10px;padding:2px 7px;border-radius:3px;background:var(--bg);color:var(--muted);border:0.5px solid var(--border);">Open</span>'
             +'</div>';
         }).join('');
       }
     }
-  } catch(e) {
+  } catch(e){
     if(ordersEl) ordersEl.innerHTML='<div style="font-size:11px;color:var(--loss);">'+e+'</div>';
   }
 
-  // Execution log — will pull from /auto-trader/log once endpoint exists
-  if(logEl){
-    logEl.innerHTML='<div class="at-log-line"><span class="at-log-ts">—</span>'
-      +'<span style="color:var(--muted);">Execution log available once auto-trader is live.</span></div>';
+  // Load execution log
+  const logEl = document.getElementById('at-log');
+  try {
+    const logRes = await fetch(SERVER+'/auto-trader/log').then(r=>r.json());
+    const levelColor = {PLACE:'var(--yes)',OK:'var(--yes)',SCAN:'var(--muted)',
+                        SKIP:'#854F0B',ERR:'var(--loss)',SETTLE:'#378ADD'};
+    if(logRes.ok && logRes.log && logRes.log.length){
+      logEl.innerHTML = logRes.log.map(function(l){
+        const col = levelColor[l.level]||'var(--muted)';
+        const ts  = l.ts ? l.ts.substring(11,19) : '—';
+        return '<div class="at-log-line">'
+          +'<span class="at-log-ts">'+ts+'</span>'
+          +'<span style="color:'+col+';margin-right:6px;">'+l.level+'</span>'
+          +(l.msg||'')+(l.ticker?' \u00b7 '+l.ticker:'')
+          +'</div>';
+      }).join('');
+    } else {
+      logEl.innerHTML = '<div style="font-size:11px;color:var(--muted);">No log entries yet. Auto-trader will log here once running.</div>';
+    }
+  } catch(e){
+    if(logEl) logEl.innerHTML='<div style="font-size:11px;color:var(--muted);">Log unavailable.</div>';
   }
 }
-
-
 // ── HISTORY TAB — Kalshi settlements + model snapshots ───────────────────
 async function loadHistory(){
   const summary=document.getElementById('hist-summary');
