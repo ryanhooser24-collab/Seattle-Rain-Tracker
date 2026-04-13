@@ -1464,15 +1464,16 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
     return fills
 
 
-def run_auto_trader_cycle():
+def run_auto_trader_cycle(force=False):
     """
     One full scan-and-execute cycle.
-    Called by the scheduler every N seconds.
+    Called by the scheduler every N seconds, or manually via /auto-trader/run.
+    force=True bypasses the enabled check for manual testing.
     """
     global _AT_CONFIG
     cfg = dict(_AT_CONFIG)   # snapshot config
 
-    if not cfg.get("enabled", False):
+    if not force and not cfg.get("enabled", False):
         return
 
     at_log("SCAN", f"Cycle start — scanning {len(TEMP_CITIES)} cities "
@@ -4089,10 +4090,11 @@ class Handler(BaseHTTPRequestHandler):
                                 "source": "memory", "db_error": str(e)})
 
         elif path == "/auto-trader/run":
-            # Manually trigger one cycle (for testing)
+            # Manually trigger one cycle (bypasses enabled check for testing)
             try:
                 import threading as _t2
-                t = _t2.Thread(target=run_auto_trader_cycle, daemon=True)
+                t = _t2.Thread(target=run_auto_trader_cycle,
+                               kwargs={"force": True}, daemon=True)
                 t.start()
                 self.send_json({"ok": True, "msg": "Cycle started in background"})
             except Exception as e:
