@@ -4026,11 +4026,16 @@ class Handler(BaseHTTPRequestHandler):
                 })
 
         elif path == "/auto-trader/log":
-            # Return last 3 days of execution log from DB
+            # Return last 3 days of execution log — DB first, in-memory fallback
             try:
                 conn = get_db()
                 if not conn:
-                    self.send_json({"ok": False, "error": "No DB"}); return
+                    # Fall back to in-memory log
+                    with _AT_LOCK:
+                        rows = list(reversed(_AT_LOG[-500:]))
+                    self.send_json({"ok": True, "log": rows, "count": len(rows),
+                                    "source": "memory"})
+                    return
                 with conn.cursor() as cur:
                     cur.execute("""
                         SELECT ts, level, msg, ticker, city, extra
@@ -4047,9 +4052,23 @@ class Handler(BaseHTTPRequestHandler):
                         row["extra"] = row["extra"] or {}
                         rows.append(row)
                 conn.close()
-                self.send_json({"ok": True, "log": rows, "count": len(rows)})
+                # Merge in-memory entries newer than latest DB entry
+                if rows:
+                    latest_db_ts = rows[0].get("ts", "")
+                else:
+                    latest_db_ts = ""
+                with _AT_LOCK:
+                    mem_rows = [e for e in _AT_LOG
+                                if str(e.get("ts","")) > latest_db_ts]
+                rows = mem_rows + rows
+                self.send_json({"ok": True, "log": rows, "count": len(rows),
+                                "source": "db"})
             except Exception as e:
-                self.send_json({"ok": False, "error": str(e)})
+                # Last resort — in-memory only
+                with _AT_LOCK:
+                    rows = list(reversed(_AT_LOG[-500:]))
+                self.send_json({"ok": True, "log": rows, "count": len(rows),
+                                "source": "memory", "db_error": str(e)})
 
         elif path == "/auto-trader/run":
             # Manually trigger one cycle (for testing)
