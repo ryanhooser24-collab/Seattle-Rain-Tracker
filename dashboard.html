@@ -1301,8 +1301,8 @@ async function loadHistory(){
       if(s&&s.settled_temp!=null) t.actual_f=parseFloat(s.settled_temp);
     });
 
-    const weather      = settled.filter(t=>/RAIN|KXHIGH|KXLOWT|KXLOWS/.test(t.ticker||''));
-    const weatherOpen  = open.filter(p=>/RAIN|KXHIGH|KXLOWT|KXLOWS/.test(p.ticker||''));
+    const weather      = settled.filter(t=>/KXHIGH|KXLOWT|KXLOWS/.test(t.ticker||''));
+    const weatherOpen  = open.filter(p=>/KXHIGH|KXLOWT|KXLOWS/.test(p.ticker||''));
     const wins      = weather.filter(t=>t.outcome==='win');
     const winRate   = weather.length?Math.round(wins.length/weather.length*100):null;
     const weatherPnl= weather.reduce((s,t)=>s+(t.pnl||0),0);
@@ -1377,7 +1377,7 @@ async function loadHistory(){
       weather.forEach(function(t){
         if(t.date!==lastDate){html+='<div class="month-lbl">'+t.date+'</div>';lastDate=t.date;}
         const win=t.outcome==='win';
-        const isW=/RAIN|KXHIGH|KXLOWT|KXLOWS/.test(t.ticker||'');
+        const isW=/KXHIGH|KXLOWT|KXLOWS/.test(t.ticker||'');
         const s=t.snap;
         const mu=s?parseFloat(s.best_forecast):null;
         const miss=(mu!=null&&t.actual_f!=null)?(t.actual_f-mu):null;
