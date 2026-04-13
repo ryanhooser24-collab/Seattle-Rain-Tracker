@@ -863,6 +863,21 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
             # Spread ≥ 75% of bracket width → downgrade one level
             if spread_exceeds_bracket:
                 grade = {"A": "B", "B": "C", "C": "skip"}.get(grade, grade)
+            # Open-ended <X°F bracket: require best model center ≥ 1.5σ below ceiling.
+            # Without this, CDF-to-infinity inflates probability on any cold model day,
+            # creating false A-grades when models strongly disagree (one cold, one warm).
+            # Rule: mu must be < (hi - 1.5 × sigma) to confirm the signal is genuine.
+            if lo is None and hi is not None and sigma and sigma > 0:
+                required_clearance = hi - 1.5 * sigma
+                if mu >= required_clearance:
+                    grade = {"A": "B", "B": "C", "C": "skip"}.get(grade, grade)
+                    m["skip_reason"] = m.get("skip_reason","") + " open_lt_insufficient_clearance"
+            # Open-ended >X°F bracket: require best model center ≥ 1.5σ above floor.
+            if hi is None and lo is not None and sigma and sigma > 0:
+                required_clearance = lo + 1.5 * sigma
+                if mu <= required_clearance:
+                    grade = {"A": "B", "B": "C", "C": "skip"}.get(grade, grade)
+                    m["skip_reason"] = m.get("skip_reason","") + " open_gt_insufficient_clearance"
 
         m.update({
             "model_prob":        prob,
@@ -882,6 +897,9 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
             "is_tail_bet":       is_tail_bet,
             "any_model_inside":  any_model_inside,
             "spread_exceeds_bracket": spread_exceeds_bracket,
+            "open_clearance_f":  round(hi - mu, 1) if (lo is None and hi is not None) else
+                                 round(mu - lo, 1) if (hi is None and lo is not None) else None,
+            "open_clearance_req": round(1.5 * sigma, 1) if sigma else None,
             "grade":             grade,
             "actionable":        grade in ("A", "B"),
         })
