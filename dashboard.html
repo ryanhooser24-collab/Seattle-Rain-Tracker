@@ -682,9 +682,9 @@ body{max-width:900px;margin:0 auto;}
           <span class="at-param-val" id="at-unit-val">$100</span>
         </div>
         <div class="at-param">
-          <span class="at-param-lbl">Max open positions <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Your primary exposure control. Kalshi settlements lag until the next morning, so a daily loss limit would block good signals based on stale P&L. This is the real guardrail — max exposure = this × max per ticker. At defaults (5 × $75 = $375 max deployed at once).</div></span>
-          <input type="range" min="1" max="20" step="1" value="5" style="flex:1;" oninput="document.getElementById('at-maxpos-val').textContent=this.value;atSaveSetting('max_positions',this.value)">
-          <span class="at-param-val" id="at-maxpos-val">5</span>
+          <span class="at-param-lbl">Max open positions <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Your primary exposure control. Kalshi settlements lag until the next morning, so a daily loss limit would block good signals based on stale P&L. This is the real guardrail — max exposure = this × max per ticker. At defaults (10 × $75 = $750 max deployed at once).</div></span>
+          <input type="range" min="1" max="20" step="1" value="10" style="flex:1;" oninput="document.getElementById('at-maxpos-val').textContent=this.value;atSaveSetting('max_positions',this.value)">
+          <span class="at-param-val" id="at-maxpos-val">10</span>
         </div>
         <div class="at-param">
           <span class="at-param-lbl">Max per city <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Max open tickers in one city at once. Prevents correlated losses when the model is wrong about a specific city.</div></span>

@@ -1193,7 +1193,7 @@ _AT_CONFIG = {
     "bankroll_unit":  100.0,
     "max_per_fill":   25.0,
     "max_per_ticker": 75.0,
-    "max_positions":  5,
+    "max_positions":  10,
     "max_per_city":   2,
     "min_volume":     500,
     "scan_interval":  300,   # seconds between scans
