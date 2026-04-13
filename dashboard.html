@@ -1816,20 +1816,46 @@ function renderPortfolio(port,pnl){
     <div class="section-lbl" style="margin-bottom:8px">Open positions — weather markets${hiddenCount>0?` <span style="font-size:10px;color:var(--muted);font-weight:400">(${hiddenCount} non-weather hidden)</span>`:''}</div>
     <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">
       ${weatherPositions.map(p=>{
-        const upnl=p.unrealized_pnl||0;
         const t=(p.ticker||'').toUpperCase();
-        const isRain=t.includes('RAIN')||(p.market_title||'').toLowerCase().includes('rain');
-        const isTemp=t.includes('HIGH')||t.includes('LOWT');
-        const tag=isRain?'Rain':isTemp?'Temp':'';
-        return `<div class="opp ${upnl>=0?'settled':'probabilistic'}" style="cursor:default">
+        // Parse ticker: KXHIGHMIA-26APR12-B79.5 or KXHIGHTLV-26APR13-T66
+        const tkParts = t.match(/KX(?:HIGH|LOWT|LOWS)([A-Z]+)-(\d{2})([A-Z]{3})(\d{2})-(B|T)([\d.]+)/);
+        const cityCode  = tkParts ? tkParts[1] : '';
+        const dateStr   = tkParts ? tkParts[3]+' '+tkParts[4] : '';
+        const bracketType = tkParts ? tkParts[5] : '';
+        const bracketVal  = tkParts ? tkParts[6] : '';
+        const isLow = t.includes('LOWT') || t.includes('LOWS');
+        const mktType = isLow ? 'Low' : 'High';
+        const bracketLabel = bracketType==='T'
+          ? (t.includes('LOWT')||t.includes('LOWS') ? '>'+bracketVal+'°F' : '<'+bracketVal+'°F')
+          : bracketVal+'°F bracket';
+        // City name lookup
+        const cityNames = {NY:'New York',MIA:'Miami',PHX:'Phoenix',CHI:'Chicago',LAX:'Los Angeles',
+          AUS:'Austin',SFO:'San Francisco',ATL:'Atlanta',DCA:'Washington DC',DEN:'Denver',
+          HOU:'Houston',MSP:'Minneapolis',BOS:'Boston',LV:'Las Vegas',LAS:'Las Vegas',
+          PHL:'Philadelphia',OKC:'Oklahoma City',SEA:'Seattle',MIN:'Minneapolis',TLV:'Las Vegas',
+          TMIN:'Minneapolis',TSFO:'San Francisco',TSEA:'Seattle',THOU:'Houston',TPHX:'Phoenix'};
+        const cityName = cityNames[cityCode] || cityCode;
+        const contracts = Math.abs(p.yes_contracts);
+        const avgC = (p.avg_yes_price_c||0).toFixed(1);
+        const cost = (p.total_cost||0).toFixed(2);
+        const payout = (p.payout_if_right||0).toFixed(2);
+        // Unrealized: market_value - total_cost (Kalshi updates market_value live)
+        const mktVal = p.market_value || p.total_cost || 0;
+        const upnl = mktVal - (p.total_cost||0);
+        const upnlStr = (upnl>=0?'+':'')+'$'+Math.abs(upnl).toFixed(2);
+        const upnlColor = upnl>0.01?'var(--yes)':upnl<-0.01?'var(--no)':'var(--muted)';
+        // Current market price per contract
+        const curC = contracts > 0 ? ((mktVal/contracts)*100).toFixed(1) : avgC;
+        return `<div class="opp probabilistic" style="cursor:default">
           <div class="opp-inner">
             <div class="opp-left">
-              <div class="opp-decision" style="font-size:12px">${p.market_title||p.ticker}</div>
-              <div class="opp-context">${Math.abs(p.yes_contracts)} contracts · avg ${(p.avg_yes_price_c||0).toFixed(1)}¢ · cost $${(p.total_cost||0).toFixed(2)} · payout $${(p.payout_if_right||0).toFixed(2)}</div>
+              <div style="font-size:11px;color:var(--muted);letter-spacing:0.8px;text-transform:uppercase;margin-bottom:2px">${cityName} · ${mktType} · ${dateStr}</div>
+              <div class="opp-decision" style="font-size:13px">Buy ${bracketLabel} YES</div>
+              <div class="opp-context" style="margin-top:3px">${contracts} contracts · entry ${avgC}¢ · now ${curC}¢ · cost $${cost} · payout $${payout}</div>
             </div>
             <div class="opp-right">
-              <div class="opp-net-gap" style="font-size:18px;color:${upnl>=0?'var(--yes)':'var(--no)'}">${upnl>=0?'+':''}$${upnl.toFixed(2)}</div>
-              <div class="opp-meta-right">${tag?`<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:var(--rain-lt);color:var(--rain)">${tag}</span>`:''}</div>
+              <div class="opp-net-gap" style="font-size:18px;color:${upnlColor}">${upnlStr}</div>
+              <div class="opp-meta-right" style="font-size:9px;color:var(--muted)">unrealized</div>
             </div>
           </div>
         </div>`;
