@@ -818,8 +818,11 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
 
         def _inside(v):
             if v is None: return False
-            lo_ok = lo is None or v >= lo - 0.5
-            hi_ok = hi is None or v <= hi + 0.5
+            # NWS settles on whole integers. lo_temp <= NWS <= hi_temp.
+            # Allow 0.49°F slop so a forecast of 79.4 counts as inside 79-80
+            # but 78.5 does NOT (it belongs to the 78-79 bracket).
+            lo_ok = lo is None or v >= lo - 0.49
+            hi_ok = hi is None or v <= hi + 0.49
             return lo_ok and hi_ok
 
         any_model_inside = _inside(mu_gfs) or _inside(mu_ecmwf) or _inside(mu_blend)
