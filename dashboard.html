@@ -1349,15 +1349,20 @@ async function loadHistory(){
       html+='</div>';
     }
 
-    // Open positions — weather only
+    // Open positions — weather only, show NWS temp if already settled
     if(weatherOpen.length){
       html+='<div style="font-size:10px;color:var(--muted);letter-spacing:0.8px;text-transform:uppercase;margin-bottom:8px;">Open positions</div>';
       weatherOpen.forEach(function(p){
-        const isW=/RAIN|KXHIGH|KXLOWT|KXLOWS/.test(p.ticker||'');
         const unr=p.unrealized_pnl||0;
+        const s=snapMap[p.ticker];
+        const nwsTemp=s&&s.settled_temp!=null?parseFloat(s.settled_temp):null;
         html+='<div class="hist-row">'
-          +'<div><div style="font-size:12px;font-weight:500;color:var(--ink);">'+(p.market_title||p.ticker)+'</div>'
-          +'<div style="font-size:10px;color:var(--muted);margin-top:2px;">'+p.ticker+' · '+p.yes_contracts+' contracts @ '+p.avg_yes_price_c+'¢ · $'+p.total_cost+(isW?' · <span style="color:#3B6D11;">weather</span>':'')+'</div></div>'
+          +'<div style="flex:1;min-width:0;"><div style="font-size:12px;font-weight:500;color:var(--ink);">'+(p.market_title||p.ticker)+'</div>'
+          +'<div style="font-size:10px;color:var(--muted);margin-top:2px;">'+p.ticker+' \u00b7 '+p.yes_contracts+' contracts @ '+p.avg_yes_price_c+'\u00a2 \u00b7 $'+p.total_cost+'</div>'
+          +(nwsTemp!=null
+            ?'<div style="font-size:10px;margin-top:3px;font-weight:500;color:#378ADD;">NWS settled: '+nwsTemp+'\u00b0F \u00b7 awaiting Kalshi payout</div>'
+            :'<div style="font-size:10px;color:var(--muted);margin-top:3px;">Awaiting NWS settlement</div>')
+          +'</div>'
           +'<div style="text-align:right;flex-shrink:0;">'
           +'<div style="font-size:11px;font-weight:500;color:var(--muted);">Open</div>'
           +'<div style="font-size:10px;color:'+(unr>=0?'var(--gain)':'var(--loss)')+';">'+(unr>=0?'+':'')+'$'+unr.toFixed(2)+' unrealized</div>'
@@ -1381,9 +1386,9 @@ async function loadHistory(){
           +'<div style="font-size:12px;font-weight:500;color:var(--ink);">'+(t.market_title||t.ticker)+'</div>'
           +'<div style="font-size:10px;color:var(--muted);margin-top:2px;">'+t.ticker+' · '+t.side+' · '+t.contracts+' @ '+t.avg_entry_c+'¢'+(isW?' · <span style="color:#3B6D11;">weather</span>':'')+'</div>'
           +(s?'<div style="font-size:10px;color:var(--muted);margin-top:3px;">'
-            +'model '+(mu!=null?mu.toFixed(1)+'°':'?')+' / '+(s.model_prob?Math.round(s.model_prob*100)+'%':'?')+' / grade '+(s.grade||'?')
-            +(t.actual_f!=null?' · settled '+t.actual_f+'°F':'')
-            +(miss!=null?' · <span style="color:'+(Math.abs(miss)>2?'#c0392b':'var(--muted)')+';">miss '+(miss>0?'+':'')+miss.toFixed(1)+'°</span>':'')
+            +'model '+(mu!=null?mu.toFixed(1)+'\u00b0':'?')+' / '+(s.model_prob?Math.round(s.model_prob*100)+'%':'?')+' / grade '+(s.grade||'?')
+            +(t.actual_f!=null?' \u00b7 <span style="font-weight:500;color:#378ADD;">NWS '+t.actual_f+'\u00b0F</span>':'')
+            +(miss!=null?' \u00b7 <span style="color:'+(Math.abs(miss)>2?'#c0392b':'var(--muted)')+';">miss '+(miss>0?'+':'')+miss.toFixed(1)+'\u00b0</span>':'')
             +'</div>':'')
           +'</div>'
           +'<div style="text-align:right;flex-shrink:0;margin-left:12px;">'
