@@ -5088,6 +5088,7 @@ class Handler(BaseHTTPRequestHandler):
                         revenue    = float(s.get("revenue", 0) or 0) / 100
                         yes_cost   = float(s.get("yes_total_cost_dollars", 0) or 0)
                         no_cost    = float(s.get("no_total_cost_dollars",  0) or 0)
+                        fee_cost   = float(s.get("fee_cost", 0) or 0)
                         yes_count  = float(s.get("yes_count_fp", 0) or 0)
                         no_count   = float(s.get("no_count_fp",  0) or 0)
                         ticker     = s.get("ticker", "")
@@ -5110,8 +5111,10 @@ class Handler(BaseHTTPRequestHandler):
                             avg_c     = 0.0
 
                         # Kalshi revenue = winnings received (0 for a loss).
-                        # True P&L = revenue - cost paid.
-                        pnl     = round(revenue - cost, 2)
+                        # True P&L = revenue - cost paid (including fees).
+                        # fee_cost is already in dollars like yes_total_cost_dollars.
+                        total_cost = cost + fee_cost
+                        pnl     = round(revenue - total_cost, 2)
                         outcome = "win" if pnl > 0 else "loss"
                         cumulative += pnl
 
@@ -5122,7 +5125,7 @@ class Handler(BaseHTTPRequestHandler):
                             "side":         side,
                             "contracts":    round(contracts, 0),
                             "avg_entry_c":  avg_c,
-                            "cost":         round(cost, 2),
+                            "cost":         round(total_cost, 2),
                             "revenue":      round(revenue, 2),
                             "pnl":          round(pnl, 2),
                             "cumulative":   round(cumulative, 2),
