@@ -5354,6 +5354,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(404)
                 self.end_headers()
 
+        elif path == "/admin/setup-db":
+            try:
+                ensure_tables()
+                self.send_json({"ok": True, "msg": "Tables created/verified"})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
         elif path == "/health":
             self.send_json({"ok": True, "message": "Server running"})
 
