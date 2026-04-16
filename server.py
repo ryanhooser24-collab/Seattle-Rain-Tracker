@@ -1221,42 +1221,47 @@ _AT_CONFIG = {
 
 
 def at_log(level, msg, ticker=None, city=None, extra=None):
-    """Append one line to the in-memory AT log and write to DB."""
+    """Append one line to the in-memory AT log. DB write is batched separately."""
     import time as _t
     entry = {
         "ts":     _t.time(),
         "ts_str": __import__("datetime").datetime.utcnow().strftime("%H:%M:%S"),
-        "level":  level,   # OK / SKIP / PLACE / ERR / SCAN / SETTLE
+        "level":  level,
         "msg":    msg,
         "ticker": ticker,
         "city":   city,
         "extra":  extra or {},
+        "_flushed": False,
     }
     with _AT_LOCK:
         _AT_LOG.append(entry)
         if len(_AT_LOG) > 500:
             _AT_LOG.pop(0)
 
-    # Write to DB (non-blocking — capture error for diagnostics)
-    db_err = None
+
+def at_flush_log_to_db():
+    """Write any un-flushed in-memory log entries to DB. Call after each cycle."""
     try:
-        conn = get_db()
-        if conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO auto_trader_log
-                        (ts, level, msg, ticker, city, extra)
-                    VALUES (NOW(), %s, %s, %s, %s, %s)
-                """, (level, msg, ticker, city,
-                      __import__("json").dumps(extra or {})))
-            conn.commit()
-            conn.close()
-    except Exception as e:
-        db_err = str(e)
-        # Store DB error in the in-memory entry so it shows in /auto-trader/log
         with _AT_LOCK:
-            if _AT_LOG:
-                _AT_LOG[-1]["db_err"] = db_err
+            unflushed = [e for e in _AT_LOG if not e.get("_flushed")]
+        if not unflushed:
+            return
+        conn = get_db()
+        if not conn:
+            return
+        with conn.cursor() as cur:
+            for e in unflushed:
+                cur.execute("""
+                    INSERT INTO auto_trader_log (ts, level, msg, ticker, city, extra)
+                    VALUES (to_timestamp(%s), %s, %s, %s, %s, %s)
+                    ON CONFLICT DO NOTHING
+                """, (e["ts"], e["level"], e["msg"], e["ticker"], e["city"],
+                      __import__("json").dumps(e["extra"] or {})))
+                e["_flushed"] = True
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 
 def at_place_order(ticker, side, count, yes_price_c):
@@ -1648,6 +1653,7 @@ def run_auto_trader_cycle(force=False):
                 at_log("ERR", f"Error scanning {city_key}/{horizon}: {e}", city=city_key)
 
     at_log("SCAN", f"Cycle complete — {total_fills} fill(s) placed")
+    at_flush_log_to_db()  # batch write cycle entries to DB
 
 
 def _auto_trader_scheduler():
