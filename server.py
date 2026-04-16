@@ -1610,12 +1610,12 @@ def run_auto_trader_cycle(force=False):
     for horizon in cfg.get("horizons", ["d0", "d1"]):
         for city_key in TEMP_CITIES:
             try:
-                fc = fetch_temp_forecast(city_key, horizon)
-                if not fc.get("ok"):
+                result = scan_temp_city(city_key, horizon)
+                if not result.get("ok"):
                     continue
 
-                markets = analyze_temp_brackets(fc, horizon)
-                for signal in markets:
+                all_markets = result.get("high_markets", []) + result.get("low_markets", [])
+                for signal in all_markets:
                     g = signal.get("grade", "skip")
                     if g == "skip" or not signal.get("actionable"):
                         continue
@@ -1636,6 +1636,10 @@ def run_auto_trader_cycle(force=False):
                         at_log("SKIP", f"{signal['ticker']} liq D — no fillable depth",
                                ticker=signal["ticker"])
                         continue
+
+                    # Enrich signal with forecast for model_forecasts logging
+                    signal["forecast"] = result.get("forecast", {})
+                    signal["city_key"] = city_key
 
                     fills = at_execute_signal(
                         signal, cfg, open_positions, city_counts, ticker_spent)
