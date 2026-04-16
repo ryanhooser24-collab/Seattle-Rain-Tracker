@@ -1622,8 +1622,13 @@ function renderTempCard(b){
   const kdol   = ((b.kelly_size||0)).toFixed(2);
   const kdolUncapped = ((b.kelly_size_uncapped||b.kelly_size||0)).toFixed(2);
   const kpct   = ((b.kelly_frac||0)*100).toFixed(1);
+  const fillableA = b.fillable_a != null ? (+b.fillable_a).toFixed(2) : null;
   const bookLimited = b.book_limited && b.kelly_size_uncapped > b.kelly_size;
   const askSz  = b.ask_size||0;
+  const sizeTooltip = fillableA != null
+    ? 'A-grade fillable depth: $'+fillableA+' across full order book. Kelly uncapped: $'+kdolUncapped+'.'
+    : bookLimited ? 'Capped by top-of-book depth ('+askSz+' contracts). Uncapped: $'+kdolUncapped+'.'
+    : 'Dollar amount per $100 unit at half-Kelly.';
   const barMkt = Math.max(3,Math.min(95,askC));
   const barMdl = Math.max(3,Math.min(95,probC));
   const lo = b.lo_temp, hi = b.hi_temp;
@@ -1663,7 +1668,7 @@ function renderTempCard(b){
 
   const statsData = [
     {l:'Half-Kelly',v:kpct+'%',t:'Recommended bet size as % of bankroll unit.'},
-    {l:'Size',v:'$'+kdol+(bookLimited?' \u26a0':''),t:bookLimited?'Capped by order book depth ('+askSz+' contracts available). Uncapped: $'+kdolUncapped+'.':'Dollar amount per $100 unit at half-Kelly.'},
+    {l:'Size',v:'$'+kdol+(bookLimited?' \u26a0':''),t:sizeTooltip},
     {l:'Edge ratio',v:(b.edge_ratio||0).toFixed(2),t:'Gap \u00f7 \u03c3. A\u22650.12  B\u22650.07. Higher = stronger signal.',green:true}
   ];
   let statsHtml = '';

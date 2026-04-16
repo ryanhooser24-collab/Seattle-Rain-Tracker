@@ -781,23 +781,38 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
             kelly_h  = 0.0
             kelly_sz = 0.0
 
-        # Liquidity: quick score from spread + ask_size + OI
-        ask_sz   = m.get("yes_ask_size", 0)
-        oi       = m.get("open_interest", 0)
-        vol_24h  = m.get("volume_24h", 0)
-        liq_pts  = (20 if spr <= 1 else 12 if spr <= 3 else 5 if spr <= 5 else 0) + \
-                   (20 if ask_sz >= 500 else 12 if ask_sz >= 100 else 4 if ask_sz >= 20 else 0) + \
-                   (15 if oi >= 2000 else 8 if oi >= 500 else 3 if oi > 0 else 0) + \
-                   (10 if vol_24h >= 500 else 5 if vol_24h >= 100 else 0)
-        liq_grade = "A" if liq_pts >= 55 else "B" if liq_pts >= 35 else "C" if liq_pts >= 18 else "D"
+        # ── Liquidity scoring ─────────────────────────────────────────────
+        # Pass 1: quick top-of-book score to filter obvious skips fast
+        ask_sz  = m.get("yes_ask_size", 0)
+        oi      = m.get("open_interest", 0)
+        vol_24h = m.get("volume_24h", 0)
+        liq_pts = (20 if spr <= 1 else 12 if spr <= 3 else 5 if spr <= 5 else 0) + \
+                  (20 if ask_sz >= 500 else 12 if ask_sz >= 100 else 4 if ask_sz >= 20 else 0) + \
+                  (15 if oi >= 2000 else 8 if oi >= 500 else 3 if oi > 0 else 0) + \
+                  (10 if vol_24h >= 500 else 5 if vol_24h >= 100 else 0)
+        liq_grade_quick = "A" if liq_pts >= 55 else "B" if liq_pts >= 35 else "C" if liq_pts >= 18 else "D"
 
-        # Cap kelly_sz at the full available depth at current ask price.
-        # ask_sz contracts × ask price = max dollars fillable without moving the book.
-        if ask_sz > 0 and ask > 0:
-            max_fill   = round(ask_sz * ask, 2)
-            kelly_sz_capped = min(kelly_sz, max_fill)
+        # Pass 2: full orderbook liq for any signal with meaningful edge
+        # Only call if signal has edge (avoid wasting API calls on obvious skips)
+        ob_liq      = None
+        fillable_a  = 0.0
+        liq_grade   = liq_grade_quick
+        if net_gap_c > 0 and edge_ratio >= 0.04 and KALSHI_KEY_ID and prob >= 0.25:
+            ticker_str = m.get("ticker", "")
+            if ticker_str:
+                ob_liq = fetch_full_orderbook_liq(ticker_str, mu, sigma, lo, hi)
+                if ob_liq:
+                    liq_grade  = ob_liq["liq_grade"]
+                    fillable_a = ob_liq["fillable_a_dollars"]
+
+        # Kelly cap: use A-grade fillable if we have it, else top-of-book cap
+        if ob_liq and fillable_a > 0:
+            kelly_sz_capped = min(kelly_sz, fillable_a)
+        elif ask_sz > 0 and ask > 0:
+            kelly_sz_capped = min(kelly_sz, round(ask_sz * ask, 2))
         else:
             kelly_sz_capped = kelly_sz
+        book_limited = kelly_sz_capped < kelly_sz
         book_limited = kelly_sz_capped < kelly_sz
 
         # Σ-adjusted edge ratio: signal strength independent of σ level
@@ -897,6 +912,7 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
             "edge_ratio":        edge_ratio,
             "liq_grade":         liq_grade,
             "liq_pts":           liq_pts,
+            "fillable_a":        round(fillable_a, 2),
             "is_tail_bet":       is_tail_bet,
             "any_model_inside":  any_model_inside,
             "spread_exceeds_bracket": spread_exceeds_bracket,
@@ -1280,6 +1296,99 @@ def at_fetch_market(ticker):
             return None
         best = sorted(yes_asks, key=lambda x: x[0])[0]
         return {"yes_ask": best[0] / 100.0, "yes_ask_size": best[1]}
+    except Exception:
+        return None
+
+
+def fetch_full_orderbook_liq(ticker, mu, sigma, lo, hi, min_edge_ratio=0.07):
+    """
+    Fetch full YES orderbook for ticker and compute grade-A-fillable dollars.
+    Walks each price level, recomputes edge_ratio at that price, sums dollars
+    available while grade stays A (edge_ratio >= 0.12 and prob >= 0.50).
+
+    Returns dict:
+        fillable_a_dollars  — dollars fillable while grade = A
+        fillable_b_dollars  — dollars fillable while grade = A or B
+        best_ask_c          — best ask in cents
+        levels              — list of {price_c, size, prob, edge_ratio, grade}
+        liq_grade           — A/B/C/D based on fillable_a_dollars
+    """
+    from math import erf, sqrt as _sqrt
+    try:
+        r = requests.get(
+            f"{KALSHI_BASE}/markets/{ticker}/orderbook",
+            headers=kalshi_auth_headers("GET", f"/trade-api/v2/markets/{ticker}/orderbook"),
+            timeout=8
+        )
+        if not r.ok:
+            return None
+        yes_asks = r.json().get("orderbook", {}).get("yes", [])
+        if not yes_asks:
+            return None
+
+        # Sort ascending by price
+        levels_raw = sorted(yes_asks, key=lambda x: x[0])
+
+        def _cdf(x):
+            if sigma <= 0: return 1.0 if x > mu else 0.0
+            return 0.5 * (1 + erf((x - mu) / (sigma * _sqrt(2))))
+
+        def _prob(lo, hi):
+            upper = hi + 0.5 if hi is not None else float('inf')
+            lower = lo - 0.5 if lo is not None else float('-inf')
+            p_hi = _cdf(upper) if hi is not None else 1.0
+            p_lo = _cdf(lower) if lo is not None else 0.0
+            return max(0.0, p_hi - p_lo)
+
+        fillable_a = 0.0
+        fillable_b = 0.0
+        levels_out = []
+        best_ask_c = levels_raw[0][0] if levels_raw else None
+
+        for price_c, size in levels_raw:
+            ask = price_c / 100.0
+            if ask <= 0 or ask >= 1:
+                continue
+            prob = _prob(lo, hi)
+            gap_c = round((prob - ask) * 100)
+            er = round(gap_c / sigma, 3) if sigma > 0 else 0
+
+            if er >= 0.12 and prob >= 0.50:
+                lvl_grade = "A"
+            elif er >= 0.07 and prob >= 0.35:
+                lvl_grade = "B"
+            else:
+                lvl_grade = "C"
+
+            dollars = round(size * ask, 2)
+            if lvl_grade == "A":
+                fillable_a += dollars
+            if lvl_grade in ("A", "B"):
+                fillable_b += dollars
+
+            levels_out.append({
+                "price_c": price_c, "size": size,
+                "prob": round(prob, 3), "edge_ratio": er,
+                "grade": lvl_grade, "dollars": dollars
+            })
+
+        # Liq grade based on A-grade fillable dollars
+        if fillable_a >= 75:
+            liq_grade = "A"
+        elif fillable_a >= 25:
+            liq_grade = "B"
+        elif fillable_a >= 5:
+            liq_grade = "C"
+        else:
+            liq_grade = "D"
+
+        return {
+            "fillable_a_dollars": round(fillable_a, 2),
+            "fillable_b_dollars": round(fillable_b, 2),
+            "best_ask_c":         best_ask_c,
+            "levels":             levels_out,
+            "liq_grade":          liq_grade,
+        }
     except Exception:
         return None
 
