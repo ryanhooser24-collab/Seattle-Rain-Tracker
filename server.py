@@ -4901,11 +4901,11 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/temp/calibration":
             # Probability calibration curve from temp_snapshots.
-            # For each prob bucket, shows how often the model was actually right.
-            # A well-calibrated model: 60% prob bucket → 60% actual win rate.
             conn = get_db()
             if not conn:
-                self.send_json({"ok": False, "error": "No DB"})
+                self.send_json({"ok": False, "error": "No DB",
+                                "psycopg2_available": PSYCOPG2_AVAILABLE,
+                                "has_db_url": bool(DATABASE_URL)})
             else:
                 try:
                     qs   = parse_qs(urlparse(self.path).query)
