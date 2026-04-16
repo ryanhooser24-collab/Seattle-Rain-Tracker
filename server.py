@@ -3037,10 +3037,8 @@ def ensure_tables():
                     liq_grade       TEXT,
                     open_interest   INTEGER,
                     volume_24h      INTEGER,
-                    settled_temp    NUMERIC(5,1),  -- filled after NWS settlement
-                    settled_correct BOOLEAN,        -- true if bracket won
-                    scan_date       DATE GENERATED ALWAYS AS (scan_ts::date) STORED,
-                    UNIQUE (city, target_date, horizon, ticker, scan_date)
+                    settled_temp    NUMERIC(5,1),
+                    settled_correct BOOLEAN
                 );
             """)
             # Multi-model forecast accuracy table.
@@ -5378,9 +5376,7 @@ class Handler(BaseHTTPRequestHandler):
                         yes_ask NUMERIC(5,3), gap_c INTEGER, net_gap_c INTEGER,
                         edge_ratio NUMERIC(6,3), kelly_frac NUMERIC(5,3),
                         grade TEXT, liq_grade TEXT, open_interest INTEGER, volume_24h INTEGER,
-                        settled_temp NUMERIC(5,1), settled_correct BOOLEAN,
-                        scan_date DATE GENERATED ALWAYS AS (scan_ts::date) STORED,
-                        UNIQUE (city, target_date, horizon, ticker, scan_date))"""),
+                        settled_temp NUMERIC(5,1), settled_correct BOOLEAN)"""),
                     ("model_forecasts", "CREATE TABLE IF NOT EXISTS model_forecasts (id SERIAL PRIMARY KEY, city TEXT NOT NULL, nws_station TEXT NOT NULL DEFAULT '', target_date DATE NOT NULL, actual_high NUMERIC(5,1), gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), nbm_high NUMERIC(5,1), graphcast_high NUMERIC(5,1), gem_high NUMERIC(5,1), icon_high NUMERIC(5,1), spread_gfs_ecmwf NUMERIC(5,2), UNIQUE(city, target_date))"),
                     ("auto_trader_config", "CREATE TABLE IF NOT EXISTS auto_trader_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())"),
                     ("auto_trader_log", "CREATE TABLE IF NOT EXISTS auto_trader_log (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT NOW(), level TEXT NOT NULL, msg TEXT NOT NULL, ticker TEXT, city TEXT, extra JSONB DEFAULT '{}')"),
