@@ -4893,6 +4893,71 @@ class Handler(BaseHTTPRequestHandler):
                 "last_settle_run": _LAST_SETTLE_RUN,
             })
 
+        elif path == "/temp/calibration":
+            # Probability calibration curve from temp_snapshots.
+            # For each prob bucket, shows how often the model was actually right.
+            # A well-calibrated model: 60% prob bucket → 60% actual win rate.
+            conn = get_db()
+            if not conn:
+                self.send_json({"ok": False, "error": "No DB"})
+            else:
+                try:
+                    qs   = parse_qs(urlparse(self.path).query)
+                    city = qs.get("city", [None])[0]
+                    with conn.cursor() as cur:
+                        base = """
+                            SELECT
+                                ROUND(model_prob::numeric * 10) / 10.0 AS prob_bucket,
+                                COUNT(*)                                AS n,
+                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3)
+                                                                        AS actual_win_rate,
+                                ROUND(AVG(model_prob::numeric), 3)      AS avg_prob,
+                                ROUND(AVG(yes_ask::numeric), 3)         AS avg_market_price,
+                                ROUND(AVG(edge_ratio::numeric), 3)      AS avg_edge_ratio,
+                                STRING_AGG(DISTINCT grade, ',' ORDER BY grade) AS grades
+                            FROM temp_snapshots
+                            WHERE settled_correct IS NOT NULL
+                              AND model_prob IS NOT NULL
+                        """
+                        if city:
+                            cur.execute(base + " AND city=%s GROUP BY prob_bucket ORDER BY prob_bucket", (city,))
+                        else:
+                            cur.execute(base + " GROUP BY prob_bucket ORDER BY prob_bucket")
+                        cols = [d[0] for d in cur.description]
+                        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+
+                        # Also get overall stats
+                        cur.execute("""
+                            SELECT
+                                COUNT(*) AS total,
+                                SUM(CASE WHEN settled_correct THEN 1 ELSE 0 END) AS wins,
+                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) AS overall_win_rate,
+                                ROUND(AVG(model_prob::numeric), 3) AS avg_model_prob,
+                                -- Brier score: lower = better calibrated
+                                ROUND(AVG(POWER(model_prob::numeric - CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END, 2))::numeric, 4) AS brier_score
+                            FROM temp_snapshots
+                            WHERE settled_correct IS NOT NULL AND model_prob IS NOT NULL
+                        """ + (" AND city=%s" if city else ""), ([city] if city else []))
+                        summary = dict(zip([d[0] for d in cur.description], cur.fetchone() or []))
+
+                    conn.close()
+                    for r in rows:
+                        for k, v in r.items():
+                            if hasattr(v, '__float__'): r[k] = float(v)
+                    for k, v in summary.items():
+                        if hasattr(v, '__float__'): summary[k] = float(v)
+
+                    self.send_json({
+                        "ok":      True,
+                        "city":    city or "all",
+                        "summary": summary,
+                        "buckets": rows,
+                        "note":    "prob_bucket is model probability rounded to nearest 0.1. "
+                                   "A well-calibrated model has actual_win_rate ≈ prob_bucket."
+                    })
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)})
+
         elif path == "/temp/model-accuracy":
             # Query model_accuracy view — RMSE per model per city per spread bucket.
             # Used to analytically determine which model to trust on high-spread days.
