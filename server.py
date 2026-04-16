@@ -858,15 +858,15 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
         # B: decent edge ratio, OR model says 35-50% (edge exists but model not confident)
         # C: weak edge, borderline
         # skip: no edge, too uncertain, or structurally weak
-        if net_gap_c <= 0 or liq_grade == "D":
+        if net_gap_c <= 0:
             grade = "skip"
         elif prob < 0.20:
             grade = "skip"
         elif is_tail_bet and prob < 0.35:
             grade = "skip"
-        elif edge_ratio >= 0.12 and liq_grade in ("A","B") and prob >= 0.50:
-            grade = "A"   # model says likely AND strong edge signal
-        elif edge_ratio >= 0.07 and liq_grade in ("A","B","C") and prob >= 0.35:
+        elif edge_ratio >= 0.12 and prob >= 0.50:
+            grade = "A"
+        elif edge_ratio >= 0.07 and prob >= 0.35:
             grade = "B"
         elif edge_ratio >= 0.04 and prob >= 0.25:
             grade = "C"
@@ -912,6 +912,7 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
             "edge_ratio":        edge_ratio,
             "liq_grade":         liq_grade,
             "liq_pts":           liq_pts,
+            "liq_skip":          liq_grade == "D",  # auto-trader skips D, scanner shows all
             "fillable_a":        round(fillable_a, 2),
             "is_tail_bet":       is_tail_bet,
             "any_model_inside":  any_model_inside,
@@ -1236,7 +1237,8 @@ def at_log(level, msg, ticker=None, city=None, extra=None):
         if len(_AT_LOG) > 500:
             _AT_LOG.pop(0)
 
-    # Write to DB (non-blocking — ignore failures)
+    # Write to DB (non-blocking — capture error for diagnostics)
+    db_err = None
     try:
         conn = get_db()
         if conn:
@@ -1249,8 +1251,12 @@ def at_log(level, msg, ticker=None, city=None, extra=None):
                       __import__("json").dumps(extra or {})))
             conn.commit()
             conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        db_err = str(e)
+        # Store DB error in the in-memory entry so it shows in /auto-trader/log
+        with _AT_LOCK:
+            if _AT_LOG:
+                _AT_LOG[-1]["db_err"] = db_err
 
 
 def at_place_order(ticker, side, count, yes_price_c):
@@ -1623,6 +1629,12 @@ def run_auto_trader_cycle(force=False):
                     if signal.get("volume_24h", 0) < cfg.get("min_volume", 500):
                         at_log("SKIP", f"{signal['ticker']} volume too low "
                                f"({signal.get('volume_24h',0)})", ticker=signal["ticker"])
+                        continue
+
+                    # Liquidity filter — skip truly illiquid (liq D) for auto-trader
+                    if signal.get("liq_skip"):
+                        at_log("SKIP", f"{signal['ticker']} liq D — no fillable depth",
+                               ticker=signal["ticker"])
                         continue
 
                     fills = at_execute_signal(
