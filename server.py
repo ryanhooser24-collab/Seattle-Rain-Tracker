@@ -1215,7 +1215,7 @@ _AT_CONFIG = {
     "max_per_ticker": 75.0,
     "max_positions":  10,
     "max_per_city":   2,
-    "min_volume":     500,
+    "min_volume":     200,
     "scan_interval":  300,   # seconds between scans
 }
 
@@ -1463,8 +1463,17 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
         # Fetch live market at current price
         market = at_fetch_market(ticker)
         if not market:
-            at_log("ERR", f"Could not fetch orderbook for {ticker}", ticker=ticker)
-            break
+            # Fall back to scan-time ask if orderbook temporarily empty
+            scan_ask = signal.get("yes_ask")
+            scan_ask_sz = signal.get("yes_ask_size", 0)
+            if scan_ask and scan_ask > 0:
+                market = {"yes_ask": scan_ask, "yes_ask_size": scan_ask_sz}
+                at_log("SCAN", f"Orderbook empty for {ticker} — using scan-time ask {round(scan_ask*100)}¢",
+                       ticker=ticker)
+            else:
+                at_log("ERR", f"Could not fetch orderbook for {ticker} and no scan-time fallback",
+                       ticker=ticker)
+                break
 
         ask       = market["yes_ask"]
         ask_size  = market["yes_ask_size"]
@@ -1620,21 +1629,11 @@ def run_auto_trader_cycle(force=False):
                     if g == "skip" or not signal.get("actionable"):
                         continue
 
+                    # Only filter on grade — the execution loop handles
+                    # sizing, book depth, and per-fill grade re-evaluation
                     grade_rank = {"A": 0, "B": 1, "C": 2}
                     min_rank   = grade_rank.get(cfg.get("min_grade", "A"), 0)
                     if grade_rank.get(g, 99) > min_rank:
-                        continue
-
-                    # Volume filter
-                    if signal.get("volume_24h", 0) < cfg.get("min_volume", 500):
-                        at_log("SKIP", f"{signal['ticker']} volume too low "
-                               f"({signal.get('volume_24h',0)})", ticker=signal["ticker"])
-                        continue
-
-                    # Liquidity filter — skip truly illiquid (liq D) for auto-trader
-                    if signal.get("liq_skip"):
-                        at_log("SKIP", f"{signal['ticker']} liq D — no fillable depth",
-                               ticker=signal["ticker"])
                         continue
 
                     # Enrich signal with forecast for model_forecasts logging
