@@ -767,9 +767,10 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
             analyzed.append(m)
             continue
 
-        prob     = bracket_prob(lo, hi, mu, sigma)
-        gap_c    = round((prob - ask) * 100)
+        prob      = bracket_prob(lo, hi, mu, sigma)
+        gap_c     = round((prob - ask) * 100)
         net_gap_c = max(0, gap_c - spr)
+        edge_ratio = round(gap_c / sigma, 3) if sigma > 0 else 0.0
 
         # Kelly: f = (p*b - q) / b where b = (1-ask)/ask (payout ratio)
         if ask > 0 and ask < 1:
@@ -813,10 +814,6 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
         else:
             kelly_sz_capped = kelly_sz
         book_limited = kelly_sz_capped < kelly_sz
-        book_limited = kelly_sz_capped < kelly_sz
-
-        # Σ-adjusted edge ratio: signal strength independent of σ level
-        edge_ratio = round(gap_c / sigma, 3) if sigma > 0 else 0.0
 
         # Is this bracket below the model center? (tail YES bet — longshot)
         is_tail_bet = (hi is not None and hi <= mu) or (lo is None and hi is not None and hi < mu)
