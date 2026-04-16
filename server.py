@@ -5355,11 +5355,46 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
 
         elif path == "/admin/setup-db":
-            try:
-                ensure_tables()
-                self.send_json({"ok": True, "msg": "Tables created/verified"})
-            except Exception as e:
-                self.send_json({"ok": False, "error": str(e)})
+            # Run each table creation independently so one failure doesn't block others
+            results = {}
+            conn = get_db()
+            if not conn:
+                self.send_json({"ok": False, "error": "No DB"})
+            else:
+                tables = [
+                    ("forecast_snapshots", "CREATE TABLE IF NOT EXISTS forecast_snapshots (id SERIAL PRIMARY KEY, city TEXT, month TEXT, snapshot_date DATE, days_remaining INTEGER, true_mtd NUMERIC(6,2), wu_remaining NUMERIC(6,2), projected_eom NUMERIC(6,2), confidence TEXT, wu_days_used INTEGER, sigma NUMERIC(6,3), created_at TIMESTAMPTZ DEFAULT NOW())"),
+                    ("intraday_snapshots", "CREATE TABLE IF NOT EXISTS intraday_snapshots (id SERIAL PRIMARY KEY, city TEXT, month TEXT, snapshot_ts TIMESTAMPTZ DEFAULT NOW(), true_mtd NUMERIC(6,2), wu_remaining NUMERIC(6,2), projected_eom NUMERIC(6,2), confidence TEXT)"),
+                    ("month_settlements", "CREATE TABLE IF NOT EXISTS month_settlements (id SERIAL PRIMARY KEY, city TEXT NOT NULL, month TEXT NOT NULL, actual_total NUMERIC(6,2), settled_date DATE, notes TEXT, UNIQUE(city, month))"),
+                    ("temp_snapshots", """CREATE TABLE IF NOT EXISTS temp_snapshots (
+                        id SERIAL PRIMARY KEY, city TEXT NOT NULL, nws_station TEXT NOT NULL,
+                        target_date DATE NOT NULL, horizon TEXT NOT NULL DEFAULT 'd1',
+                        scan_ts TIMESTAMPTZ DEFAULT NOW(), market_type TEXT NOT NULL,
+                        ticker TEXT NOT NULL, bracket_label TEXT,
+                        lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1),
+                        gfs_forecast NUMERIC(5,1), ecmwf_forecast NUMERIC(5,1),
+                        best_forecast NUMERIC(5,1), sigma NUMERIC(5,2),
+                        spread_models NUMERIC(5,2), model_prob NUMERIC(5,3),
+                        yes_ask NUMERIC(5,3), gap_c INTEGER, net_gap_c INTEGER,
+                        edge_ratio NUMERIC(6,3), kelly_frac NUMERIC(5,3),
+                        grade TEXT, liq_grade TEXT, open_interest INTEGER, volume_24h INTEGER,
+                        settled_temp NUMERIC(5,1), settled_correct BOOLEAN,
+                        UNIQUE (city, target_date, horizon, ticker, DATE(scan_ts)))"""),
+                    ("model_forecasts", "CREATE TABLE IF NOT EXISTS model_forecasts (id SERIAL PRIMARY KEY, city TEXT NOT NULL, nws_station TEXT NOT NULL DEFAULT '', target_date DATE NOT NULL, actual_high NUMERIC(5,1), gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), nbm_high NUMERIC(5,1), graphcast_high NUMERIC(5,1), gem_high NUMERIC(5,1), icon_high NUMERIC(5,1), spread_gfs_ecmwf NUMERIC(5,2), UNIQUE(city, target_date))"),
+                    ("auto_trader_config", "CREATE TABLE IF NOT EXISTS auto_trader_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())"),
+                    ("auto_trader_log", "CREATE TABLE IF NOT EXISTS auto_trader_log (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT NOW(), level TEXT NOT NULL, msg TEXT NOT NULL, ticker TEXT, city TEXT, extra JSONB DEFAULT '{}')"),
+                ]
+                for name, sql in tables:
+                    try:
+                        with conn.cursor() as cur:
+                            cur.execute(sql)
+                        conn.commit()
+                        results[name] = "ok"
+                    except Exception as e:
+                        conn.rollback()
+                        results[name] = str(e)
+                conn.close()
+                all_ok = all(v == "ok" for v in results.values())
+                self.send_json({"ok": all_ok, "tables": results})
 
         elif path == "/health":
             self.send_json({"ok": True, "message": "Server running"})
