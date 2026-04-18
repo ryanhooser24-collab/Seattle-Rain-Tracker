@@ -1214,6 +1214,7 @@ _AT_CONFIG = {
     "max_per_city":   2,
     "min_volume":     200,
     "scan_interval":  300,   # seconds between scans
+    "min_fill_dollars": 5.0, # skip execution if Kelly budget < this
 }
 
 
@@ -1430,6 +1431,8 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
     """
     Execute the fill loop for one signal.
     Walks the order book while grade holds at min_grade.
+    Kelly is calculated once at scan time and used as the total budget
+    for this ticker across all fills — not recalculated per level.
     Returns number of fills placed.
     """
     ticker    = signal.get("ticker", "")
@@ -1448,25 +1451,47 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
     fills      = 0
     spent_this_ticker = ticker_spent.get(ticker, 0.0)
 
-    at_log("SCAN", f"Evaluating {ticker} grade={grade} mu={mu}°F", ticker=ticker, city=city_key)
+    # Use scan-time Kelly as the total budget for this ticker.
+    # Recalculating per level would allow over-deployment on weak signals.
+    # Scale by config bankroll_unit / 100 to respect current settings.
+    scan_kelly_sz  = signal.get("kelly_size", 0.0) or 0.0
+    # Rescale if bankroll_unit differs from default $100
+    bankroll_scale = cfg.get("bankroll_unit", 100.0) / 100.0
+    kelly_mult_scale = cfg.get("kelly_mult", 0.5) / 0.5  # scale vs default 0.5x
+    kelly_budget   = round(scan_kelly_sz * bankroll_scale * kelly_mult_scale, 2)
+    kelly_budget   = min(kelly_budget, cfg.get("max_per_ticker", 75.0))
+
+    # Min fill check — if Kelly budget is below threshold, skip entirely
+    min_fill = cfg.get("min_fill_dollars", 5.0)
+    if kelly_budget < min_fill:
+        at_log("SKIP",
+               f"{ticker} Kelly budget ${kelly_budget:.2f} < min_fill ${min_fill:.2f} — skipping",
+               ticker=ticker, city=city_key)
+        return 0
+
+    at_log("SCAN", f"Evaluating {ticker} grade={grade} mu={mu}°F kelly_budget=${kelly_budget:.2f}",
+           ticker=ticker, city=city_key)
 
     while True:
         # Portfolio-level checks
-        if len(open_positions) >= cfg.get("max_positions", 5):
+        if len(open_positions) >= cfg.get("max_positions", 10):
             at_log("SKIP", f"Max positions reached ({cfg['max_positions']})", ticker=ticker)
             break
         if city_counts.get(city_code, 0) >= cfg.get("max_per_city", 2):
             at_log("SKIP", f"City limit reached for {city_code}", ticker=ticker, city=city_key)
             break
-        if spent_this_ticker >= cfg.get("max_per_ticker", 75.0):
-            at_log("SKIP", f"Ticker budget exhausted (${spent_this_ticker:.2f})", ticker=ticker)
+
+        # Kelly budget is the binding constraint — replaces max_per_ticker in the loop
+        kelly_remain = kelly_budget - spent_this_ticker
+        if kelly_remain <= 0:
+            at_log("SKIP", f"{ticker} Kelly budget exhausted (${kelly_budget:.2f} spent)",
+                   ticker=ticker)
             break
 
         # Fetch live market at current price
         market = at_fetch_market(ticker)
         if not market:
-            # Fall back to scan-time ask if orderbook temporarily empty
-            scan_ask = signal.get("yes_ask")
+            scan_ask    = signal.get("yes_ask")
             scan_ask_sz = signal.get("yes_ask_size", 0)
             if scan_ask and scan_ask > 0:
                 market = {"yes_ask": scan_ask, "yes_ask_size": scan_ask_sz}
@@ -1477,11 +1502,11 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
                        ticker=ticker)
                 break
 
-        ask       = market["yes_ask"]
-        ask_size  = market["yes_ask_size"]
-        ask_c     = round(ask * 100)
+        ask      = market["yes_ask"]
+        ask_size = market["yes_ask_size"]
+        ask_c    = round(ask * 100)
 
-        # Recalculate grade at current ask
+        # Recalculate grade at current ask price
         if mu is not None and sigma and sigma > 0 and ask > 0 and ask < 1:
             from math import erf, sqrt as _sqrt
             lo = signal.get("lo_temp")
@@ -1497,11 +1522,10 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
             else:
                 prob = _cdf(hi + 0.5) - _cdf(lo - 0.5)
 
-            gap_c     = round((prob - ask) * 100)
-            net_gap_c = max(0, gap_c - round(signal.get("spread_c", 1)))
+            gap_c      = round((prob - ask) * 100)
+            net_gap_c  = max(0, gap_c - round(signal.get("spread_c", 1)))
             edge_ratio = round(net_gap_c / sigma, 3) if sigma > 0 else 0
 
-            # Grade using same thresholds as analyze_temp_brackets
             if net_gap_c <= 0:
                 live_grade = "skip"
             elif edge_ratio >= 0.12 and prob >= 0.50:
@@ -1511,7 +1535,7 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
             else:
                 live_grade = "C"
         else:
-            live_grade = grade   # fall back to scan-time grade
+            live_grade = grade
             prob       = signal.get("model_prob", 0)
 
         # Stop if grade degraded below threshold
@@ -1520,22 +1544,13 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
                    ticker=ticker, city=city_key)
             break
 
-        # Size this fill
-        if ask > 0 and ask < 1:
-            b        = (1 - ask) / ask
-            kelly    = max(0, (prob * b - (1 - prob)) / b)
-            kelly_h  = kelly * cfg.get("kelly_mult", 0.5)
-            kelly_sz = round(kelly_h * cfg.get("bankroll_unit", 100.0), 2)
-        else:
-            kelly_sz = 0.0
+        # Size this fill: capped by book depth, max_per_fill, and remaining Kelly budget
+        book_cap = round(ask_size * ask, 2)
+        fill_sz  = min(book_cap, cfg.get("max_per_fill", 25.0), kelly_remain)
+        fill_sz  = round(fill_sz, 2)
 
-        book_cap      = round(ask_size * ask, 2)
-        ticker_remain = cfg.get("max_per_ticker", 75.0) - spent_this_ticker
-        fill_sz       = min(kelly_sz, book_cap, cfg.get("max_per_fill", 25.0), ticker_remain)
-        fill_sz       = round(fill_sz, 2)
-
-        if fill_sz < 1.0:
-            at_log("SKIP", f"{ticker} fill size too small (${fill_sz:.2f}) — stopping",
+        if fill_sz < min_fill:
+            at_log("SKIP", f"{ticker} fill size ${fill_sz:.2f} < min_fill ${min_fill:.2f} — stopping",
                    ticker=ticker)
             break
 
@@ -1559,10 +1574,12 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
             city_counts[city_code] = city_counts.get(city_code, 0) + 1
 
         at_log("PLACE",
-               f"Placed {count} × {ticker} @ {ask_c}¢ = ${cost:.2f} | grade={live_grade} prob={round(prob*100)}%",
+               f"Placed {count} × {ticker} @ {ask_c}¢ = ${cost:.2f} | grade={live_grade} "
+               f"prob={round(prob*100)}% | budget ${kelly_budget:.2f} spent ${spent_this_ticker:.2f}",
                ticker=ticker, city=city_key,
                extra={"count": count, "ask_c": ask_c, "cost": cost,
-                      "grade": live_grade, "prob": round(prob, 3)})
+                      "grade": live_grade, "prob": round(prob, 3),
+                      "kelly_budget": kelly_budget, "spent": spent_this_ticker})
 
         # Write to model_forecasts for later accuracy analysis
         try:
