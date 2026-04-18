@@ -1012,7 +1012,7 @@ def scan_temp_city(city_key, horizon="d1"):
                                      gap_c, net_gap_c, edge_ratio, kelly_frac,
                                      grade, liq_grade, open_interest, volume_24h)
                                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                                    ON CONFLICT (city, target_date, horizon, ticker, DATE(scan_ts)) DO NOTHING
+                                    ON CONFLICT DO NOTHING
                                 """, (
                                     city_key, cfg["nws_station"], fc["target_date"], horizon, mtype,
                                     m["ticker"], m.get("bracket_label"),
@@ -3465,83 +3465,6 @@ class Handler(BaseHTTPRequestHandler):
             print(f"  ✅ NWS: {true_mtd}\" | IEM gap: +{gap_total}\" | True MTD: {true_mtd}\" | EOD proj: {today_eod}\" | WU 10-day: {wu_remaining}\" | conf: {conf}")
             self.send_json(result)
 
-        elif path == "/snapshots":
-            # Return forecast snapshots for current or specified month
-            qs = parse_qs(urlparse(self.path).query)
-            month = qs.get("month", [None])[0]
-            rows = fetch_snapshots(month)
-            # Convert date objects to strings for JSON
-            for r in rows:
-                for k, v in r.items():
-                    if hasattr(v, 'isoformat'):
-                        r[k] = v.isoformat()
-            self.send_json({"ok": True, "snapshots": rows, "count": len(rows)})
-
-        elif path == "/chart-data":
-            # Return intraday snapshots for projection vs market chart
-            qs     = parse_qs(urlparse(self.path).query)
-            city   = qs.get("city", ["seattle"])[0]
-            month  = qs.get("month", [datetime.now().strftime("%Y-%m")])[0]
-            conn   = get_db()
-            if not conn:
-                self.send_json({"ok": False, "error": "No DB", "rows": []})
-            else:
-                try:
-                    import psycopg2.extras
-                    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                        cur.execute("""
-                            SELECT snapshot_ts, days_remaining, true_mtd,
-                                   projected_eom, sigma_estimate,
-                                   model_prob_5, model_prob_6, model_prob_7,
-                                   kalshi_yes_5, kalshi_yes_6, kalshi_yes_7,
-                                   gap_5, gap_6, gap_7
-                            FROM intraday_snapshots
-                            WHERE city=%s AND month LIKE %s
-                            ORDER BY snapshot_ts ASC
-                        """, (city, f"{city}-{month}%"))
-                        rows = cur.fetchall()
-                        result = []
-                        for r in rows:
-                            d = dict(r)
-                            for k,v in d.items():
-                                if hasattr(v,'isoformat'): d[k]=v.isoformat()
-                                elif hasattr(v,'__float__'): d[k]=float(v)
-                            result.append(d)
-                    conn.close()
-                    self.send_json({"ok": True, "rows": result, "count": len(result)})
-                except Exception as e:
-                    self.send_json({"ok": False, "error": str(e), "rows": []})
-
-        elif path == "/accuracy":
-            # Return forecast_accuracy view — all months with settlements
-            rows = fetch_accuracy_view()
-            for r in rows:
-                for k, v in r.items():
-                    if hasattr(v, 'isoformat'):
-                        r[k] = v.isoformat()
-                    elif hasattr(v, '__float__'):
-                        r[k] = float(v)
-            self.send_json({"ok": True, "rows": rows, "count": len(rows)})
-
-        elif path == "/debug/kalshi":
-            try:
-                url = f"{KALSHI_BASE}/markets"
-                params = {"series_ticker": KALSHI_SERIES, "status": "open", "limit": 10}
-                hdrs = kalshi_auth_headers("GET", "/trade-api/v2/markets")
-                r = requests.get(url, params=params, headers=hdrs, timeout=6)
-                raw = r.json()
-                mkts = raw.get("markets", [])
-                debug = []
-                for m in mkts[:3]:
-                    debug.append({k: m.get(k) for k in [
-                        "ticker","title","subtitle","strike_type",
-                        "floor_strike","cap_strike","functional_strike",
-                        "yes_ask_dollars","no_ask_dollars"
-                    ]})
-                self.send_json({"total": len(mkts), "sample": debug})
-            except Exception as e:
-                self.send_json({"error": str(e)})
-
         elif path == "/ping":
             # Diagnostic: time each external source for one city
             import time
@@ -4326,66 +4249,6 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
-        elif path == "/debug/iem":
-            # Expose raw IEM hourly readings so gap fill can be cross-validated
-            # Compare against: weather.gov/wrh/timeseries?site=ksea
-            qs       = parse_qs(urlparse(self.path).query)
-            city_key = qs.get("city", [ACTIVE_CITY])[0]
-            cfg      = CITIES.get(city_key, CITY_CFG)
-            try:
-                iem = fetch_iem_gap(None, city_cfg=cfg)
-                # Also fetch NWS CLI for today's official reading as cross-check
-                nws = fetch_nws_mtd(city_cfg=cfg)
-                self.send_json({
-                    "ok":          True,
-                    "city":        city_key,
-                    "iem_gap_total": iem.get("gap_total", 0),
-                    "iem_gap_start": iem.get("gap_start"),
-                    "iem_gap_end":   iem.get("gap_end"),
-                    "iem_readings":  iem.get("readings", []),  # last 20 hourly obs
-                    "iem_reading_count": len(iem.get("readings", [])),
-                    "iem_ok":        iem.get("ok"),
-                    "iem_error":     iem.get("error"),
-                    "nws_mtd":       nws.get("mtd"),
-                    "nws_today":     nws.get("today"),
-                    "nws_issued":    nws.get("issued"),
-                    "nws_finalized": nws.get("is_finalized"),
-                    "true_mtd":      round((nws.get("mtd", 0) if nws.get("is_finalized") else
-                                     nws.get("mtd", 0) - (nws.get("today") or 0)) +
-                                     iem.get("gap_total", 0), 2),
-                    "cross_check":   "Compare iem_gap_total against weather.gov/wrh/timeseries?site=ksea hourly precip column"
-                })
-            except Exception as e:
-                self.send_json({"ok": False, "error": str(e)})
-
-        elif path == "/debug/om":
-            # Test Open-Meteo Previous Runs API - confirmed working format
-            try:
-                var = "precipitation_previous_day1"
-                r = requests.get(OM_PREV_URL, params={
-                    "latitude": 47.441, "longitude": -122.3,
-                    "hourly": var,
-                    "timezone": "America/Los_Angeles",
-                    "past_days": 1, "forecast_days": 3,
-                }, timeout=8)
-                r.raise_for_status()
-                data = r.json()
-                hours  = data.get("hourly", {}).get("time", [])
-                precip = data.get("hourly", {}).get(var, [])
-                # Sum mm for first available day as sanity check
-                today = hours[0][:10] if hours else ""
-                day_mm = sum(float(p or 0) for h, p in zip(hours, precip) if h and h[:10] == today)
-                self.send_json({
-                    "ok": True, "variable": var,
-                    "hours_returned": len(hours),
-                    "sample_day": today,
-                    "sample_day_mm": round(day_mm, 2),
-                    "sample_day_inches": round(day_mm / 25.4, 3),
-                    "first_5_values_mm": precip[:5],
-                })
-            except Exception as e:
-                self.send_json({"ok": False, "error": str(e)})
-
         elif path == "/calibrate/all":
             # Runs backtest (sigma) + bias calibration for all 8 cities in parallel.
             # Call this once after every deploy to restore in-memory caches.
@@ -4553,105 +4416,6 @@ class Handler(BaseHTTPRequestHandler):
             _TEMP_SCAN_CACHE.pop(cache_key, None)
             result = scan_temp_city(city, horizon)
             self.send_json(result)
-
-        elif path == "/temp/calibrate-test":
-            # Diagnostic: test calibration for ONE city and return raw errors.
-            # Use this to debug why calibration fails before running all cities.
-            # GET /temp/calibrate-test?city=chicago&days=7
-            qs      = parse_qs(urlparse(self.path).query)
-            city    = qs.get("city", ["chicago"])[0]
-            days_t  = int(qs.get("days", ["7"])[0])
-            cfg     = TEMP_CITIES.get(city)
-            if not cfg:
-                self.send_json({"ok": False, "error": f"Unknown city: {city}"})
-            else:
-                try:
-                    import pytz
-                    from datetime import datetime as dt_cls, timedelta
-                    from math import sqrt
-                    tz_name  = cfg["tz"]
-                    local_tz = pytz.timezone(tz_name)
-                    now      = dt_cls.utcnow().replace(tzinfo=pytz.utc).astimezone(local_tz)
-                    end_s    = (now - timedelta(days=2)).strftime("%Y-%m-%d")
-                    start_s  = (now - timedelta(days=days_t + 1)).strftime("%Y-%m-%d")
-
-                    results  = {}
-                    errors   = {}
-
-                    for label, url, params in [
-                        ("gfs", "https://api.open-meteo.com/v1/forecast", {
-                            "latitude": cfg["lat"], "longitude": cfg["lon"],
-                            "daily": "temperature_2m_max", "timezone": tz_name,
-                            "models": "gfs_seamless", "past_days": days_t + 3,
-                            "forecast_days": 1,
-                        }),
-                        ("ecmwf", "https://api.open-meteo.com/v1/forecast", {
-                            "latitude": cfg["lat"], "longitude": cfg["lon"],
-                            "daily": "temperature_2m_max", "timezone": tz_name,
-                            "models": "ecmwf_ifs", "past_days": days_t + 3,
-                            "forecast_days": 1,
-                        }),
-                        ("archive", "https://archive-api.open-meteo.com/v1/archive", {
-                            "latitude": cfg["lat"], "longitude": cfg["lon"],
-                            "daily": "temperature_2m_max", "timezone": tz_name,
-                            "start_date": start_s, "end_date": end_s,
-                        }),
-                    ]:
-                        try:
-                            r = requests.get(url, params=params, timeout=15)
-                            d = r.json()
-                            if "error" in d:
-                                errors[label] = {"api_error": d["error"], "reason": d.get("reason", ""), "status": r.status_code}
-                                results[label] = {}
-                            else:
-                                dates = d.get("daily", {}).get("time", [])
-                                vals  = d.get("daily", {}).get("temperature_2m_max", [])
-                                results[label] = {
-                                    ds: round(v*9/5+32, 1)
-                                    for ds, v in zip(dates, vals)
-                                    if v is not None and start_s <= ds <= end_s
-                                }
-                        except Exception as e:
-                            errors[label] = {"exception": str(e)}
-                            results[label] = {}
-
-                    # Compute errors where we have both
-                    errs_gfs   = [results["gfs"][d]   - results["archive"][d]
-                                  for d in results["archive"] if d in results["gfs"]]
-                    errs_ecmwf = [results["ecmwf"][d] - results["archive"][d]
-                                  for d in results["archive"] if d in results["ecmwf"]]
-
-                    def _st(e):
-                        if not e: return None
-                        n = len(e)
-                        return {"n": n, "bias": round(sum(e)/n, 2),
-                                "rmse": round(sqrt(sum(x**2 for x in e)/n), 2)}
-
-                    self.send_json({
-                        "ok":         True,
-                        "city":       city,
-                        "date_range": f"{start_s} → {end_s}",
-                        "n_archive":  len(results.get("archive", {})),
-                        "n_gfs":      len(results.get("gfs", {})),
-                        "n_ecmwf":    len(results.get("ecmwf", {})),
-                        "fetch_errors": errors,
-                        "gfs_stats":  _st(errs_gfs),
-                        "ecmwf_stats":_st(errs_ecmwf),
-                        "ecmwf_mirror": (
-                            _st(errs_ecmwf) is not None
-                            and _st(errs_ecmwf).get("rmse", 99) < 0.3
-                        ),
-                        "ecmwf_mirror_note": (
-                            "ECMWF RMSE < 0.3°F — Open-Meteo is returning the same "
-                            "underlying data for both model and archive on recent dates. "
-                            "ECMWF excluded from σ calculation; GFS bias/σ used only."
-                        ) if (_st(errs_ecmwf) or {}).get("rmse", 99) < 0.3 else None,
-                        "sample_archive": dict(list(results.get("archive", {}).items())[:3]),
-                        "sample_gfs":     dict(list(results.get("gfs", {}).items())[:3]),
-                        "calibration_would_succeed": len(errs_gfs) > 0 or len(errs_ecmwf) > 0,
-                    })
-                except Exception as e:
-                    self.send_json({"ok": False, "error": str(e)})
 
         elif path == "/temp/calibrate":
             # Backtest: pull 90 days of Open-Meteo historical D+1 forecasts vs NWS CLI actuals
@@ -4978,31 +4742,6 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:
                     self.send_json({"ok": False, "error": str(e)})
 
-        elif path == "/temp/model-accuracy":
-            # Query model_accuracy view — RMSE per model per city per spread bucket.
-            # Used to analytically determine which model to trust on high-spread days.
-            conn = get_db()
-            if not conn:
-                self.send_json({"ok": False, "error": "No DB"})
-            else:
-                try:
-                    qs   = parse_qs(urlparse(self.path).query)
-                    city = qs.get("city", [None])[0]
-                    with conn.cursor() as cur:
-                        if city:
-                            cur.execute("SELECT * FROM model_accuracy WHERE city=%s ORDER BY spread_bucket", (city,))
-                        else:
-                            cur.execute("SELECT * FROM model_accuracy ORDER BY city, spread_bucket")
-                        cols = [d[0] for d in cur.description]
-                        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
-                    conn.close()
-                    for r in rows:
-                        for k, v in r.items():
-                            if hasattr(v, '__float__'): r[k] = float(v)
-                    self.send_json({"ok": True, "rows": rows, "count": len(rows)})
-                except Exception as e:
-                    self.send_json({"ok": False, "error": str(e)})
-
         elif path == "/temp/history":
             # Return weather trade history by joining Kalshi settlements
             # with temp_snapshots to get model predictions + actual temps.
@@ -5041,30 +4780,6 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"ok": True, "snapshots": rows, "count": len(rows)})
                 except Exception as e:
                     self.send_json({"ok": False, "error": str(e)})
-
-        elif path == "/temp/cli":
-            # Fetch NWS CLI for a station and return settlement integer.
-            # Used by the dashboard trade log to auto-fill settlement.
-            # Query params: station=KMIA  (required)
-            # Returns: { ok, station, high, low, date, is_final }
-            qs      = parse_qs(urlparse(self.path).query)
-            station = qs.get("station", [None])[0]
-            if not station:
-                self.send_json({"ok": False, "error": "station param required"})
-            else:
-                cli = fetch_nws_temp_cli(station.upper())
-                if cli.get("ok"):
-                    self.send_json({
-                        "ok":       True,
-                        "station":  station.upper(),
-                        "high":     cli.get("high"),
-                        "low":      cli.get("low"),
-                        "date":     cli.get("date"),
-                        "is_final": cli.get("is_final", False),
-                        "issued":   cli.get("issued"),
-                    })
-                else:
-                    self.send_json({"ok": False, "error": cli.get("error", "CLI fetch failed")})
 
         elif path == "/temp/status":
             # Quick system health for the temp pipeline
@@ -5119,50 +4834,6 @@ class Handler(BaseHTTPRequestHandler):
                 "calibration_errors": _CALIBRATE_ERRORS or None,
                 "calibration_debug_url": "/temp/calibrate-test?city=chicago&days=7",
             })
-
-        elif path == "/temp/settle":
-            # Record actual NWS high/low temperature for a city+date.
-            # Compares against stored snapshots and marks settled_correct.
-            # Usage: GET /temp/settle?city=chicago&date=2026-04-08&high=54&low=32
-            qs     = parse_qs(urlparse(self.path).query)
-            city   = qs.get("city",   [None])[0]
-            date_s = qs.get("date",   [None])[0]
-            high_s = qs.get("high",   [None])[0]
-            low_s  = qs.get("low",    [None])[0]
-            if not city or not date_s or (not high_s and not low_s):
-                self.send_json({"ok": False, "error": "city, date, and high or low required"})
-            else:
-                conn = get_db()
-                if not conn:
-                    self.send_json({"ok": False, "error": "No DB"})
-                else:
-                    try:
-                        updated = 0
-                        with conn.cursor() as cur:
-                            for mtype, val_s in [("high", high_s), ("low", low_s)]:
-                                if not val_s: continue
-                                try:   actual = float(val_s)
-                                except: continue
-                                # Mark each bracket snapshot as correct/incorrect
-                                # A bracket [lo_temp, hi_temp] wins if actual falls in range.
-                                cur.execute("""
-                                    UPDATE temp_snapshots
-                                    SET settled_temp    = %s,
-                                        settled_correct = (
-                                            (lo_temp IS NULL OR %s >= lo_temp) AND
-                                            (hi_temp IS NULL OR %s <= hi_temp)
-                                        )
-                                    WHERE city = %s AND target_date = %s AND market_type = %s
-                                      AND settled_temp IS NULL
-                                """, (actual, actual, actual, city, date_s, mtype))
-                                updated += cur.rowcount
-                        conn.commit()
-                        self.send_json({"ok": True, "city": city, "date": date_s,
-                                        "high": high_s, "low": low_s, "rows_updated": updated})
-                    except Exception as e:
-                        self.send_json({"ok": False, "error": str(e)})
-                    finally:
-                        conn.close()
 
         elif path == "/temp/backtest":
             # Return the temp_backtest aggregated view
@@ -5417,12 +5088,57 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
 
 
+_SCAN_THREAD        = None
+_SCAN_INTERVAL_SECS = 4 * 3600   # scan every 4 hours
+
+
+def _background_scan_scheduler():
+    """
+    Background thread — runs scan_temp_city for all cities every 4 hours.
+    Writes ALL brackets (all grades) to temp_snapshots for calibration.
+    Completely independent of the auto-trader.
+    """
+    import time as _t
+    print("  📊 Background scan scheduler started")
+    _t.sleep(120)  # stagger 2 min after startup
+    while True:
+        try:
+            _run_background_scan()
+        except Exception as e:
+            print(f"  ⚠️  Background scan error: {e}")
+        _t.sleep(_SCAN_INTERVAL_SECS)
+
+
+def _run_background_scan():
+    import time as _t
+    start = _t.time()
+    total = 0
+    for horizon in ["d0", "d1"]:
+        for city_key in TEMP_CITIES:
+            try:
+                scan_temp_city(city_key, horizon)
+                total += 1
+            except Exception:
+                pass
+    print(f"  📊 Background scan: {total} cities in {round(_t.time()-start,1)}s")
+
+
+def start_background_scan_scheduler():
+    global _SCAN_THREAD
+    if _SCAN_THREAD and _SCAN_THREAD.is_alive():
+        return
+    _SCAN_THREAD = _threading.Thread(
+        target=_background_scan_scheduler, daemon=True, name="BgScanner")
+    _SCAN_THREAD.start()
+
+
 if __name__ == "__main__":
     ensure_tables()
-    start_settlement_scheduler()   # auto-settle yesterday's temp snapshots each morning
-    maybe_auto_calibrate()         # calibrate bias/σ on startup (non-blocking)
-    at_load_config_from_db()       # restore auto-trader config from DB
-    start_auto_trader_scheduler()  # always-on scheduler (runs only when enabled=True)
+    start_settlement_scheduler()       # auto-settle yesterday's temp snapshots each morning
+    maybe_auto_calibrate()             # calibrate bias/σ on startup (non-blocking)
+    at_load_config_from_db()           # restore auto-trader config from DB
+    start_auto_trader_scheduler()      # always-on scheduler (runs only when enabled=True)
+    start_background_scan_scheduler()  # log all brackets to temp_snapshots every 4hrs
     print(f"""
 ╔══════════════════════════════════════════╗
 ║   Seattle Rain Kalshi Tracker — Server   ║
