@@ -1280,11 +1280,16 @@ def at_place_order(ticker, side, count, yes_price_c):
             headers=kalshi_auth_headers("POST", "/trade-api/v2/orders"),
             json=payload, timeout=10
         )
-        resp = r.json()
+        # Safe JSON parse — API occasionally returns non-JSON on errors
+        try:
+            resp = r.json()
+        except Exception:
+            resp = {"raw": r.text[:200]}
+
         if r.ok:
             return True, resp, None
         else:
-            return False, None, str(resp)
+            return False, None, f"HTTP {r.status_code}: {resp}"
     except Exception as e:
         return False, None, str(e)
 
