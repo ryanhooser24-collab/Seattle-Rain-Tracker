@@ -861,9 +861,9 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
             grade = "skip"
         elif is_tail_bet and prob < 0.35:
             grade = "skip"
-        elif edge_ratio >= 0.12 and prob >= 0.50:
-            grade = "A"
-        elif edge_ratio >= 0.07 and prob >= 0.35:
+        elif edge_ratio >= 0.12 and prob >= 0.50 and net_gap_c >= 8:
+            grade = "A"   # require at least 8¢ net edge — prevents σ-unit inflation
+        elif edge_ratio >= 0.07 and prob >= 0.35 and net_gap_c >= 5:
             grade = "B"
         elif edge_ratio >= 0.04 and prob >= 0.25:
             grade = "C"
@@ -1527,9 +1527,9 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
 
             if net_gap_c <= 0:
                 live_grade = "skip"
-            elif edge_ratio >= 0.12 and prob >= 0.50:
+            elif edge_ratio >= 0.12 and prob >= 0.50 and net_gap_c >= 8:
                 live_grade = "A"
-            elif edge_ratio >= 0.07 and prob >= 0.35:
+            elif edge_ratio >= 0.07 and prob >= 0.35 and net_gap_c >= 5:
                 live_grade = "B"
             else:
                 live_grade = "C"
