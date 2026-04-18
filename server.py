@@ -767,7 +767,24 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
             analyzed.append(m)
             continue
 
-        prob      = bracket_prob(lo, hi, mu, sigma)
+        # Compute probability as weighted average of per-model probabilities.
+        # This correctly handles cases where models straddle the bracket boundary.
+        # Blending forecasts first then computing P() loses that information.
+        # e.g. GFS=54.5°F (below 56°F) and ECMWF=57.3°F (above 56°F) should give
+        # ~50% probability, not 65% from the blended average of 55.9°F.
+        mu_gfs_v   = forecast.get("gfs_high")   if market_type == "high" else forecast.get("gfs_low")
+        mu_ecmwf_v = forecast.get("ecmwf_high") if market_type == "high" else forecast.get("ecmwf_low")
+        sigma_base = forecast.get("sigma", 2.0)
+
+        if mu_gfs_v is not None and mu_ecmwf_v is not None:
+            # Use per-model sigma (base only, no spread inflation — spread IS the disagreement)
+            p_gfs   = bracket_prob(lo, hi, mu_gfs_v,   sigma_base)
+            p_ecmwf = bracket_prob(lo, hi, mu_ecmwf_v, sigma_base)
+            prob    = round((p_gfs + p_ecmwf) / 2, 4)
+        else:
+            # Fall back to blended mu with spread-inflated sigma
+            prob = bracket_prob(lo, hi, mu, sigma)
+
         gap_c     = round((prob - ask) * 100)
         net_gap_c = max(0, gap_c - spr)
         edge_ratio = round(gap_c / sigma, 3) if sigma > 0 else 0.0
@@ -879,20 +896,21 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
             if spread_exceeds_bracket:
                 grade = {"A": "B", "B": "C", "C": "skip"}.get(grade, grade)
             # Open-ended <X°F bracket: require best model center ≥ 1.5σ below ceiling.
-            # Without this, CDF-to-infinity inflates probability on any cold model day,
-            # creating false A-grades when models strongly disagree (one cold, one warm).
-            # Rule: mu must be < (hi - 1.5 × sigma) to confirm the signal is genuine.
-            if lo is None and hi is not None and sigma and sigma > 0:
-                required_clearance = hi - 1.5 * sigma
-                if mu >= required_clearance:
-                    grade = {"A": "B", "B": "C", "C": "skip"}.get(grade, grade)
-                    m["skip_reason"] = m.get("skip_reason","") + " open_lt_insufficient_clearance"
-            # Open-ended >X°F bracket: require best model center ≥ 1.5σ above floor.
-            if hi is None and lo is not None and sigma and sigma > 0:
-                required_clearance = lo + 1.5 * sigma
-                if mu <= required_clearance:
-                    grade = {"A": "B", "B": "C", "C": "skip"}.get(grade, grade)
-                    m["skip_reason"] = m.get("skip_reason","") + " open_gt_insufficient_clearance"
+            # Open-ended clearance check — only fires when models disagree (spread ≥ 2°F).
+            # When GFS and ECMWF both point in the same direction with tight spread,
+            # the CDF confidence is genuine. The check is for cases where one model
+            # runs cold and inflates open-ended probability artificially.
+            if raw_spread >= 2.0:
+                if lo is None and hi is not None and sigma and sigma > 0:
+                    required_clearance = hi - 1.5 * sigma
+                    if mu >= required_clearance:
+                        grade = {"A": "B", "B": "C", "C": "skip"}.get(grade, grade)
+                        m["skip_reason"] = m.get("skip_reason","") + " open_lt_insufficient_clearance"
+                if hi is None and lo is not None and sigma and sigma > 0:
+                    required_clearance = lo + 1.5 * sigma
+                    if mu <= required_clearance:
+                        grade = {"A": "B", "B": "C", "C": "skip"}.get(grade, grade)
+                        m["skip_reason"] = m.get("skip_reason","") + " open_gt_insufficient_clearance"
 
         m.update({
             "model_prob":        prob,
