@@ -4231,13 +4231,15 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/debug/settlements":
             try:
+                qs    = parse_qs(urlparse(self.path).query)
+                limit = int(qs.get("limit", [20])[0])
                 r = requests.get(f"{KALSHI_BASE}/portfolio/settlements",
                     headers=kalshi_auth_headers("GET", "/trade-api/v2/portfolio/settlements"),
-                    timeout=10, params={"limit": 3})
+                    timeout=10, params={"limit": limit})
                 r.raise_for_status()
                 raw = r.json()
                 settlements = raw.get("settlements", [])
-                self.send_json({"ok": True, "raw_settlements": settlements[:2],
+                self.send_json({"ok": True, "raw_settlements": settlements,
                     "keys": list(settlements[0].keys()) if settlements else [],
                     "count": len(settlements)})
             except Exception as e:
