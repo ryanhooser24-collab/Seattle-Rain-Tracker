@@ -1496,16 +1496,10 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
         # Fetch live market at current price
         market = at_fetch_market(ticker)
         if not market:
-            scan_ask    = signal.get("yes_ask")
-            scan_ask_sz = signal.get("yes_ask_size", 0)
-            if scan_ask and scan_ask > 0:
-                market = {"yes_ask": scan_ask, "yes_ask_size": scan_ask_sz}
-                at_log("SCAN", f"Orderbook empty for {ticker} — using scan-time ask {round(scan_ask*100)}¢",
-                       ticker=ticker)
-            else:
-                at_log("ERR", f"Could not fetch orderbook for {ticker} and no scan-time fallback",
-                       ticker=ticker)
-                break
+            # Empty orderbook = market not yet open for trading. Skip entirely.
+            at_log("SKIP", f"{ticker} orderbook empty — market not yet open for trading",
+                   ticker=ticker, city=city_key)
+            break
 
         ask      = market["yes_ask"]
         ask_size = market["yes_ask_size"]
