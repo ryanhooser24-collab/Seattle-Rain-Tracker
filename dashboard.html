@@ -1301,7 +1301,8 @@ async function loadHistory(){
       if(s&&s.settled_temp!=null) t.actual_f=parseFloat(s.settled_temp);
     });
 
-    const weather      = settled.filter(t=>/KXHIGH|KXLOWT|KXLOWS/.test(t.ticker||''));
+    const TEMP_START = '2026-04-16'; // ignore all pre-model rain-era bets
+    const weather      = settled.filter(t=>/KXHIGH|KXLOWT|KXLOWS/.test(t.ticker||'') && (t.date||'') >= TEMP_START);
     const weatherOpen  = open.filter(p=>/KXHIGH|KXLOWT|KXLOWS/.test(p.ticker||''));
     const wins      = weather.filter(t=>t.outcome==='win');
     const winRate   = weather.length?Math.round(wins.length/weather.length*100):null;
@@ -1353,19 +1354,25 @@ async function loadHistory(){
     if(weatherOpen.length){
       html+='<div style="font-size:10px;color:var(--muted);letter-spacing:0.8px;text-transform:uppercase;margin-bottom:8px;">Open positions</div>';
       weatherOpen.forEach(function(p){
-        const unr=p.unrealized_pnl||0;
+        // Use market_value - total_cost for unrealized — matches Kalshi's own display
+        const mktVal = p.market_value != null ? parseFloat(p.market_value) : null;
+        const cost   = parseFloat(p.total_cost||0);
+        const unr    = mktVal != null ? mktVal - cost : null;
+        const unrPct = unr != null && cost > 0 ? Math.round(unr/cost*100) : null;
         const s=snapMap[p.ticker];
         const nwsTemp=s&&s.settled_temp!=null?parseFloat(s.settled_temp):null;
         html+='<div class="hist-row">'
           +'<div style="flex:1;min-width:0;"><div style="font-size:12px;font-weight:500;color:var(--ink);">'+(p.market_title||p.ticker)+'</div>'
-          +'<div style="font-size:10px;color:var(--muted);margin-top:2px;">'+p.ticker+' \u00b7 '+p.yes_contracts+' contracts @ '+p.avg_yes_price_c+'\u00a2 \u00b7 $'+p.total_cost+'</div>'
+          +'<div style="font-size:10px;color:var(--muted);margin-top:2px;">'+p.ticker+' \u00b7 '+p.yes_contracts+' contracts @ '+p.avg_yes_price_c+'\u00a2 \u00b7 cost $'+cost.toFixed(2)+'</div>'
           +(nwsTemp!=null
             ?'<div style="font-size:10px;margin-top:3px;font-weight:500;color:#378ADD;">NWS settled: '+nwsTemp+'\u00b0F \u00b7 awaiting Kalshi payout</div>'
             :'<div style="font-size:10px;color:var(--muted);margin-top:3px;">Awaiting NWS settlement</div>')
           +'</div>'
           +'<div style="text-align:right;flex-shrink:0;">'
-          +'<div style="font-size:11px;font-weight:500;color:var(--muted);">Open</div>'
-          +'<div style="font-size:10px;color:'+(unr>=0?'var(--gain)':'var(--loss)')+';">'+(unr>=0?'+':'')+'$'+unr.toFixed(2)+' unrealized</div>'
+          +(unr!=null
+            ?'<div style="font-size:13px;font-weight:500;color:'+(unr>=0?'var(--gain)':'var(--loss)')+';">'+(unr>=0?'+':'')+'$'+Math.abs(unr).toFixed(2)+'</div>'
+             +'<div style="font-size:10px;color:'+(unr>=0?'var(--gain)':'var(--loss)')+';">'+(unrPct!=null?(unr>=0?'+':'')+unrPct+'%':'')+' unrealized</div>'
+            :'<div style="font-size:11px;color:var(--muted);">Open</div>')
           +'</div></div>';
       });
     }
@@ -1779,11 +1786,14 @@ function renderPortfolio(port,pnl){
   const wrap=document.getElementById('portfolio-wrap');
   if(!wrap)return;
 
+  const TEMP_START = '2026-04-16';
   const cash=port.balance||0;
   const portVal=port.portfolio_value||0;
   const total=cash+portVal;
-  const totalPnl=pnl.total_pnl||0;
-  const trades=pnl.trades||[];
+  const allTrades=pnl.trades||[];
+  // Filter to temp markets from cutoff only — exclude old rain bets
+  const trades=allTrades.filter(t=>/KXHIGH|KXLOWT|KXLOWS/.test(t.ticker||'') && (t.date||'')>=TEMP_START);
+  const totalPnl=trades.reduce((s,t)=>s+(t.pnl||0),0);
   const positions=port.positions||[];
 
   // Balance strip
