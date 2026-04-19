@@ -674,15 +674,18 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
     sigma = forecast.get("sigma", 2.0)
     spread_hi = forecast.get("spread_high" if market_type == "high" else "spread_low", 0)
 
-    # Inflate σ by model spread in quadrature.
+    # Global sigma inflation factor — compensates for hindcast RMSE being too tight.
+    # Calibrated σ comes from Open-Meteo analysis runs, not true D+1 forecast skill.
+    # Real forecast uncertainty is consistently wider than hindcast suggests.
+    # Default 1.3× — adjust down as calibration data accumulates and confirms accuracy.
+    SIGMA_INFLATION = 1.3
+    sigma = round(sigma * SIGMA_INFLATION, 2)
+
+    # Inflate σ further by model spread in quadrature.
     # When GFS and ECMWF disagree, today's forecast is genuinely harder than
     # the historical RMSE baseline. A 2°F spread adds real uncertainty on top
     # of σ — the probability distribution should be wider.
     # Formula: σ_eff = sqrt(σ² + (spread/2)²)
-    # spread/2 because the spread is the full range between models; the
-    # uncertainty contribution is half that (one standard deviation of model disagreement).
-    # This makes "Models agree" redundant as a filter — agreement is already
-    # rewarded with higher probability and larger Kelly sizing automatically.
     from math import sqrt as _sqrt
     if spread_hi and spread_hi > 0:
         sigma = round(_sqrt(sigma**2 + (spread_hi / 2)**2), 2)
