@@ -643,13 +643,6 @@ body{max-width:900px;margin:0 auto;}
         </select>
       </div>
       <div class="at-row">
-        <div class="at-row-lbl">Horizons</div>
-        <div style="display:flex;gap:6px;">
-          <button id="at-d0-btn" onclick="atToggleHorizon('d0',this)" style="font-size:10px;padding:3px 10px;border-radius:4px;border:0.5px solid var(--yes-border);background:var(--yes-lt);color:#27500A;cursor:pointer;font-family:inherit;">D+0</button>
-          <button id="at-d1-btn" onclick="atToggleHorizon('d1',this)" style="font-size:10px;padding:3px 10px;border-radius:4px;border:0.5px solid var(--yes-border);background:var(--yes-lt);color:#27500A;cursor:pointer;font-family:inherit;">D+1</button>
-        </div>
-      </div>
-      <div class="at-row">
         <div class="at-row-lbl">Next scan</div>
         <div id="at-next-scan" style="font-size:12px;font-weight:500;color:var(--ink);">—</div>
       </div>
@@ -1097,8 +1090,6 @@ function sw(t){
 }
 
 // ── AUTO-TRADER TAB ───────────────────────────────────────────────────────
-const AT_HORIZONS = {d0: true, d1: true};
-
 function atToggleAdvanced(btn){
   const el=document.getElementById('at-advanced');
   const open=el.style.display==='none';
@@ -1109,7 +1100,7 @@ function atToggleAdvanced(btn){
 function atLockInputs(on){
   document.querySelectorAll('#at-advanced input, .at-card input[type=range]')
     .forEach(function(el){ el.disabled=on; el.style.opacity=on?'0.4':'1'; });
-  document.querySelectorAll('#at-min-grade,#at-d0-btn,#at-d1-btn')
+  document.querySelectorAll('#at-min-grade')
     .forEach(function(el){ el.disabled=on; el.style.opacity=on?'0.4':'1'; });
 }
 
@@ -1141,27 +1132,18 @@ async function atToggleMaster(btn){
   }
 }
 
-function atToggleHorizon(hz, btn){
-  AT_HORIZONS[hz] = !AT_HORIZONS[hz];
-  const on = AT_HORIZONS[hz];
-  btn.style.background  = on ? 'var(--yes-lt)' : 'var(--bg)';
-  btn.style.borderColor = on ? 'var(--yes-border)' : 'var(--border)';
-  btn.style.color       = on ? '#27500A' : 'var(--muted)';
-  atSaveSetting('horizons', JSON.stringify(Object.keys(AT_HORIZONS).filter(k=>AT_HORIZONS[k])));
-}
-
 function atCollectConfig(){
   return {
     enabled:        localStorage.getItem('at_master_on') === '1',
     min_grade:      document.getElementById('at-min-grade')?.value || 'A',
-    horizons:       Object.keys(AT_HORIZONS).filter(k=>AT_HORIZONS[k]),
+    horizons:       ['d0', 'd1'],
     kelly_mult:     parseFloat(localStorage.getItem('at_kelly_mult') || '0.5'),
     bankroll_unit:  parseFloat(localStorage.getItem('at_bankroll_unit') || '100'),
     max_per_fill:   parseFloat(localStorage.getItem('at_max_per_fill') || '25'),
     max_per_ticker: parseFloat(localStorage.getItem('at_max_per_ticker') || '75'),
-    max_positions:  parseInt(localStorage.getItem('at_max_positions') || '5'),
+    max_positions:  parseInt(localStorage.getItem('at_max_positions') || '10'),
     max_per_city:   parseInt(localStorage.getItem('at_max_per_city') || '2'),
-    min_volume:     parseInt(localStorage.getItem('at_min_volume') || '500'),
+    min_volume:     parseInt(localStorage.getItem('at_min_volume') || '200'),
   };
 }
 
@@ -1687,7 +1669,15 @@ function renderTempCard(b){
   return '<div class="temp-opp grade-'+b.grade+'" onclick="this.classList.toggle(\'open\')">'
     +'<div class="temp-opp-inner">'
     +'<div class="temp-opp-left">'
-    +'<div class="temp-opp-city">'+b.city_label+' \u00b7 '+((fc.target_date||'').replace('2026-',''))+' \u00b7 '+(fc.nws_station||'')+'</div>'
+    +(function(){
+      const htc = b.hours_to_cutoff;
+      const htcStr = htc==null ? '' :
+        htc <= 0   ? ' \u00b7 <span style="color:#A32D2D;font-weight:500">past cutoff</span>' :
+        htc <= 4   ? ' \u00b7 <span style="color:#A32D2D;font-weight:500">'+Math.round(htc)+'h to cutoff</span>' :
+        htc <= 12  ? ' \u00b7 <span style="color:#BA7517;font-weight:500">'+Math.round(htc)+'h to cutoff</span>' :
+                     ' \u00b7 <span style="color:var(--muted)">'+Math.round(htc)+'h</span>';
+      return '<div class="temp-opp-city">'+b.city_label+' \u00b7 '+((fc.target_date||'').replace('2026-',''))+' \u00b7 '+(fc.nws_station||'')+htcStr+'</div>';
+    })()
     +'<div class="temp-opp-decision">Buy '+(b.bracket_label||'')+' YES <span class="gbadge g'+b.grade+'">'+b.grade+'</span></div>'
     +'<div class="temp-opp-ctx">mkt '+askC+'\u00a2 \u00b7 model '+probC+'% \u00b7 \u03c3 '+sigma+'\u00b0F</div>'
     +'</div>'

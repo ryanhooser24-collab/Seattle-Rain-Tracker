@@ -474,6 +474,7 @@ def fetch_temp_forecast(city_key, horizon="d1"):
             "sigma":        σ,
             "errors":       errors,
             "fetched_at":   _t.time(),
+            "tz":           cfg.get("tz", "America/Chicago"),
         }
 
     except Exception as e:
@@ -720,7 +721,6 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
         if close_time:
             try:
                 from datetime import datetime as _dt, timezone as _tz
-                # close_time is ISO8601 — parse and compare to now UTC
                 ct = _dt.fromisoformat(close_time.replace("Z", "+00:00"))
                 if ct < _dt.now(_tz.utc):
                     m["model_prob"] = None; m["gap_c"] = 0; m["net_gap_c"] = 0
@@ -729,7 +729,28 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
                     analyzed.append(m)
                     continue
             except Exception:
-                pass  # if we can't parse close_time, proceed normally
+                pass
+
+        # Compute hours until 6 AM local cutoff for this city.
+        # After 6 AM local, intraday observations start and market gains info edge.
+        hours_to_cutoff = None
+        try:
+            import pytz as _pytz
+            from datetime import datetime as _dt2, timezone as _tz2
+            tz_name   = forecast.get("tz", "America/Chicago")
+            local_tz  = _pytz.timezone(tz_name)
+            now_local = _dt2.now(_tz2.utc).astimezone(local_tz)
+            target    = forecast.get("target_date", "")
+            if target:
+                from datetime import date as _date2, timedelta as _td
+                tgt = _date2.fromisoformat(target)
+                # 6 AM local on target date
+                cutoff_local = local_tz.localize(
+                    _dt2(tgt.year, tgt.month, tgt.day, 6, 0, 0))
+                hours_to_cutoff = round((cutoff_local - now_local).total_seconds() / 3600, 1)
+        except Exception:
+            pass
+        m["hours_to_cutoff"] = hours_to_cutoff
 
         # ── Also skip if the target_date in the forecast is today or past ────
         # This catches D+1 markets where the date has rolled over to today/yesterday.
@@ -1032,8 +1053,9 @@ def scan_temp_city(city_key, horizon="d1"):
                                      gfs_forecast, ecmwf_forecast, best_forecast,
                                      sigma, spread_models, model_prob, yes_ask,
                                      gap_c, net_gap_c, edge_ratio, kelly_frac,
-                                     grade, liq_grade, open_interest, volume_24h)
-                                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                     grade, liq_grade, open_interest, volume_24h,
+                                     hours_to_cutoff)
+                                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                                     ON CONFLICT DO NOTHING
                                 """, (
                                     city_key, cfg["nws_station"], fc["target_date"], horizon, mtype,
@@ -1046,6 +1068,7 @@ def scan_temp_city(city_key, horizon="d1"):
                                     m.get("edge_ratio"), m.get("kelly_frac"),
                                     m.get("grade"),      m.get("liq_grade"),
                                     int(m.get("open_interest",0)), int(m.get("volume_24h",0)),
+                                    m.get("hours_to_cutoff"),
                                 ))
                             except Exception:
                                 pass
@@ -3073,8 +3096,14 @@ def ensure_tables():
                     open_interest   INTEGER,
                     volume_24h      INTEGER,
                     settled_temp    NUMERIC(5,1),
-                    settled_correct BOOLEAN
+                    settled_correct BOOLEAN,
+                    hours_to_cutoff NUMERIC(5,1)  -- hours until 6 AM local at time of scan
                 );
+            """)
+            # Migrate existing temp_snapshots if column missing
+            cur.execute("""
+                ALTER TABLE temp_snapshots
+                    ADD COLUMN IF NOT EXISTS hours_to_cutoff NUMERIC(5,1);
             """)
             # Multi-model forecast accuracy table.
             # One row per city per date. Stores all model forecasts + actual.
@@ -5084,7 +5113,8 @@ class Handler(BaseHTTPRequestHandler):
                         yes_ask NUMERIC(5,3), gap_c INTEGER, net_gap_c INTEGER,
                         edge_ratio NUMERIC(6,3), kelly_frac NUMERIC(5,3),
                         grade TEXT, liq_grade TEXT, open_interest INTEGER, volume_24h INTEGER,
-                        settled_temp NUMERIC(5,1), settled_correct BOOLEAN)"""),
+                        settled_temp NUMERIC(5,1), settled_correct BOOLEAN,
+                        hours_to_cutoff NUMERIC(5,1))"""),
                     ("model_forecasts", "CREATE TABLE IF NOT EXISTS model_forecasts (id SERIAL PRIMARY KEY, city TEXT NOT NULL, nws_station TEXT NOT NULL DEFAULT '', target_date DATE NOT NULL, actual_high NUMERIC(5,1), gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), nbm_high NUMERIC(5,1), graphcast_high NUMERIC(5,1), gem_high NUMERIC(5,1), icon_high NUMERIC(5,1), spread_gfs_ecmwf NUMERIC(5,2), UNIQUE(city, target_date))"),
                     ("auto_trader_config", "CREATE TABLE IF NOT EXISTS auto_trader_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())"),
                     ("auto_trader_log", "CREATE TABLE IF NOT EXISTS auto_trader_log (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT NOW(), level TEXT NOT NULL, msg TEXT NOT NULL, ticker TEXT, city TEXT, extra JSONB DEFAULT '{}')"),
