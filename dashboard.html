@@ -646,6 +646,14 @@ body{max-width:900px;margin:0 auto;}
         <div class="at-row-lbl">Next scan</div>
         <div id="at-next-scan" style="font-size:12px;font-weight:500;color:var(--ink);">—</div>
       </div>
+      <div class="at-row">
+        <div class="at-row-lbl">Last cycle</div>
+        <div id="at-last-cycle" style="font-size:12px;color:var(--muted);">—</div>
+      </div>
+      <div class="at-row">
+        <div class="at-row-lbl">Signals found</div>
+        <div id="at-signals-found" style="font-size:12px;color:var(--muted);">—</div>
+      </div>
     </div>
 
     <div class="at-card">
@@ -1240,6 +1248,39 @@ async function loadAutoTrader(){
     const levelColor = {PLACE:'var(--yes)',OK:'var(--yes)',SCAN:'var(--muted)',
                         SKIP:'#854F0B',ERR:'var(--loss)',SETTLE:'#378ADD'};
     if(logRes.ok && logRes.log && logRes.log.length){
+
+      // Parse last cycle summary for status indicators
+      const lastComplete = logRes.log.find(l=>l.level==='SCAN' && l.msg && l.msg.includes('Cycle complete'));
+      const lastStart    = logRes.log.find(l=>l.level==='SCAN' && l.msg && l.msg.includes('Cycle start'));
+      const lastCycleEl  = document.getElementById('at-last-cycle');
+      const signalsEl    = document.getElementById('at-signals-found');
+
+      if(lastComplete && lastCycleEl){
+        const ts = new Date(lastComplete.ts);
+        const ago = Math.round((Date.now() - ts)/60000);
+        lastCycleEl.textContent = ago < 60 ? ago+'m ago' : Math.round(ago/60)+'h ago';
+        lastCycleEl.style.color = ago < 10 ? 'var(--yes)' : 'var(--muted)';
+      }
+
+      if(signalsEl && lastStart){
+        // Count signals evaluated, placed, and skipped in last cycle
+        const startIdx = logRes.log.indexOf(lastStart);
+        const cycleEntries = logRes.log.slice(0, startIdx + 1);
+        const placed  = cycleEntries.filter(l=>l.level==='PLACE').length;
+        const evals   = cycleEntries.filter(l=>l.level==='SCAN' && l.msg && l.msg.includes('Evaluating')).length;
+        const skipped = cycleEntries.filter(l=>l.level==='SKIP').length;
+        if(placed > 0){
+          signalsEl.textContent = evals+' evaluated · '+placed+' placed';
+          signalsEl.style.color = 'var(--yes)';
+        } else if(evals > 0){
+          signalsEl.textContent = evals+' evaluated · 0 placed (book/budget)';
+          signalsEl.style.color = '#854F0B';
+        } else {
+          signalsEl.textContent = 'No A-grade signals found';
+          signalsEl.style.color = 'var(--muted)';
+        }
+      }
+
       logEl.innerHTML = logRes.log.map(function(l){
         const col = levelColor[l.level]||'var(--muted)';
         const ts  = l.ts ? l.ts.substring(11,19) : '—';
