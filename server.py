@@ -677,15 +677,58 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
 
     # Global sigma inflation factor — compensates for hindcast RMSE being too tight.
     # Calibrated σ comes from Open-Meteo analysis runs, not true D+1 forecast skill.
-    # Real forecast uncertainty is consistently wider than hindcast suggests.
-    # Default 1.3× — adjust down as calibration data accumulates and confirms accuracy.
+    # Default 1.3× — adjust down as calibration data accumulates.
     SIGMA_INFLATION = 1.3
     sigma = round(sigma * SIGMA_INFLATION, 2)
 
+    # Spring seasonal multiplier for volatile transition-season cities.
+    # Midwest/NE cities in March-May have much higher actual forecast error than
+    # hindcast RMSE suggests — frontal boundaries shift unpredictably.
+    # Phoenix/LV/Miami are stable year-round, no multiplier needed.
+    from datetime import date as _date_cls
+    _month = _date_cls.today().month
+    _SPRING_VOLATILE = {
+        'minneapolis', 'chicago', 'oklahoma_city', 'denver',
+        'boston', 'nyc', 'philadelphia', 'washington_dc', 'atlanta'
+    }
+    if city_key in _SPRING_VOLATILE and _month in (3, 4, 5):
+        sigma = round(sigma * 1.5, 2)
+
+    # Regional minimum sigma floors — prevent catastrophic overconfidence.
+    # Floors are set by climate zone and season volatility, not model output.
+    # These represent the minimum believable forecast uncertainty for each region.
+    _SIGMA_FLOORS = {
+        # Midwest: high spring volatility, frontal boundaries volatile
+        'minneapolis':   1.5,
+        'chicago':       1.2,
+        'oklahoma_city': 1.2,
+        # East Coast: moderate spring volatility
+        'nyc':           1.0,
+        'philadelphia':  1.0,
+        'washington_dc': 1.0,
+        'boston':        1.0,
+        'atlanta':       1.0,
+        # Mountain: convective volatility in spring
+        'denver':        0.8,
+        # Stable desert/tropical — low floors justified
+        'phoenix':       0.4,
+        'las_vegas':     0.6,
+        'miami':         0.6,
+        # Variable coasts — marine layer makes forecasting hard
+        'san_francisco': 1.5,
+        'los_angeles':   1.2,
+        'seattle':       1.5,
+        # Gulf Coast
+        'houston':       0.8,
+        'austin':        0.8,
+    }
+    _floor = _SIGMA_FLOORS.get(city_key, 0.8)
+    if sigma < _floor:
+        sigma = _floor
+
     # Inflate σ further by model spread in quadrature.
     # When GFS and ECMWF disagree, today's forecast is genuinely harder than
-    # the historical RMSE baseline. A 2°F spread adds real uncertainty on top
-    # of σ — the probability distribution should be wider.
+    # the historical RMSE baseline.
     # Formula: σ_eff = sqrt(σ² + (spread/2)²)
     from math import sqrt as _sqrt
     if spread_hi and spread_hi > 0:
@@ -3225,6 +3268,40 @@ def ensure_tables():
                 CREATE INDEX IF NOT EXISTS auto_trader_log_ts_idx
                     ON auto_trader_log (ts DESC);
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS paper_trades (
+                    id             BIGSERIAL PRIMARY KEY,
+                    scan_ts        TIMESTAMPTZ DEFAULT NOW(),
+                    city           TEXT NOT NULL,
+                    nws_station    TEXT,
+                    target_date    DATE NOT NULL,
+                    horizon        TEXT,
+                    ticker         TEXT NOT NULL,
+                    bracket_label  TEXT,
+                    lo_temp        NUMERIC(5,1),
+                    hi_temp        NUMERIC(5,1),
+                    grade          TEXT,
+                    model_prob     NUMERIC(6,4),
+                    yes_ask        NUMERIC(6,4),
+                    mu             NUMERIC(6,2),
+                    sigma          NUMERIC(6,3),
+                    net_gap_c      INTEGER,
+                    kelly_size     NUMERIC(8,2),
+                    hours_to_cutoff NUMERIC(5,1),
+                    -- Settlement fields (filled in later)
+                    settled_temp   NUMERIC(5,1),
+                    settled_correct BOOLEAN,
+                    settled_ts     TIMESTAMPTZ
+                );
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS paper_trades_target_date_idx
+                    ON paper_trades (target_date DESC);
+            """)
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS paper_trades_ticker_scan_idx
+                    ON paper_trades (ticker, DATE(scan_ts));
+            """)
         conn.commit()
         print("  ✅ DB tables ready")
     except Exception as e:
@@ -4728,6 +4805,70 @@ class Handler(BaseHTTPRequestHandler):
                 "last_settle_run": _LAST_SETTLE_RUN,
             })
 
+        elif path == "/paper-trades":
+            # Paper trading results — all A-grade signals logged by background scanner
+            conn = get_db()
+            if not conn:
+                self.send_json({"ok": False, "error": "No DB"})
+            else:
+                try:
+                    qs     = parse_qs(urlparse(self.path).query)
+                    limit  = int(qs.get("limit", [200])[0])
+                    city   = qs.get("city", [None])[0]
+                    with conn.cursor() as cur:
+                        where = "WHERE city = %s" if city else ""
+                        args  = [city] if city else []
+                        cur.execute(f"""
+                            SELECT
+                                city, target_date, ticker, bracket_label,
+                                grade, model_prob, yes_ask, mu, sigma,
+                                net_gap_c, kelly_size, hours_to_cutoff,
+                                settled_temp, settled_correct, scan_ts
+                            FROM paper_trades
+                            {where}
+                            ORDER BY scan_ts DESC
+                            LIMIT %s
+                        """, args + [limit])
+                        cols = [d[0] for d in cur.description]
+                        rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+                        # Summary stats
+                        settled = [r for r in rows if r["settled_correct"] is not None]
+                        wins    = [r for r in settled if r["settled_correct"]]
+                        cur.execute(f"""
+                            SELECT
+                                city,
+                                COUNT(*) AS n,
+                                COUNT(settled_correct) AS settled,
+                                SUM(CASE WHEN settled_correct THEN 1 ELSE 0 END) AS wins,
+                                ROUND(AVG(CASE WHEN settled_correct IS NOT NULL
+                                    THEN (CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)
+                                END)::numeric * 100, 1) AS win_pct,
+                                ROUND(AVG(model_prob::numeric) * 100, 1) AS avg_prob,
+                                ROUND(AVG(yes_ask::numeric) * 100, 1) AS avg_ask_c
+                            FROM paper_trades
+                            {where}
+                            GROUP BY city
+                            ORDER BY settled DESC
+                        """, args)
+                        city_cols = [d[0] for d in cur.description]
+                        city_rows = [dict(zip(city_cols, r)) for r in cur.fetchall()]
+                    conn.close()
+                    # Serialize dates
+                    for r in rows:
+                        for k, v in r.items():
+                            if hasattr(v, 'isoformat'): r[k] = v.isoformat()
+                    self.send_json({
+                        "ok": True,
+                        "trades": rows,
+                        "total": len(rows),
+                        "settled": len(settled),
+                        "wins": len(wins),
+                        "win_rate": round(len(wins)/len(settled)*100, 1) if settled else None,
+                        "by_city": city_rows,
+                    })
+                except Exception as e:
+                    self.send_json({"ok": False, "error": str(e)})
+
         elif path == "/temp/calibration":
             # Probability calibration curve from temp_snapshots.
             conn = get_db()
@@ -5118,6 +5259,7 @@ class Handler(BaseHTTPRequestHandler):
                     ("model_forecasts", "CREATE TABLE IF NOT EXISTS model_forecasts (id SERIAL PRIMARY KEY, city TEXT NOT NULL, nws_station TEXT NOT NULL DEFAULT '', target_date DATE NOT NULL, actual_high NUMERIC(5,1), gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), nbm_high NUMERIC(5,1), graphcast_high NUMERIC(5,1), gem_high NUMERIC(5,1), icon_high NUMERIC(5,1), spread_gfs_ecmwf NUMERIC(5,2), UNIQUE(city, target_date))"),
                     ("auto_trader_config", "CREATE TABLE IF NOT EXISTS auto_trader_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())"),
                     ("auto_trader_log", "CREATE TABLE IF NOT EXISTS auto_trader_log (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT NOW(), level TEXT NOT NULL, msg TEXT NOT NULL, ticker TEXT, city TEXT, extra JSONB DEFAULT '{}')"),
+                    ("paper_trades", "CREATE TABLE IF NOT EXISTS paper_trades (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
                 ]
                 for name, sql in tables:
                     try:
@@ -5161,6 +5303,89 @@ def _background_scan_scheduler():
         _t.sleep(_SCAN_INTERVAL_SECS)
 
 
+def _paper_trade_log(city_key, fc, markets):
+    """
+    Log every A-grade signal from a scan as a paper trade.
+    Called by the background scanner on every cycle.
+    ON CONFLICT DO NOTHING — one paper trade per ticker per day.
+    """
+    try:
+        conn = get_db()
+        if not conn: return
+        with conn.cursor() as cur:
+            for m in markets:
+                if m.get("grade") != "A": continue
+                if not m.get("ticker"): continue
+                cur.execute("""
+                    INSERT INTO paper_trades
+                    (city, nws_station, target_date, horizon, ticker,
+                     bracket_label, lo_temp, hi_temp, grade,
+                     model_prob, yes_ask, mu, sigma, net_gap_c,
+                     kelly_size, hours_to_cutoff)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (ticker, DATE(scan_ts)) DO NOTHING
+                """, (
+                    city_key,
+                    fc.get("nws_station"),
+                    fc.get("target_date"),
+                    fc.get("horizon"),
+                    m["ticker"],
+                    m.get("bracket_label"),
+                    m.get("lo_temp"),
+                    m.get("hi_temp"),
+                    m.get("grade"),
+                    m.get("model_prob"),
+                    m.get("yes_ask"),
+                    m.get("mu"),
+                    m.get("sigma"),
+                    m.get("net_gap_c"),
+                    m.get("kelly_size"),
+                    m.get("hours_to_cutoff"),
+                ))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _paper_trade_settle():
+    """
+    Settle open paper trades by matching against temp_snapshots settled_temp.
+    Called by the settlement scheduler alongside real trades.
+    """
+    try:
+        conn = get_db()
+        if not conn: return
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE paper_trades pt
+                SET
+                    settled_temp    = ts.settled_temp,
+                    settled_correct = CASE
+                        WHEN pt.lo_temp IS NULL AND pt.hi_temp IS NOT NULL
+                            THEN ts.settled_temp <= pt.hi_temp
+                        WHEN pt.hi_temp IS NULL AND pt.lo_temp IS NOT NULL
+                            THEN ts.settled_temp >= pt.lo_temp
+                        ELSE ts.settled_temp >= pt.lo_temp
+                         AND ts.settled_temp <= pt.hi_temp
+                    END,
+                    settled_ts = NOW()
+                FROM (
+                    SELECT DISTINCT ON (city, target_date)
+                        city, target_date, settled_temp
+                    FROM temp_snapshots
+                    WHERE settled_temp IS NOT NULL
+                ) ts
+                WHERE pt.city        = ts.city
+                  AND pt.target_date = ts.target_date
+                  AND pt.settled_temp IS NULL
+            """)
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
 def _run_background_scan():
     import time as _t
     start = _t.time()
@@ -5168,10 +5393,15 @@ def _run_background_scan():
     for horizon in ["d0", "d1"]:
         for city_key in TEMP_CITIES:
             try:
-                scan_temp_city(city_key, horizon)
+                result = scan_temp_city(city_key, horizon)
+                if result.get("ok"):
+                    fc = result.get("forecast", {})
+                    all_mkts = result.get("high_markets", []) + result.get("low_markets", [])
+                    _paper_trade_log(city_key, fc, all_mkts)
                 total += 1
             except Exception:
                 pass
+    _paper_trade_settle()
     print(f"  📊 Background scan: {total} cities in {round(_t.time()-start,1)}s")
 
 
