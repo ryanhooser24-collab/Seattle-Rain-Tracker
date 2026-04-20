@@ -681,6 +681,9 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
     SIGMA_INFLATION = 1.3
     sigma = round(sigma * SIGMA_INFLATION, 2)
 
+    # Get city_key from forecast for regional adjustments
+    city_key = forecast.get("city", "")
+
     # Spring seasonal multiplier for volatile transition-season cities.
     # Midwest/NE cities in March-May have much higher actual forecast error than
     # hindcast RMSE suggests — frontal boundaries shift unpredictably.
@@ -4293,6 +4296,16 @@ class Handler(BaseHTTPRequestHandler):
                                kwargs={"force": True}, daemon=True)
                 t.start()
                 self.send_json({"ok": True, "msg": "Cycle started in background"})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/scan/run":
+            # Manually trigger one background scan cycle (paper trades + snapshots)
+            try:
+                import threading as _t2
+                t = _t2.Thread(target=_run_background_scan, daemon=True)
+                t.start()
+                self.send_json({"ok": True, "msg": "Background scan started — check /paper-trades in ~60s"})
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
