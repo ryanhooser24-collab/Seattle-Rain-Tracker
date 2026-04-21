@@ -3417,7 +3417,13 @@ class Handler(BaseHTTPRequestHandler):
         print(f"  [{datetime.now().strftime('%H:%M:%S')}] {format % args}")
 
     def send_json(self, data, status=200):
-        body = json.dumps(data).encode()
+        import decimal as _decimal
+        class _Enc(json.JSONEncoder):
+            def default(self, o):
+                if isinstance(o, _decimal.Decimal): return float(o)
+                if hasattr(o, 'isoformat'): return o.isoformat()
+                return super().default(o)
+        body = json.dumps(data, cls=_Enc).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
