@@ -5322,7 +5322,7 @@ def _paper_trade_log(city_key, fc, markets):
     """
     Log every A-grade signal from a scan as a paper trade.
     Called by the background scanner on every cycle.
-    ON CONFLICT DO NOTHING — one paper trade per ticker per day.
+    Skips signals past the 6AM local cutoff — stale forecasts skew calibration.
     """
     try:
         conn = get_db()
@@ -5331,6 +5331,9 @@ def _paper_trade_log(city_key, fc, markets):
             for m in markets:
                 if m.get("grade") != "A": continue
                 if not m.get("ticker"): continue
+                # Skip if past 6AM local cutoff — market has info edge, data is unreliable
+                htc = m.get("hours_to_cutoff")
+                if htc is not None and htc < 0: continue
                 cur.execute("""
                     INSERT INTO paper_trades
                     (city, nws_station, target_date, horizon, ticker,
