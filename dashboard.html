@@ -2238,24 +2238,23 @@ function renderChart(d){
   const wuDays=wu.days||[];
   const monthPrefix=new Date().toISOString().slice(0,7);
   // Chart shows forward forecast only — today's EOD is already in the rainfall card above
-  // Skip today (index 0 from OM which is the current day forecast, already captured in today_eod)
-  const forecastDays=wuDays.filter(x=>x.date&&x.date>new Date().toISOString().slice(0,10));
-  const usable=wuDays.filter(d=>d.date&&d.date.startsWith(monthPrefix));
+  // Only show in-month days — beyond month-end data skews the visual and the remaining forecast total
+  const allForecastDays=wuDays.filter(x=>x.date&&x.date>new Date().toISOString().slice(0,10));
+  const forecastDays=allForecastDays.filter(x=>x.date&&x.date.startsWith(monthPrefix));
+  const usable=forecastDays;
   const wuSum=Math.round(usable.reduce((s,x)=>s+(x.qpf||0),0)*100)/100;
   const maxQ=Math.max(...forecastDays.map(x=>x.qpf||0),0.01);
 
   const bars=forecastDays.map(day=>{
-    const inMonth=day.date&&day.date.startsWith(monthPrefix);
-    const cls=!inMonth?'bd':(day.qpf||0)===0?'bz':'bf';
-    const dimmed=!inMonth;
+    const cls=(day.qpf||0)===0?'bz':'bf';
     const label=day.date?(day.date.slice(5,7)+'-'+day.date.slice(8,10)):'';
     const q=day.qpf||0;
     return `<div class="bc">
-      <div class="bv" style="${dimmed?'color:var(--border)':''}">${q>0?q.toFixed(2):'—'}</div>
+      <div class="bv">${q>0?q.toFixed(2):'—'}</div>
       <div style="width:100%;flex:1;display:flex;align-items:flex-end;">
         <div class="br ${cls}" style="height:${Math.max(q/maxQ*100,3)}%"></div>
       </div>
-      <div class="bl" style="${dimmed?'color:var(--border)':''}">${label}</div>
+      <div class="bl">${label}</div>
     </div>`;
   }).join('');
 
@@ -2268,7 +2267,6 @@ function renderChart(d){
       <div class="bars">${bars}</div>
       <div class="chart-leg">
         <span><span class="ls" style="background:var(--rain);opacity:.65"></span>In-month forecast</span>
-        <span><span class="ls" style="background:var(--border)"></span>Beyond month-end</span>
       </div>
       <div class="chart-foot">
         <span>Today EOD: <b>${(today_eod||0).toFixed(2)}"</b></span>

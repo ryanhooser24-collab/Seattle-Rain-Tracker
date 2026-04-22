@@ -3301,6 +3301,10 @@ def ensure_tables():
                 CREATE INDEX IF NOT EXISTS paper_trades_target_date_idx
                     ON paper_trades (target_date DESC);
             """)
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS paper_trades_ticker_date_idx
+                    ON paper_trades (ticker, target_date);
+            """)
         conn.commit()
         print("  ✅ DB tables ready")
     except Exception as e:
@@ -5341,7 +5345,7 @@ def _paper_trade_log(city_key, fc, markets):
                      model_prob, yes_ask, mu, sigma, net_gap_c,
                      kelly_size, hours_to_cutoff)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (ticker, target_date) DO NOTHING
                 """, (
                     city_key,
                     fc.get("nws_station"),
