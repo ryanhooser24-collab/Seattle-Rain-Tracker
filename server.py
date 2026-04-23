@@ -5301,6 +5301,28 @@ class Handler(BaseHTTPRequestHandler):
                         results[name] = str(e)
                 conn.close()
                 all_ok = all(v == "ok" for v in results.values())
+                # Run migrations: deduplicate paper_trades and create unique index
+                try:
+                    conn2 = get_db()
+                    if conn2:
+                        with conn2.cursor() as cur:
+                            cur.execute("""
+                                DELETE FROM paper_trades
+                                WHERE id NOT IN (
+                                    SELECT DISTINCT ON (ticker, target_date) id
+                                    FROM paper_trades
+                                    ORDER BY ticker, target_date, scan_ts DESC
+                                )
+                            """)
+                            cur.execute("""
+                                CREATE UNIQUE INDEX IF NOT EXISTS paper_trades_ticker_date_idx
+                                ON paper_trades (ticker, target_date)
+                            """)
+                        conn2.commit()
+                        conn2.close()
+                        results["paper_trades_dedup"] = "ok"
+                except Exception as e:
+                    results["paper_trades_dedup"] = str(e)
                 self.send_json({"ok": all_ok, "tables": results})
 
         elif path == "/health":
