@@ -5407,6 +5407,57 @@ class Handler(BaseHTTPRequestHandler):
                     results["paper_trades_dedup"] = str(e)
                 self.send_json({"ok": all_ok, "tables": results})
 
+        elif path == "/debug/cal-log":
+            # Returns last scan result for calibration_snapshots debugging
+            try:
+                conn = get_db()
+                if not conn:
+                    self.send_json({"ok": False, "error": "No DB"})
+                else:
+                    with conn.cursor() as cur:
+                        # Table exists?
+                        cur.execute("""
+                            SELECT EXISTS (
+                                SELECT FROM information_schema.tables
+                                WHERE table_name = 'calibration_snapshots'
+                            )
+                        """)
+                        table_exists = cur.fetchone()[0]
+
+                        # Count all rows
+                        total = 0
+                        grade_counts = {}
+                        if table_exists:
+                            cur.execute("SELECT COUNT(*) FROM calibration_snapshots")
+                            total = cur.fetchone()[0]
+                            cur.execute("""
+                                SELECT grade, COUNT(*)
+                                FROM calibration_snapshots
+                                GROUP BY grade
+                            """)
+                            grade_counts = {r[0]: r[1] for r in cur.fetchall()}
+
+                        # Last scan markets sample
+                        cur.execute("""
+                            SELECT city, grade, ticker, hours_to_cutoff
+                            FROM paper_trades
+                            ORDER BY scan_ts DESC LIMIT 5
+                        """)
+                        recent = [{"city": r[0], "grade": r[1],
+                                   "ticker": r[2], "htc": float(r[3]) if r[3] else None}
+                                  for r in cur.fetchall()]
+
+                    conn.close()
+                    self.send_json({
+                        "ok": True,
+                        "table_exists": table_exists,
+                        "total_rows": total,
+                        "grade_counts": grade_counts,
+                        "recent_paper_trades": recent,
+                    })
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
         elif path == "/health":
             self.send_json({"ok": True, "message": "Server running"})
 
@@ -5500,8 +5551,8 @@ def _paper_trade_log(city_key, fc, markets):
 
         conn.commit()
         conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  ⚠️  _paper_trade_log error: {e}")
 
 
 def _paper_trade_settle():
