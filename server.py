@@ -3301,6 +3301,16 @@ def ensure_tables():
                 CREATE INDEX IF NOT EXISTS paper_trades_target_date_idx
                     ON paper_trades (target_date DESC);
             """)
+            # Deduplicate existing rows before creating unique index
+            # Keep the row with the latest scan_ts per (ticker, target_date)
+            cur.execute("""
+                DELETE FROM paper_trades
+                WHERE id NOT IN (
+                    SELECT DISTINCT ON (ticker, target_date) id
+                    FROM paper_trades
+                    ORDER BY ticker, target_date, scan_ts DESC
+                );
+            """)
             cur.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS paper_trades_ticker_date_idx
                     ON paper_trades (ticker, target_date);
