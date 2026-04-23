@@ -3316,6 +3316,43 @@ def ensure_tables():
                 CREATE UNIQUE INDEX IF NOT EXISTS paper_trades_ticker_date_idx
                     ON paper_trades (ticker, target_date);
             """)
+            # calibration_snapshots — all grades, all signals
+            # Used to compute rolling 30-day per-city forecast bias.
+            # Bias re-enabled automatically once >= 30 settled rows exist
+            # within the last 30 days for a given city.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS calibration_snapshots (
+                    id             BIGSERIAL PRIMARY KEY,
+                    scan_ts        TIMESTAMPTZ DEFAULT NOW(),
+                    city           TEXT NOT NULL,
+                    nws_station    TEXT,
+                    target_date    DATE NOT NULL,
+                    horizon        TEXT,
+                    ticker         TEXT NOT NULL,
+                    bracket_label  TEXT,
+                    lo_temp        NUMERIC(5,1),
+                    hi_temp        NUMERIC(5,1),
+                    grade          TEXT,
+                    model_prob     NUMERIC(6,4),
+                    yes_ask        NUMERIC(6,4),
+                    mu             NUMERIC(6,2),   -- raw model center (no bias applied)
+                    sigma          NUMERIC(6,3),
+                    net_gap_c      INTEGER,
+                    kelly_size     NUMERIC(8,2),
+                    hours_to_cutoff NUMERIC(5,1),
+                    settled_temp   NUMERIC(5,1),   -- NWS CLI actual
+                    settled_correct BOOLEAN,
+                    settled_ts     TIMESTAMPTZ
+                );
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS calibration_snapshots_city_date_idx
+                    ON calibration_snapshots (city, target_date DESC);
+            """)
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS calibration_snapshots_ticker_date_idx
+                    ON calibration_snapshots (ticker, target_date);
+            """)
         conn.commit()
         print("  ✅ DB tables ready")
     except Exception as e:
@@ -4714,15 +4751,54 @@ class Handler(BaseHTTPRequestHandler):
                     σ_d1 = round(sum(rmse_vals) / len(rmse_vals), 2) if rmse_vals else cfg["σ_d1"]
                     σ_d0 = round(σ_d1 * 0.70, 2)
 
+                    # ── Bias source selection ─────────────────────────────
+                    # Prefer calibration_snapshots (real trade data, rolling 30d)
+                    # over archive API (unreliable — model overwrites prior runs).
+                    # Bias only applied when >= 30 settled rows in last 30 days.
+                    BIAS_MIN_TRADES = 30
+                    live_gfs_bias   = 0.0
+                    live_ecmwf_bias = 0.0
+                    live_n          = 0
+                    bias_source     = "disabled"
+
+                    conn_cal = get_db()
+                    if conn_cal:
+                        try:
+                            with conn_cal.cursor() as cur_cal:
+                                cur_cal.execute("""
+                                    SELECT
+                                        COUNT(*) AS n,
+                                        AVG(mu - settled_temp) AS raw_bias
+                                    FROM calibration_snapshots
+                                    WHERE city = %s
+                                      AND settled_temp IS NOT NULL
+                                      AND scan_ts >= NOW() - INTERVAL '30 days'
+                                """, (city_key,))
+                                row = cur_cal.fetchone()
+                                if row and row[0] >= BIAS_MIN_TRADES and row[1] is not None:
+                                    live_n        = int(row[0])
+                                    # mu is the raw (unbiased) model center.
+                                    # raw_bias = avg(mu - actual): positive means model runs warm.
+                                    # We store as gfs_bias/ecmwf_bias since both use same mu.
+                                    live_gfs_bias   = round(float(row[1]), 2)
+                                    live_ecmwf_bias = round(float(row[1]), 2)
+                                    bias_source     = f"calibration_snapshots (n={live_n})"
+                        except Exception:
+                            pass
+                        finally:
+                            conn_cal.close()
+
                     _TEMP_BIAS_CACHE[city_key] = {
-                        "gfs_bias":    gfs_bias   or 0.0,
-                        "ecmwf_bias":  ecmwf_bias or 0.0,
+                        "gfs_bias":    live_gfs_bias,
+                        "ecmwf_bias":  live_ecmwf_bias,
                         "gfs_rmse":    gfs_rmse,
                         "ecmwf_rmse":  ecmwf_rmse,
                         "best_model":  best_model,
                         "σ_d1":        σ_d1,
                         "σ_d0":        σ_d0,
                         "n_days":      len(errors_gfs),
+                        "bias_n":      live_n,
+                        "bias_source": bias_source,
                         "calibrated_at": _t.time(),
                     }
 
@@ -4730,10 +4806,15 @@ class Handler(BaseHTTPRequestHandler):
                         "city":        city_key,
                         "ok":          True,
                         "n_days":      len(errors_gfs),
-                        "gfs_bias":    gfs_bias,   "gfs_rmse":   gfs_rmse,
-                        "ecmwf_bias":  ecmwf_bias, "ecmwf_rmse": ecmwf_rmse,
+                        "gfs_bias":    live_gfs_bias,
+                        "ecmwf_bias":  live_ecmwf_bias,
+                        "gfs_rmse":    gfs_rmse,
+                        "ecmwf_rmse":  ecmwf_rmse,
                         "best_model":  best_model,
                         "σ_d1":        σ_d1,       "σ_d0":       σ_d0,
+                        "bias_n":      live_n,
+                        "bias_source": bias_source,
+                        "bias_active": live_n >= 30,
                     }
 
                 except Exception as e:
@@ -5357,29 +5438,25 @@ def _background_scan_scheduler():
 
 def _paper_trade_log(city_key, fc, markets):
     """
-    Log every A-grade signal from a scan as a paper trade.
-    Called by the background scanner on every cycle.
-    Skips signals past the 6AM local cutoff — stale forecasts skew calibration.
+    Log A-grade signals as paper trades (bet tracking) AND log all grades
+    to calibration_snapshots (bias calibration data).
+
+    paper_trades  — A-grade only, tracks simulated bet performance
+    calibration_snapshots — all grades, used to compute per-city forecast bias
+                            once 30+ settled rows exist within a rolling 30-day window
+
+    Both tables skip signals past cutoff (hours_to_cutoff < 0).
     """
     try:
         conn = get_db()
         if not conn: return
         with conn.cursor() as cur:
             for m in markets:
-                if m.get("grade") != "A": continue
                 if not m.get("ticker"): continue
-                # Skip if past 6AM local cutoff — market has info edge, data is unreliable
                 htc = m.get("hours_to_cutoff")
                 if htc is not None and htc < 0: continue
-                cur.execute("""
-                    INSERT INTO paper_trades
-                    (city, nws_station, target_date, horizon, ticker,
-                     bracket_label, lo_temp, hi_temp, grade,
-                     model_prob, yes_ask, mu, sigma, net_gap_c,
-                     kelly_size, hours_to_cutoff)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT (ticker, target_date) DO NOTHING
-                """, (
+
+                row = (
                     city_key,
                     fc.get("nws_station"),
                     fc.get("target_date"),
@@ -5396,7 +5473,31 @@ def _paper_trade_log(city_key, fc, markets):
                     m.get("net_gap_c"),
                     m.get("kelly_size"),
                     m.get("hours_to_cutoff"),
-                ))
+                )
+
+                # paper_trades — A-grade only (bet simulation)
+                if m.get("grade") == "A":
+                    cur.execute("""
+                        INSERT INTO paper_trades
+                        (city, nws_station, target_date, horizon, ticker,
+                         bracket_label, lo_temp, hi_temp, grade,
+                         model_prob, yes_ask, mu, sigma, net_gap_c,
+                         kelly_size, hours_to_cutoff)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        ON CONFLICT (ticker, target_date) DO NOTHING
+                    """, row)
+
+                # calibration_snapshots — all grades (bias calibration)
+                cur.execute("""
+                    INSERT INTO calibration_snapshots
+                    (city, nws_station, target_date, horizon, ticker,
+                     bracket_label, lo_temp, hi_temp, grade,
+                     model_prob, yes_ask, mu, sigma, net_gap_c,
+                     kelly_size, hours_to_cutoff)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (ticker, target_date) DO NOTHING
+                """, row)
+
         conn.commit()
         conn.close()
     except Exception:
@@ -5405,36 +5506,39 @@ def _paper_trade_log(city_key, fc, markets):
 
 def _paper_trade_settle():
     """
-    Settle open paper trades by matching against temp_snapshots settled_temp.
-    Called by the settlement scheduler alongside real trades.
+    Settle open paper trades and calibration_snapshots by matching against
+    temp_snapshots settled_temp. Called by the settlement scheduler.
     """
     try:
         conn = get_db()
         if not conn: return
+
+        settle_sql = """
+            SET
+                settled_temp    = ts.settled_temp,
+                settled_correct = CASE
+                    WHEN {tbl}.lo_temp IS NULL AND {tbl}.hi_temp IS NOT NULL
+                        THEN ts.settled_temp <= {tbl}.hi_temp
+                    WHEN {tbl}.hi_temp IS NULL AND {tbl}.lo_temp IS NOT NULL
+                        THEN ts.settled_temp >= {tbl}.lo_temp
+                    ELSE ts.settled_temp >= {tbl}.lo_temp
+                     AND ts.settled_temp <= {tbl}.hi_temp
+                END,
+                settled_ts = NOW()
+            FROM (
+                SELECT DISTINCT ON (city, target_date)
+                    city, target_date, settled_temp
+                FROM temp_snapshots
+                WHERE settled_temp IS NOT NULL
+            ) ts
+            WHERE {tbl}.city        = ts.city
+              AND {tbl}.target_date = ts.target_date
+              AND {tbl}.settled_temp IS NULL
+        """
+
         with conn.cursor() as cur:
-            cur.execute("""
-                UPDATE paper_trades pt
-                SET
-                    settled_temp    = ts.settled_temp,
-                    settled_correct = CASE
-                        WHEN pt.lo_temp IS NULL AND pt.hi_temp IS NOT NULL
-                            THEN ts.settled_temp <= pt.hi_temp
-                        WHEN pt.hi_temp IS NULL AND pt.lo_temp IS NOT NULL
-                            THEN ts.settled_temp >= pt.lo_temp
-                        ELSE ts.settled_temp >= pt.lo_temp
-                         AND ts.settled_temp <= pt.hi_temp
-                    END,
-                    settled_ts = NOW()
-                FROM (
-                    SELECT DISTINCT ON (city, target_date)
-                        city, target_date, settled_temp
-                    FROM temp_snapshots
-                    WHERE settled_temp IS NOT NULL
-                ) ts
-                WHERE pt.city        = ts.city
-                  AND pt.target_date = ts.target_date
-                  AND pt.settled_temp IS NULL
-            """)
+            for tbl in ("paper_trades", "calibration_snapshots"):
+                cur.execute(f"UPDATE {tbl} " + settle_sql.format(tbl=tbl))
         conn.commit()
         conn.close()
     except Exception:
