@@ -395,11 +395,12 @@ def fetch_temp_forecast(city_key, horizon="d1"):
         if not results:
             return {"ok": False, "error": "; ".join(errors)}
 
-        # Apply station bias corrections from cache (fall back to config defaults)
+        # Bias correction disabled — insufficient settled trade data to calibrate reliably.
+        # Re-enable once 30+ settled trades per city are available.
         bias_cache = _TEMP_BIAS_CACHE.get(city_key, {})
-        gfs_bias_high   = bias_cache.get("gfs_bias",   cfg.get("warm_bias_gfs",   0.0))
-        ecmwf_bias_high = bias_cache.get("ecmwf_bias", cfg.get("warm_bias_ecmwf", 0.0))
-        blend_bias_high = bias_cache.get("blend_bias", 0.0)
+        gfs_bias_high   = 0.0
+        ecmwf_bias_high = 0.0
+        blend_bias_high = 0.0
         gfs_bias_low    = 0.0
         ecmwf_bias_low  = 0.0
 
