@@ -3338,6 +3338,25 @@ def ensure_tables():
                     kelly_size     NUMERIC(8,2),
                     hours_to_cutoff NUMERIC(5,1),
                     mkt_rank_conf  TEXT,           -- top1/top2/outside_top2/skip
+                    -- Model details
+                    gfs_high       NUMERIC(5,1),   -- raw GFS forecast
+                    ecmwf_high     NUMERIC(5,1),   -- raw ECMWF forecast
+                    model_spread   NUMERIC(5,2),   -- abs(gfs - ecmwf)
+                    edge_ratio     NUMERIC(8,3),   -- gap_c / sigma
+                    gap_c          INTEGER,        -- raw edge before spread cost
+                    spread_c       INTEGER,        -- bid/ask spread cost in cents
+                    kelly_frac     NUMERIC(6,4),   -- raw half-kelly fraction
+                    -- Market details at scan time
+                    yes_bid        NUMERIC(6,4),   -- best bid
+                    liq_grade      TEXT,           -- A/B/C/D liquidity grade
+                    open_interest  INTEGER,        -- open interest at scan time
+                    volume_24h     INTEGER,        -- 24h volume at scan time
+                    fillable_a     NUMERIC(8,2),   -- fillable dollars at A-grade price
+                    -- Structural flags
+                    is_tail_bet         BOOLEAN,   -- model center below bracket
+                    any_model_inside    BOOLEAN,   -- any model points at bracket
+                    spread_exceeds_bracket BOOLEAN,-- model spread >= bracket width
+                    book_limited        BOOLEAN,   -- kelly capped by book depth
                     -- Settlement fields (filled in later)
                     settled_temp   NUMERIC(5,1),
                     settled_correct BOOLEAN,
@@ -3387,6 +3406,25 @@ def ensure_tables():
                     kelly_size     NUMERIC(8,2),
                     hours_to_cutoff NUMERIC(5,1),
                     mkt_rank_conf  TEXT,           -- top1/top2/outside_top2/skip
+                    -- Model details
+                    gfs_high       NUMERIC(5,1),   -- raw GFS forecast
+                    ecmwf_high     NUMERIC(5,1),   -- raw ECMWF forecast
+                    model_spread   NUMERIC(5,2),   -- abs(gfs - ecmwf)
+                    edge_ratio     NUMERIC(8,3),   -- gap_c / sigma
+                    gap_c          INTEGER,        -- raw edge before spread cost
+                    spread_c       INTEGER,        -- bid/ask spread cost in cents
+                    kelly_frac     NUMERIC(6,4),   -- raw half-kelly fraction
+                    -- Market details at scan time
+                    yes_bid        NUMERIC(6,4),   -- best bid
+                    liq_grade      TEXT,           -- A/B/C/D liquidity grade
+                    open_interest  INTEGER,        -- open interest at scan time
+                    volume_24h     INTEGER,        -- 24h volume at scan time
+                    fillable_a     NUMERIC(8,2),   -- fillable dollars at A-grade price
+                    -- Structural flags
+                    is_tail_bet         BOOLEAN,   -- model center below bracket
+                    any_model_inside    BOOLEAN,   -- any model points at bracket
+                    spread_exceeds_bracket BOOLEAN,-- model spread >= bracket width
+                    book_limited        BOOLEAN,   -- kelly capped by book depth
                     settled_temp   NUMERIC(5,1),   -- NWS CLI actual
                     settled_correct BOOLEAN,
                     settled_ts     TIMESTAMPTZ
@@ -5417,8 +5455,8 @@ class Handler(BaseHTTPRequestHandler):
                     ("model_forecasts", "CREATE TABLE IF NOT EXISTS model_forecasts (id SERIAL PRIMARY KEY, city TEXT NOT NULL, nws_station TEXT NOT NULL DEFAULT '', target_date DATE NOT NULL, actual_high NUMERIC(5,1), gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), nbm_high NUMERIC(5,1), graphcast_high NUMERIC(5,1), gem_high NUMERIC(5,1), icon_high NUMERIC(5,1), spread_gfs_ecmwf NUMERIC(5,2), UNIQUE(city, target_date))"),
                     ("auto_trader_config", "CREATE TABLE IF NOT EXISTS auto_trader_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())"),
                     ("auto_trader_log", "CREATE TABLE IF NOT EXISTS auto_trader_log (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT NOW(), level TEXT NOT NULL, msg TEXT NOT NULL, ticker TEXT, city TEXT, extra JSONB DEFAULT '{}')"),
-                    ("paper_trades", "CREATE TABLE IF NOT EXISTS paper_trades (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), mkt_rank_conf TEXT, settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
-                    ("calibration_snapshots", "CREATE TABLE IF NOT EXISTS calibration_snapshots (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), mkt_rank_conf TEXT, settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
+                    ("paper_trades", "CREATE TABLE IF NOT EXISTS paper_trades (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), mkt_rank_conf TEXT, gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), model_spread NUMERIC(5,2), edge_ratio NUMERIC(8,3), gap_c INTEGER, spread_c INTEGER, kelly_frac NUMERIC(6,4), yes_bid NUMERIC(6,4), liq_grade TEXT, open_interest INTEGER, volume_24h INTEGER, fillable_a NUMERIC(8,2), is_tail_bet BOOLEAN, any_model_inside BOOLEAN, spread_exceeds_bracket BOOLEAN, book_limited BOOLEAN, settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
+                    ("calibration_snapshots", "CREATE TABLE IF NOT EXISTS calibration_snapshots (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), mkt_rank_conf TEXT, gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), model_spread NUMERIC(5,2), edge_ratio NUMERIC(8,3), gap_c INTEGER, spread_c INTEGER, kelly_frac NUMERIC(6,4), yes_bid NUMERIC(6,4), liq_grade TEXT, open_interest INTEGER, volume_24h INTEGER, fillable_a NUMERIC(8,2), is_tail_bet BOOLEAN, any_model_inside BOOLEAN, spread_exceeds_bracket BOOLEAN, book_limited BOOLEAN, settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
                 ]
                 for name, sql in tables:
                     try:
@@ -5467,21 +5505,41 @@ class Handler(BaseHTTPRequestHandler):
                         results["calibration_snapshots_idx"] = "ok"
                 except Exception as e:
                     results["calibration_snapshots_idx"] = str(e)
-                # Migration: add mkt_rank_conf to existing tables if missing
+                # Migration: add all new columns to existing tables if missing
+                _new_columns = [
+                    ("mkt_rank_conf",          "TEXT"),
+                    ("gfs_high",               "NUMERIC(5,1)"),
+                    ("ecmwf_high",             "NUMERIC(5,1)"),
+                    ("model_spread",           "NUMERIC(5,2)"),
+                    ("edge_ratio",             "NUMERIC(8,3)"),
+                    ("gap_c",                  "INTEGER"),
+                    ("spread_c",               "INTEGER"),
+                    ("kelly_frac",             "NUMERIC(6,4)"),
+                    ("yes_bid",                "NUMERIC(6,4)"),
+                    ("liq_grade",              "TEXT"),
+                    ("open_interest",          "INTEGER"),
+                    ("volume_24h",             "INTEGER"),
+                    ("fillable_a",             "NUMERIC(8,2)"),
+                    ("is_tail_bet",            "BOOLEAN"),
+                    ("any_model_inside",       "BOOLEAN"),
+                    ("spread_exceeds_bracket", "BOOLEAN"),
+                    ("book_limited",           "BOOLEAN"),
+                ]
                 try:
                     conn4 = get_db()
                     if conn4:
                         with conn4.cursor() as cur:
                             for tbl in ("paper_trades", "calibration_snapshots"):
-                                cur.execute(f"""
-                                    ALTER TABLE {tbl}
-                                    ADD COLUMN IF NOT EXISTS mkt_rank_conf TEXT
-                                """)
+                                for col, dtype in _new_columns:
+                                    cur.execute(f"""
+                                        ALTER TABLE {tbl}
+                                        ADD COLUMN IF NOT EXISTS {col} {dtype}
+                                    """)
                         conn4.commit()
                         conn4.close()
-                        results["mkt_rank_conf_migration"] = "ok"
+                        results["schema_migration"] = "ok"
                 except Exception as e:
-                    results["mkt_rank_conf_migration"] = str(e)
+                    results["schema_migration"] = str(e)
                 self.send_json({"ok": all_ok, "tables": results})
 
         elif path == "/debug/cal-log":
@@ -5584,6 +5642,11 @@ def _paper_trade_log(city_key, fc, markets):
                 htc = m.get("hours_to_cutoff")
                 if htc is not None and htc < 0: continue
 
+                # Compute model spread for logging
+                _gfs_h   = fc.get("gfs_high")
+                _ecmwf_h = fc.get("ecmwf_high")
+                _spread  = round(abs(_gfs_h - _ecmwf_h), 2) if (_gfs_h and _ecmwf_h) else None
+
                 row = (
                     city_key,
                     fc.get("nws_station"),
@@ -5601,29 +5664,50 @@ def _paper_trade_log(city_key, fc, markets):
                     m.get("net_gap_c"),
                     m.get("kelly_size"),
                     m.get("hours_to_cutoff"),
-                    m.get("mkt_rank_conf"),   # top1/top2/outside_top2/skip
+                    m.get("mkt_rank_conf"),
+                    # Model details
+                    _gfs_h,
+                    _ecmwf_h,
+                    _spread,
+                    m.get("edge_ratio"),
+                    m.get("gap_c"),
+                    m.get("spread_c"),
+                    m.get("kelly_frac"),
+                    # Market details
+                    m.get("yes_bid"),
+                    m.get("liq_grade"),
+                    m.get("open_interest"),
+                    m.get("volume_24h"),
+                    m.get("fillable_a"),
+                    # Structural flags
+                    m.get("is_tail_bet"),
+                    m.get("any_model_inside"),
+                    m.get("spread_exceeds_bracket"),
+                    m.get("book_limited"),
                 )
+
+                _cols = """city, nws_station, target_date, horizon, ticker,
+                         bracket_label, lo_temp, hi_temp, grade,
+                         model_prob, yes_ask, mu, sigma, net_gap_c,
+                         kelly_size, hours_to_cutoff, mkt_rank_conf,
+                         gfs_high, ecmwf_high, model_spread,
+                         edge_ratio, gap_c, spread_c, kelly_frac,
+                         yes_bid, liq_grade, open_interest, volume_24h, fillable_a,
+                         is_tail_bet, any_model_inside, spread_exceeds_bracket, book_limited"""
+                _vals = ",".join(["%s"] * 33)
 
                 # paper_trades — A-grade only (bet simulation)
                 if m.get("grade") == "A":
-                    cur.execute("""
-                        INSERT INTO paper_trades
-                        (city, nws_station, target_date, horizon, ticker,
-                         bracket_label, lo_temp, hi_temp, grade,
-                         model_prob, yes_ask, mu, sigma, net_gap_c,
-                         kelly_size, hours_to_cutoff, mkt_rank_conf)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    cur.execute(f"""
+                        INSERT INTO paper_trades ({_cols})
+                        VALUES ({_vals})
                         ON CONFLICT (ticker, target_date) DO NOTHING
                     """, row)
 
-                # calibration_snapshots — all grades (bias calibration + market rank)
-                cur.execute("""
-                    INSERT INTO calibration_snapshots
-                    (city, nws_station, target_date, horizon, ticker,
-                     bracket_label, lo_temp, hi_temp, grade,
-                     model_prob, yes_ask, mu, sigma, net_gap_c,
-                     kelly_size, hours_to_cutoff, mkt_rank_conf)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                # calibration_snapshots — all grades (bias + market rank calibration)
+                cur.execute(f"""
+                    INSERT INTO calibration_snapshots ({_cols})
+                    VALUES ({_vals})
                     ON CONFLICT (ticker, target_date) DO NOTHING
                 """, row)
 
