@@ -412,7 +412,7 @@ body{max-width:900px;margin:0 auto;}
 .temp-opp-btn{font-size:10px;padding:5px 12px;border-radius:4px;cursor:pointer;font-family:inherit;border:none;margin-top:2px;}
 .grade-A .temp-opp-btn{background:var(--yes-lt);color:#27500A;border:0.5px solid var(--yes-border);}
 .grade-B .temp-opp-btn{background:var(--gap-lt,#fef3e8);color:#854f0b;border:0.5px solid var(--gap-border,#e8c49a);}
-.gbadge{font-size:9px;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:5px;}
+.gbadge{font-size:9px;padding:1px 5px;border-radius:3px;font-weight:600;margin-left:5px;}.temp-opp-conf{font-size:9px;font-weight:700;letter-spacing:0.5px;text-transform:uppercase;margin-bottom:2px;}.mkt-top1{color:#00ff88;}.mkt-top2{color:#88ccff;}.mkt-out{color:#ff6b6b;}
 .gA{background:var(--yes-lt);color:#0f4d2a;}.gB{background:var(--warn-lt,#faeeda);color:#854f0b;}
 
 /* Bracket expand panel */
@@ -1724,6 +1724,13 @@ function renderTempCard(b){
     +'</div>'
     +'<div class="temp-opp-right">'
     +'<div class="temp-opp-edge">+'+b.net_gap_c+'\u00a2</div>'
+    +(()=>{
+      const conf = b.mkt_rank_conf;
+      if(conf==='top1') return '<div class="temp-opp-conf mkt-top1" title="Model agrees with market #1 bracket">MKT #1 ✓</div>';
+      if(conf==='top2') return '<div class="temp-opp-conf mkt-top2" title="Model agrees with market #2 bracket">MKT #2</div>';
+      if(conf==='outside_top2') return '<div class="temp-opp-conf mkt-out" title="Model disagrees with market top 2 brackets">MKT ✗</div>';
+      return '';
+    })()
     +'<div class="temp-opp-meta">liq '+(b.liq_grade||'?')+'</div>'
 
     +'</div></div>'

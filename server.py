@@ -189,6 +189,15 @@ CITIES = {
 # nws_station = ICAO used by NWS CLI for settlement (must match Kalshi rules)
 # σ_d1 / σ_d0 = forecast error (°F RMSE) at D+1 and D+0 horizons (bias-corrected)
 # These are research-based starting values; /temp/calibrate refines them.
+
+# Cities temporarily blacklisted from auto-trading.
+# Calibration data still logged and settled — blacklisted cities are excluded
+# from bet placement only. Remove a city once 30+ settled calibration rows exist
+# and bias is confirmed trustworthy.
+AUTO_TRADER_CITY_BLACKLIST = {
+    "phoenix",   # Systematic April cold bias — 3 consecutive losses, models ~2-3°F cold
+}
+
 TEMP_CITIES = {
     "nyc": {
         "label": "New York", "nws_station": "KNYC",
@@ -1012,6 +1021,38 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
         })
         analyzed.append(m)
 
+    # ── Market rank confirmation (DISPLAY ONLY — no grade effect) ────────────
+    # Rank all brackets by market price (yes_ask) descending.
+    # Market's #1 bracket = highest yes_ask = market's most confident outcome.
+    # Logged to calibration_snapshots so we can measure win rate by rank bucket
+    # after 30+ settled trades and decide empirically whether to apply grade
+    # adjustments.
+    #
+    # mkt_rank_conf values:
+    #   top1         — model center in market's #1 bracket (highest yes_ask)
+    #   top2         — model center in market's #2 bracket
+    #   outside_top2 — model center outside market's top 2 brackets
+    #   skip         — bracket graded skip, not evaluated
+    _all_asks = sorted(
+        [x for x in analyzed if x.get("yes_ask", 0) > 0.02],
+        key=lambda x: -x.get("yes_ask", 0)
+    )
+    _top1_key = (_all_asks[0].get("lo_temp"), _all_asks[0].get("hi_temp")) if len(_all_asks) > 0 else None
+    _top2_key = (_all_asks[1].get("lo_temp"), _all_asks[1].get("hi_temp")) if len(_all_asks) > 1 else None
+
+    for m in analyzed:
+        if m.get("grade") == "skip":
+            m["mkt_rank_conf"] = "skip"
+            continue
+        _key = (m.get("lo_temp"), m.get("hi_temp"))
+        if _key == _top1_key:
+            m["mkt_rank_conf"] = "top1"
+        elif _key == _top2_key:
+            m["mkt_rank_conf"] = "top2"
+        else:
+            m["mkt_rank_conf"] = "outside_top2"
+        # Grade and actionable unchanged — display only
+
     # Sort: A first, then by gap_c descending
     grade_order = {"A": 0, "B": 1, "C": 2, "skip": 3}
     analyzed.sort(key=lambda x: (grade_order.get(x["grade"], 4), -x["gap_c"]))
@@ -1728,6 +1769,10 @@ def run_auto_trader_cycle(force=False):
 
     for horizon in cfg.get("horizons", ["d0", "d1"]):
         for city_key in TEMP_CITIES:
+            # Skip blacklisted cities — calibration still runs, bets do not
+            if city_key in AUTO_TRADER_CITY_BLACKLIST:
+                at_log("SKIP", f"{city_key} is blacklisted — skipping auto-trade (calibration continues)", city=city_key)
+                continue
             try:
                 result = scan_temp_city(city_key, horizon)
                 if not result.get("ok"):
@@ -3292,6 +3337,7 @@ def ensure_tables():
                     net_gap_c      INTEGER,
                     kelly_size     NUMERIC(8,2),
                     hours_to_cutoff NUMERIC(5,1),
+                    mkt_rank_conf  TEXT,           -- top1/top2/outside_top2/skip
                     -- Settlement fields (filled in later)
                     settled_temp   NUMERIC(5,1),
                     settled_correct BOOLEAN,
@@ -3340,6 +3386,7 @@ def ensure_tables():
                     net_gap_c      INTEGER,
                     kelly_size     NUMERIC(8,2),
                     hours_to_cutoff NUMERIC(5,1),
+                    mkt_rank_conf  TEXT,           -- top1/top2/outside_top2/skip
                     settled_temp   NUMERIC(5,1),   -- NWS CLI actual
                     settled_correct BOOLEAN,
                     settled_ts     TIMESTAMPTZ
@@ -5370,8 +5417,8 @@ class Handler(BaseHTTPRequestHandler):
                     ("model_forecasts", "CREATE TABLE IF NOT EXISTS model_forecasts (id SERIAL PRIMARY KEY, city TEXT NOT NULL, nws_station TEXT NOT NULL DEFAULT '', target_date DATE NOT NULL, actual_high NUMERIC(5,1), gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), nbm_high NUMERIC(5,1), graphcast_high NUMERIC(5,1), gem_high NUMERIC(5,1), icon_high NUMERIC(5,1), spread_gfs_ecmwf NUMERIC(5,2), UNIQUE(city, target_date))"),
                     ("auto_trader_config", "CREATE TABLE IF NOT EXISTS auto_trader_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())"),
                     ("auto_trader_log", "CREATE TABLE IF NOT EXISTS auto_trader_log (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT NOW(), level TEXT NOT NULL, msg TEXT NOT NULL, ticker TEXT, city TEXT, extra JSONB DEFAULT '{}')"),
-                    ("paper_trades", "CREATE TABLE IF NOT EXISTS paper_trades (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
-                    ("calibration_snapshots", "CREATE TABLE IF NOT EXISTS calibration_snapshots (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
+                    ("paper_trades", "CREATE TABLE IF NOT EXISTS paper_trades (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), mkt_rank_conf TEXT, settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
+                    ("calibration_snapshots", "CREATE TABLE IF NOT EXISTS calibration_snapshots (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), mkt_rank_conf TEXT, settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
                 ]
                 for name, sql in tables:
                     try:
@@ -5420,6 +5467,21 @@ class Handler(BaseHTTPRequestHandler):
                         results["calibration_snapshots_idx"] = "ok"
                 except Exception as e:
                     results["calibration_snapshots_idx"] = str(e)
+                # Migration: add mkt_rank_conf to existing tables if missing
+                try:
+                    conn4 = get_db()
+                    if conn4:
+                        with conn4.cursor() as cur:
+                            for tbl in ("paper_trades", "calibration_snapshots"):
+                                cur.execute(f"""
+                                    ALTER TABLE {tbl}
+                                    ADD COLUMN IF NOT EXISTS mkt_rank_conf TEXT
+                                """)
+                        conn4.commit()
+                        conn4.close()
+                        results["mkt_rank_conf_migration"] = "ok"
+                except Exception as e:
+                    results["mkt_rank_conf_migration"] = str(e)
                 self.send_json({"ok": all_ok, "tables": results})
 
         elif path == "/debug/cal-log":
@@ -5539,6 +5601,7 @@ def _paper_trade_log(city_key, fc, markets):
                     m.get("net_gap_c"),
                     m.get("kelly_size"),
                     m.get("hours_to_cutoff"),
+                    m.get("mkt_rank_conf"),   # top1/top2/outside_top2/skip
                 )
 
                 # paper_trades — A-grade only (bet simulation)
@@ -5548,19 +5611,19 @@ def _paper_trade_log(city_key, fc, markets):
                         (city, nws_station, target_date, horizon, ticker,
                          bracket_label, lo_temp, hi_temp, grade,
                          model_prob, yes_ask, mu, sigma, net_gap_c,
-                         kelly_size, hours_to_cutoff)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                         kelly_size, hours_to_cutoff, mkt_rank_conf)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                         ON CONFLICT (ticker, target_date) DO NOTHING
                     """, row)
 
-                # calibration_snapshots — all grades (bias calibration)
+                # calibration_snapshots — all grades (bias calibration + market rank)
                 cur.execute("""
                     INSERT INTO calibration_snapshots
                     (city, nws_station, target_date, horizon, ticker,
                      bracket_label, lo_temp, hi_temp, grade,
                      model_prob, yes_ask, mu, sigma, net_gap_c,
-                     kelly_size, hours_to_cutoff)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                     kelly_size, hours_to_cutoff, mkt_rank_conf)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (ticker, target_date) DO NOTHING
                 """, row)
 
