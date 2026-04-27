@@ -1570,6 +1570,11 @@ function renderTempScanner(data){
           spread_models:mtype==='high'?city.forecast?.spread_high:city.forecast?.spread_low});
       }
     }
+    // Add combo signals
+    for(const c of(city.combo_signals||[])){
+      allBkts.push({...c,city_key:city.city,city_label:city.label,
+        market_type:'combo',forecast:city.forecast});
+    }
   }
 
   const filtered=allBkts.filter(b=>{
@@ -1636,6 +1641,40 @@ function wuUrl(station){
 }
 
 function renderTempCard(b){
+  // ── Combo card ─────────────────────────────────────────────────────────
+  if(b.is_combo){
+    const la=b.leg_a||{}, lb=b.leg_b||{};
+    const combinedProb=Math.round((b.combined_prob||0)*100);
+    const combinedCost=b.combined_cost_c||Math.round((b.yes_ask||0)*100);
+    const netEdge=b.combined_net_edge_c||b.net_gap_c||0;
+    const kdol=((b.kelly_size||0)/2).toFixed(2);
+    const grade=b.grade||'B';
+    return `<div class="temp-opp grade-${grade}" style="border-left:3px solid #8b5cf6;">
+      <div class="temp-opp-inner">
+        <div class="temp-opp-left">
+          <div class="temp-opp-city">${b.city_label||b.city_key||''} · ${(b.forecast||{}).target_date||''} · COMBO</div>
+          <div class="temp-opp-decision" style="color:#8b5cf6;">
+            Buy ${la.bracket_label||''} + ${lb.bracket_label||''} YES
+            <span class="gbadge" style="background:rgba(139,92,246,0.2);color:#8b5cf6;">${grade}</span>
+          </div>
+          <div class="temp-opp-ctx">
+            Combined prob <b>${combinedProb}¢</b> · cost <b>${combinedCost}¢</b> · net edge <b>+${netEdge}¢</b>
+          </div>
+          <div class="temp-opp-ctx" style="margin-top:2px;">
+            Leg A: ${la.bracket_label} @ ${Math.round((la.yes_ask||0)*100)}¢ · 
+            Leg B: ${lb.bracket_label} @ ${Math.round((lb.yes_ask||0)*100)}¢
+          </div>
+        </div>
+        <div class="temp-opp-right">
+          <div class="temp-opp-edge" style="color:#8b5cf6;">+${netEdge}¢</div>
+          <div class="temp-opp-meta">${combinedProb}% combined<br>~$${kdol}/leg</div>
+          <div class="temp-opp-conf" style="color:#8b5cf6;">COMBO</div>
+          <div class="temp-opp-meta">liq ${b.liq_grade||'?'}</div>
+        </div>
+      </div>
+    </div>`;
+  }
+
   const fc     = b.forecast||{};
   const mtype  = b.market_type;
   const muBest = mtype==='high' ? fc.best_high : fc.best_low;

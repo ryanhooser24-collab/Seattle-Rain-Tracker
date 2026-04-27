@@ -1071,6 +1071,177 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
     return analyzed
 
 
+def detect_combo_signals(all_markets, forecast):
+    """
+    Find adjacent bracket pairs where both have independent positive edge.
+    When the model center sits near a bracket boundary, two adjacent brackets
+    can each have positive edge — buying both covers a wider range at combined
+    probability much closer to 100% than either bracket alone.
+
+    Conditions for a valid combo:
+    1. Both brackets have net_gap_c > 0 independently (both positive edge)
+    2. Brackets are contiguous — hi of A == lo of B (or one is open-ended tail)
+    3. Combined probability >= 0.85 (meaningful coverage)
+    4. Combined cost still leaves positive edge vs combined probability
+
+    Returns list of combo signal dicts, sorted by combined_net_edge_c desc.
+    """
+    from math import erf, sqrt as _sqrt
+
+    def normcdf(x):
+        return 0.5 * (1 + erf(x / _sqrt(2)))
+
+    def bracket_prob_combined(lo, hi, mu, sigma):
+        """P(actual < hi) for open-left or P(lo <= actual < hi) for bounded."""
+        if sigma <= 0: return 0.0
+        lo_p = normcdf((lo - 0.5 - mu) / sigma) if lo is not None else 0.0
+        hi_p = normcdf((hi + 0.5 - mu) / sigma) if hi is not None else 1.0
+        return max(0.0, hi_p - lo_p)
+
+    mu    = forecast.get("best_high")
+    sigma = forecast.get("sigma", 2.0)
+    if mu is None or sigma <= 0:
+        return []
+
+    # Only consider brackets with positive independent edge (not skip)
+    candidates = [m for m in all_markets
+                  if m.get("net_gap_c", 0) > 0
+                  and m.get("grade") not in ("skip",)
+                  and m.get("yes_ask", 0) > 0.02
+                  and m.get("yes_ask", 0) < 0.98]
+
+    combos = []
+    seen   = set()
+
+    for i, a in enumerate(candidates):
+        for b in candidates:
+            if b is a: continue
+            ta = a.get("ticker", "")
+            tb = b.get("ticker", "")
+            pair_key = tuple(sorted([ta, tb]))
+            if pair_key in seen: continue
+
+            lo_a = a.get("lo_temp")
+            hi_a = a.get("hi_temp")
+            lo_b = b.get("lo_temp")
+            hi_b = b.get("hi_temp")
+
+            # Check contiguity: hi_a == lo_b (A is lower bracket, B is upper)
+            # Also handle: A is open-ended tail (<X), B starts at X
+            is_contiguous = False
+            if hi_a is not None and lo_b is not None and abs(hi_a - lo_b) < 0.1:
+                is_contiguous = True  # A lower, B upper
+            elif hi_b is not None and lo_a is not None and abs(hi_b - lo_a) < 0.1:
+                is_contiguous = True  # B lower, A upper — swap so A is always lower
+                a, b = b, a
+                lo_a, hi_a, lo_b, hi_b = lo_b, hi_b, lo_a, hi_a
+                ta, tb = tb, ta
+            # Open-ended tail (<X) adjacent to bounded (X to X+2)
+            elif lo_a is None and hi_a is not None and lo_b is not None and abs(hi_a - lo_b) < 0.1:
+                is_contiguous = True  # tail <X + X-to-Y
+            elif lo_b is None and hi_b is not None and lo_a is not None and abs(hi_b - lo_a) < 0.1:
+                is_contiguous = True  # swap: tail <X + X-to-Y
+                a, b = b, a
+                lo_a, hi_a, lo_b, hi_b = lo_b, hi_b, lo_a, hi_a
+                ta, tb = tb, ta
+
+            if not is_contiguous:
+                continue
+
+            seen.add(pair_key)
+
+            # Combined coverage: lo_a to hi_b (or open-ended)
+            combined_lo = lo_a  # None if tail on left
+            combined_hi = hi_b  # None if open-ended on right
+
+            # Combined probability — area under normal between combined bounds
+            combined_prob = bracket_prob_combined(combined_lo, combined_hi, mu, sigma)
+
+            if combined_prob < 0.85:
+                continue  # not enough combined coverage to bother
+
+            # Combined cost (buying both YES contracts)
+            cost_a = a.get("yes_ask", 0)
+            cost_b = b.get("yes_ask", 0)
+            combined_cost = cost_a + cost_b  # total spend per $1 payout on winner
+
+            # Combined edge: model probability of combined range vs total cost
+            # If combined_prob = 0.97 and combined_cost = 0.20, edge = +77¢
+            combined_gap_c = round((combined_prob - combined_cost) * 100)
+
+            # Spread cost: use worst spread of the two brackets
+            spr_a = max(0, round((a.get("yes_ask",0) - a.get("yes_bid",0)) * 100))
+            spr_b = max(0, round((b.get("yes_ask",0) - b.get("yes_bid",0)) * 100))
+            combined_spr  = spr_a + spr_b
+            combined_net  = combined_gap_c - combined_spr
+
+            if combined_net <= 0:
+                continue
+
+            # Kelly sizing for combo: treat as single bet
+            # combined_cost is the total outlay per $1 payout
+            # EV = combined_prob * (1 - combined_cost) - (1 - combined_prob) * combined_cost
+            if 0 < combined_cost < 1:
+                b_odds  = (1 - combined_cost) / combined_cost
+                kelly   = (combined_prob * b_odds - (1 - combined_prob)) / b_odds
+                kelly_h = max(0.0, round(kelly * 0.5, 3))
+                kelly_sz = round(kelly_h * 100, 2)
+            else:
+                kelly_h = kelly_sz = 0.0
+
+            # Grade by combined net edge and combined probability
+            edge_ratio_combo = round(combined_net / sigma, 3) if sigma > 0 else 0
+            if combined_net >= 15 and combined_prob >= 0.90 and edge_ratio_combo >= 0.12:
+                combo_grade = "A"
+            elif combined_net >= 8 and combined_prob >= 0.85 and edge_ratio_combo >= 0.07:
+                combo_grade = "B"
+            else:
+                continue  # not worth surfacing
+
+            # Build label
+            if combined_lo is None:
+                combo_label = f"<{int(combined_hi)}°F"
+            elif combined_hi is None:
+                combo_label = f">{int(combined_lo)}°F"
+            else:
+                combo_label = f"{int(combined_lo)}–{int(combined_hi)}°F"
+
+            combos.append({
+                "is_combo":        True,
+                "ticker":          f"COMBO:{ta}+{tb}",   # synthetic ticker for display
+                "tickers":         [ta, tb],
+                "bracket_label":   combo_label,
+                "leg_a":           a,
+                "leg_b":           b,
+                "lo_temp":         combined_lo,
+                "hi_temp":         combined_hi,
+                "combined_prob":   round(combined_prob, 4),
+                "combined_cost_c": round(combined_cost * 100),
+                "combined_net_edge_c": combined_net,
+                "combined_gap_c":  combined_gap_c,
+                "net_gap_c":       combined_net,   # for sort compatibility
+                "gap_c":           combined_gap_c,
+                "yes_ask":         combined_cost,
+                "model_prob":      round(combined_prob, 4),
+                "mu":              mu,
+                "sigma":           sigma,
+                "kelly_frac":      kelly_h,
+                "kelly_size":      kelly_sz,
+                "edge_ratio":      edge_ratio_combo,
+                "grade":           combo_grade,
+                "actionable":      True,
+                "liq_grade":       min(a.get("liq_grade","C"), b.get("liq_grade","C"),
+                                       key=lambda x: {"A":0,"B":1,"C":2,"D":3}.get(x,4)),
+                "hours_to_cutoff": min(
+                    a.get("hours_to_cutoff") or 999,
+                    b.get("hours_to_cutoff") or 999),
+                "mkt_rank_conf":   "combo",
+            })
+
+    combos.sort(key=lambda x: -x["combined_net_edge_c"])
+    return combos
+
+
 def scan_temp_city(city_key, horizon="d1"):
     """
     Full pipeline for one temp city: forecast + both market types + analysis.
@@ -1114,11 +1285,15 @@ def scan_temp_city(city_key, horizon="d1"):
         high_markets = [m for m in high_markets if m.get("grade") != "skip" or m.get("skip_reason") not in ("settled","expired","past_date")]
         low_markets  = [m for m in low_markets  if m.get("grade") != "skip" or m.get("skip_reason") not in ("settled","expired","past_date")]
 
-        # Best edge across both market types
+        # Detect combo signals — adjacent bracket pairs with combined positive edge
+        combo_signals = detect_combo_signals(high_markets, fc)
+
+        # Best edge across both market types (including combos)
         all_mkts = [m for m in high_markets + low_markets if m.get("actionable")]
-        best_edge = max((m["net_gap_c"] for m in all_mkts), default=0)
-        best_grade = "A" if any(m["grade"] == "A" for m in all_mkts) else \
-                     "B" if any(m["grade"] == "B" for m in all_mkts) else "none"
+        all_actionable = all_mkts + [c for c in combo_signals if c.get("actionable")]
+        best_edge  = max((m["net_gap_c"] for m in all_actionable), default=0)
+        best_grade = "A" if any(m["grade"] == "A" for m in all_actionable) else \
+                     "B" if any(m["grade"] == "B" for m in all_actionable) else "none"
 
         result = {
             "ok":             True,
@@ -1129,10 +1304,11 @@ def scan_temp_city(city_key, horizon="d1"):
             "forecast":       fc,
             "high_markets":   high_markets,
             "low_markets":    low_markets,
+            "combo_signals":  combo_signals,
             "low_suppressed": horizon == "d1",
             "best_edge_c":    best_edge,
             "best_grade":     best_grade,
-            "actionable_count": len(all_mkts),
+            "actionable_count": len(all_actionable),
         }
 
         _TEMP_SCAN_CACHE[cache_key] = {"ts": _t.time(), "result": result}
@@ -1583,8 +1759,39 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
     Walks the order book while grade holds at min_grade.
     Kelly is calculated once at scan time and used as the total budget
     for this ticker across all fills — not recalculated per level.
+
+    For combo signals (is_combo=True): places two separate orders, one per leg,
+    splitting the Kelly budget evenly. Both legs must pass grade check.
     Returns number of fills placed.
     """
+    # ── Combo signal handler ────────────────────────────────────────────────
+    if signal.get("is_combo"):
+        leg_a   = signal.get("leg_a", {})
+        leg_b   = signal.get("leg_b", {})
+        city_key = signal.get("city_key", "")
+        at_log("SCAN", f"Combo signal: {leg_a.get('ticker')} + {leg_b.get('ticker')} "
+               f"combined_prob={signal.get('combined_prob',0):.1%} "
+               f"net_edge={signal.get('combined_net_edge_c')}¢",
+               city=city_key)
+        # Split Kelly budget evenly across both legs
+        combo_budget = min(
+            signal.get("kelly_size", 0.0) or 0.0,
+            cfg.get("max_per_ticker", 75.0)
+        ) * (cfg.get("bankroll_unit", 100.0) / 100.0) * (cfg.get("kelly_mult", 0.5) / 0.5)
+        leg_budget = round(combo_budget / 2, 2)
+        signal["kelly_size"] = leg_budget
+
+        fills = 0
+        for leg in [leg_a, leg_b]:
+            leg["city_key"] = city_key
+            leg["forecast"] = signal.get("forecast", {})
+            leg_signal = dict(signal)
+            leg_signal.update(leg)
+            leg_signal["is_combo"] = False   # prevent recursion
+            leg_signal["kelly_size"] = leg_budget
+            fills += at_execute_signal(leg_signal, cfg, open_positions, city_counts, ticker_spent)
+        return fills
+
     ticker    = signal.get("ticker", "")
     city_key  = signal.get("city_key", "")
     grade     = signal.get("grade", "")
@@ -1790,7 +1997,7 @@ def run_auto_trader_cycle(force=False):
                 if not result.get("ok"):
                     continue
 
-                all_markets = result.get("high_markets", []) + result.get("low_markets", [])
+                all_markets = result.get("high_markets", []) + result.get("low_markets", []) + result.get("combo_signals", [])
                 for signal in all_markets:
                     g = signal.get("grade", "skip")
                     if g == "skip" or not signal.get("actionable"):
@@ -5781,7 +5988,12 @@ def _run_background_scan():
                 if result.get("ok"):
                     fc = result.get("forecast", {})
                     all_mkts = result.get("high_markets", []) + result.get("low_markets", [])
+                    # Log individual brackets (all grades) for calibration
                     _paper_trade_log(city_key, fc, all_mkts)
+                    # Log combo signals as A-grade paper trades if applicable
+                    for combo in result.get("combo_signals", []):
+                        if combo.get("grade") in ("A", "B"):
+                            _paper_trade_log(city_key, fc, [combo])
                 total += 1
             except Exception:
                 pass
