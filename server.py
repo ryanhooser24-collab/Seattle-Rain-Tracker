@@ -1033,16 +1033,28 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
     #   top2         — model center in market's #2 bracket
     #   outside_top2 — model center outside market's top 2 brackets
     #   skip         — bracket graded skip, not evaluated
-    _all_asks = sorted(
-        [x for x in analyzed if x.get("yes_ask", 0) > 0.02],
-        key=lambda x: -x.get("yes_ask", 0)
-    )
-    _top1_key = (_all_asks[0].get("lo_temp"), _all_asks[0].get("hi_temp")) if len(_all_asks) > 0 else None
-    _top2_key = (_all_asks[1].get("lo_temp"), _all_asks[1].get("hi_temp")) if len(_all_asks) > 1 else None
+    #   tail_only    — tail market with only 1 bracket (can't rank meaningfully)
+    #
+    # TAIL BRACKET GUARD: Tail markets (e.g. <89°F, >95°F) are separate Kalshi
+    # series with only one bracket. Ranking a single bracket against itself
+    # always produces top1 — which is meaningless. Flag these as "tail_only"
+    # so they don't pollute the mkt_rank_conf calibration data.
+    _tradeable_asks = [x for x in analyzed if x.get("yes_ask", 0) > 0.02]
+    _is_tail_series = len(_tradeable_asks) <= 1  # only one bracket in this series
+
+    if not _is_tail_series:
+        _all_asks = sorted(_tradeable_asks, key=lambda x: -x.get("yes_ask", 0))
+        _top1_key = (_all_asks[0].get("lo_temp"), _all_asks[0].get("hi_temp")) if len(_all_asks) > 0 else None
+        _top2_key = (_all_asks[1].get("lo_temp"), _all_asks[1].get("hi_temp")) if len(_all_asks) > 1 else None
+    else:
+        _top1_key = _top2_key = None
 
     for m in analyzed:
         if m.get("grade") == "skip":
             m["mkt_rank_conf"] = "skip"
+            continue
+        if _is_tail_series:
+            m["mkt_rank_conf"] = "tail_only"
             continue
         _key = (m.get("lo_temp"), m.get("hi_temp"))
         if _key == _top1_key:
