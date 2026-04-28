@@ -1128,22 +1128,29 @@ def detect_combo_signals(all_markets, forecast):
 
             # Check contiguity: hi_a == lo_b (A is lower bracket, B is upper)
             # Also handle: A is open-ended tail (<X), B starts at X
+            # Contiguity: brackets are adjacent if hi of lower == lo of upper,
+            # OR they differ by 1 (Kalshi stores e.g. 82-83 as hi=83, 84-85 as lo=84)
+            # Use threshold of 1.5 to handle both cases cleanly.
             is_contiguous = False
-            if hi_a is not None and lo_b is not None and abs(hi_a - lo_b) < 0.1:
-                is_contiguous = True  # A lower, B upper
-            elif hi_b is not None and lo_a is not None and abs(hi_b - lo_a) < 0.1:
-                is_contiguous = True  # B lower, A upper — swap so A is always lower
-                a, b = b, a
-                lo_a, hi_a, lo_b, hi_b = lo_b, hi_b, lo_a, hi_a
-                ta, tb = tb, ta
-            # Open-ended tail (<X) adjacent to bounded (X to X+2)
-            elif lo_a is None and hi_a is not None and lo_b is not None and abs(hi_a - lo_b) < 0.1:
-                is_contiguous = True  # tail <X + X-to-Y
-            elif lo_b is None and hi_b is not None and lo_a is not None and abs(hi_b - lo_a) < 0.1:
-                is_contiguous = True  # swap: tail <X + X-to-Y
-                a, b = b, a
-                lo_a, hi_a, lo_b, hi_b = lo_b, hi_b, lo_a, hi_a
-                ta, tb = tb, ta
+            if hi_a is not None and lo_b is not None and abs(hi_a - lo_b) <= 1.5:
+                if lo_b >= hi_a:  # B is above A
+                    is_contiguous = True
+            if not is_contiguous and hi_b is not None and lo_a is not None and abs(hi_b - lo_a) <= 1.5:
+                if lo_a >= hi_b:  # A is above B — swap so A is always lower
+                    is_contiguous = True
+                    a, b = b, a
+                    lo_a, hi_a, lo_b, hi_b = lo_b, hi_b, lo_a, hi_a
+                    ta, tb = tb, ta
+            # Open-ended tail (<X) adjacent to bounded bracket starting at X or X+1
+            if not is_contiguous and lo_a is None and hi_a is not None and lo_b is not None:
+                if abs(hi_a - lo_b) <= 1.5 and lo_b >= hi_a:
+                    is_contiguous = True
+            if not is_contiguous and lo_b is None and hi_b is not None and lo_a is not None:
+                if abs(hi_b - lo_a) <= 1.5 and lo_a >= hi_b:
+                    is_contiguous = True
+                    a, b = b, a
+                    lo_a, hi_a, lo_b, hi_b = lo_b, hi_b, lo_a, hi_a
+                    ta, tb = tb, ta
 
             if not is_contiguous:
                 continue

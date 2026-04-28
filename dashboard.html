@@ -1706,23 +1706,36 @@ function renderTempCard(b){
   const isOpenLo = lo==null;
   const bLo = lo!=null ? lo : center-2;
   const bHi = hi!=null ? hi : center+2;
+  // True settlement window: NWS rounds to nearest integer, so bracket [lo,hi]
+  // captures actual temps from (lo-0.5) to (hi+0.5).
+  // The bracket bar and axis should reflect this half-integer shift.
+  const settleLo = bLo - 0.5;  // actual temp boundary (left)
+  const settleHi = bHi + 0.5;  // actual temp boundary (right)
   const modelMin = Math.min(muGfs||center, muEc||center, muBlend||center, center);
   const modelMax = Math.max(muGfs||center, muEc||center, muBlend||center, center);
-  const axMin = Math.floor(Math.min(modelMin - 0.5, bLo - 0.5));
-  const axMax = Math.ceil(Math.max(modelMax + 0.5, bHi + 0.5));
+  const axMin = Math.floor(Math.min(modelMin - 0.5, settleLo - 0.5));
+  const axMax = Math.ceil(Math.max(modelMax + 0.5, settleHi + 0.5));
   const axRange = axMax - axMin || 1;
   const pct = function(v){ return ((v-axMin)/axRange*100).toFixed(2); };
+  // Axis ticks show labeled bracket integers AND settlement boundaries
   const ticks = [axMin, axMax];
   if(!isOpenLo) ticks.push(bLo);
   if(!isOpenHi) ticks.push(bHi);
+  // Settlement boundary ticks — show labeled integer but position at ±0.5
+  const settleTicks = [];
+  if(!isOpenLo) settleTicks.push({v: settleLo, label: bLo+'°'});
+  if(!isOpenHi) settleTicks.push({v: settleHi, label: (bHi+1)+'°'});
   const seen = {}; const tickHtml = ticks.filter(function(t){ if(seen[t]) return false; seen[t]=true; return true; }).map(function(t){
     return '<div style="position:absolute;top:54px;left:'+pct(t)+'%;font-size:9px;color:var(--muted);transform:translateX(-50%);white-space:nowrap;">'+t+'°</div>';
+  }).join('')+settleTicks.map(function(t){
+    return '<div style="position:absolute;top:44px;left:'+pct(t.v)+'%;font-size:8px;color:#3B6D11;transform:translateX(-50%);white-space:nowrap;opacity:0.7;">'+t.label+'</div>';
   }).join('');
   const dotLeft = muBest!=null ? pct(muBest) : '50';
-  const bLeft   = isOpenLo ? '0' : pct(bLo);
+  // Bracket bar uses settlement boundaries (±0.5 from labeled integers)
+  const bLeft   = isOpenLo ? '0' : pct(settleLo);
   const bWidth  = isOpenHi ? (100 - parseFloat(bLeft) - 0.5).toFixed(2)
-                : isOpenLo ? parseFloat(pct(bHi)).toFixed(2)
-                : ((bHi-bLo)/axRange*100).toFixed(2);
+                : isOpenLo ? parseFloat(pct(settleHi)).toFixed(2)
+                : ((settleHi - settleLo) / axRange * 100).toFixed(2);
   const rows = [
     '<div data-tip="Kalshi ask price — what you pay per contract." style="display:flex;align-items:center;gap:8px;margin-bottom:6px;"><div style="font-size:10px;color:var(--muted);width:52px;flex-shrink:0;">Market</div><div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden;"><div style="width:'+barMkt+'%;height:100%;background:#888780;border-radius:3px;"></div></div><div style="font-size:11px;font-weight:500;width:28px;text-align:right;color:var(--muted);">'+askC+'\u00a2</div></div>',
     '<div data-tip="GFS + ECMWF + blend, bias-corrected." style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><div style="font-size:10px;color:var(--muted);width:52px;flex-shrink:0;">Model</div><div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden;"><div style="width:'+barMdl+'%;height:100%;background:#3B6D11;border-radius:3px;"></div></div><div style="font-size:11px;font-weight:500;width:28px;text-align:right;color:#3B6D11;">'+probC+'%</div></div>',
@@ -1783,8 +1796,8 @@ function renderTempCard(b){
     +'<div style="position:relative;height:68px;margin:0 4px;">'
     +'<div style="position:absolute;top:34px;left:0;right:0;height:4px;background:var(--border);border-radius:2px;"></div>'
     +'<div style="position:absolute;top:34px;left:'+bLeft+'%;width:'+bWidth+'%;height:4px;background:#C0DD97;"></div>'
-    +(isOpenLo ? '' : '<div style="position:absolute;top:30px;left:'+bLeft+'%;height:12px;border-left:1.5px solid #3B6D11;"></div>')
-    +(isOpenHi ? '' : '<div style="position:absolute;top:30px;left:'+pct(bHi)+'%;height:12px;border-left:1.5px solid #3B6D11;"></div>')
+    +(isOpenLo ? '' : '<div style="position:absolute;top:30px;left:'+bLeft+'%;height:12px;border-left:1.5px solid #3B6D11;" title="Settlement boundary: '+(bLo-0.5)+'°F (rounds to '+bLo+'°F)"></div>')
+    +(isOpenHi ? '' : '<div style="position:absolute;top:30px;left:'+pct(settleHi)+'%;height:12px;border-left:1.5px solid #3B6D11;" title="Settlement boundary: '+(bHi+0.5)+'°F (rounds to '+(bHi+1)+'°F)"></div>')
     +(muEc!=null ? '<div style="position:absolute;top:26px;left:'+pct(muEc)+'%;width:1.5px;height:14px;background:#D85A30;border-radius:1px;transform:translateX(-50%);"></div>' : '')
     +(muEc!=null ? '<div style="position:absolute;top:14px;left:'+pct(muEc)+'%;font-size:9px;color:#D85A30;transform:translateX(-50%);white-space:nowrap;">'+ecLbl+'</div>' : '')
     +(muBlend!=null ? '<div style="position:absolute;top:26px;left:'+pct(muBlend)+'%;width:1.5px;height:14px;background:#7F77DD;border-radius:1px;transform:translateX(-50%);"></div>' : '')
