@@ -1679,12 +1679,9 @@ function renderTempCard(b){
             Combined prob <b>${combinedProb}%</b> · cost <b>${combinedCost}¢</b> · net edge <b>+${netEdge}¢</b>
           </div>
           <div class="temp-opp-ctx" style="margin-top:2px;">
-            ${(()=>{
-              const mkUrl=t=>{const p=t.toLowerCase();const s=p.split('-')[0];return 'https://kalshi.com/markets/'+s+'/'+p;};
-              return '<a href="'+mkUrl(la.ticker||'')+'" target="_blank" onclick="event.stopPropagation()" style="color:#8b5cf6;text-decoration:none;border-bottom:1px dotted #8b5cf6;">Leg A: '+la.bracket_label+' @ '+Math.round((la.yes_ask||0)*100)+'¢ ↗</a>'
-              +' · '
-              +'<a href="'+mkUrl(lb.ticker||'')+'" target="_blank" onclick="event.stopPropagation()" style="color:#8b5cf6;text-decoration:none;border-bottom:1px dotted #8b5cf6;">Leg B: '+lb.bracket_label+' @ '+Math.round((lb.yes_ask||0)*100)+'¢ ↗</a>';
-            })()}
+            <button onclick="event.stopPropagation();navigator.clipboard.writeText('${la.ticker||''}').then(function(){var el=event.target;var orig=el.textContent;el.textContent='✓ Copied';el.style.color='#3B6D11';setTimeout(function(){el.textContent=orig;el.style.color='';},1500);})" style="font-size:9px;background:none;border:none;padding:0;cursor:pointer;color:var(--muted);font-family:inherit;">Leg A: ${la.bracket_label||''} @ ${Math.round((la.yes_ask||0)*100)}¢ ⊙</button>
+            · 
+            <button onclick="event.stopPropagation();navigator.clipboard.writeText('${lb.ticker||''}').then(function(){var el=event.target;var orig=el.textContent;el.textContent='✓ Copied';el.style.color='#3B6D11';setTimeout(function(){el.textContent=orig;el.style.color='';},1500);})" style="font-size:9px;background:none;border:none;padding:0;cursor:pointer;color:var(--muted);font-family:inherit;">Leg B: ${lb.bracket_label||''} @ ${Math.round((lb.yes_ask||0)*100)}¢ ⊙</button>
           </div>
         </div>
         <div class="temp-opp-right">
