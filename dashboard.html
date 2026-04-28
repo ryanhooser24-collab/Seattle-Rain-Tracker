@@ -1649,20 +1649,38 @@ function renderTempCard(b){
     const netEdge=b.combined_net_edge_c||b.net_gap_c||0;
     const kdol=((b.kelly_size||0)/2).toFixed(2);
     const grade=b.grade||'B';
-    return `<div class="temp-opp grade-${grade}" style="border-left:3px solid #8b5cf6;">
+    const fc=b.forecast||{};
+    const htc=b.hours_to_cutoff;
+    const htcStr=htc==null?'':
+      htc<=0?' · <span style="color:#A32D2D;font-weight:500">past cutoff</span>':
+      htc<=4?' · <span style="color:#A32D2D;font-weight:500">'+Math.round(htc)+'h to cutoff</span>':
+      htc<=12?' · <span style="color:#BA7517;font-weight:500">'+Math.round(htc)+'h to cutoff</span>':
+      ' · <span style="color:var(--muted)">'+Math.round(htc)+'h</span>';
+    // Leg detail rows for expanded view
+    const legRows=[la,lb].map((leg,i)=>`
+      <div style="background:var(--bg);border:0.5px solid var(--border);border-radius:6px;padding:8px 10px;margin-bottom:6px;">
+        <div style="font-size:10px;color:var(--muted);margin-bottom:3px;">Leg ${i===0?'A':'B'} — ${leg.bracket_label||''}</div>
+        <div style="display:flex;gap:16px;font-size:11px;">
+          <span>mkt <b>${Math.round((leg.yes_ask||0)*100)}¢</b></span>
+          <span>model <b>${Math.round((leg.model_prob||0)*100)}%</b></span>
+          <span>edge <b>+${leg.net_gap_c||0}¢</b></span>
+          <span>σ <b>${(leg.sigma||0).toFixed(1)}°F</b></span>
+        </div>
+      </div>`).join('');
+    return `<div class="temp-opp grade-${grade}" style="border-left:3px solid #8b5cf6;" onclick="this.classList.toggle('open')">
       <div class="temp-opp-inner">
         <div class="temp-opp-left">
-          <div class="temp-opp-city">${b.city_label||b.city_key||''} · ${(b.forecast||{}).target_date||''} · COMBO</div>
+          <div class="temp-opp-city">${b.city_label||b.city_key||''} · ${(fc.target_date||'').replace('2026-','')} · ${fc.nws_station||''}${htcStr}</div>
           <div class="temp-opp-decision" style="color:#8b5cf6;">
             Buy ${la.bracket_label||''} + ${lb.bracket_label||''} YES
             <span class="gbadge" style="background:rgba(139,92,246,0.2);color:#8b5cf6;">${grade}</span>
           </div>
           <div class="temp-opp-ctx">
-            Combined prob <b>${combinedProb}¢</b> · cost <b>${combinedCost}¢</b> · net edge <b>+${netEdge}¢</b>
+            Combined prob <b>${combinedProb}%</b> · cost <b>${combinedCost}¢</b> · net edge <b>+${netEdge}¢</b>
           </div>
           <div class="temp-opp-ctx" style="margin-top:2px;">
-            Leg A: ${la.bracket_label} @ ${Math.round((la.yes_ask||0)*100)}¢ · 
-            Leg B: ${lb.bracket_label} @ ${Math.round((lb.yes_ask||0)*100)}¢
+            Leg A: ${la.bracket_label||''} @ ${Math.round((la.yes_ask||0)*100)}¢ · 
+            Leg B: ${lb.bracket_label||''} @ ${Math.round((lb.yes_ask||0)*100)}¢
           </div>
         </div>
         <div class="temp-opp-right">
@@ -1670,6 +1688,15 @@ function renderTempCard(b){
           <div class="temp-opp-meta">${combinedProb}% combined<br>~$${kdol}/leg</div>
           <div class="temp-opp-conf" style="color:#8b5cf6;">COMBO</div>
           <div class="temp-opp-meta">liq ${b.liq_grade||'?'}</div>
+        </div>
+      </div>
+      <div class="bracket-detail">
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <div style="font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;">Combo legs</div>
+          ${legRows}
+          <div style="font-size:10px;color:var(--muted);border-top:0.5px solid var(--border);padding-top:8px;">
+            μ ${(b.mu||0).toFixed(1)}°F · σ ${(b.sigma||0).toFixed(1)}°F · edge ratio ${(b.edge_ratio||0).toFixed(2)} · ~$${kdol}/leg kelly
+          </div>
         </div>
       </div>
     </div>`;
