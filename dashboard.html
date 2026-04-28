@@ -1679,8 +1679,12 @@ function renderTempCard(b){
             Combined prob <b>${combinedProb}%</b> · cost <b>${combinedCost}¢</b> · net edge <b>+${netEdge}¢</b>
           </div>
           <div class="temp-opp-ctx" style="margin-top:2px;">
-            Leg A: ${la.bracket_label||''} @ ${Math.round((la.yes_ask||0)*100)}¢ · 
-            Leg B: ${lb.bracket_label||''} @ ${Math.round((lb.yes_ask||0)*100)}¢
+            ${(()=>{
+              const mkUrl=t=>{const p=t.toLowerCase();const s=p.split('-')[0];return 'https://kalshi.com/markets/'+s+'/'+p;};
+              return '<a href="'+mkUrl(la.ticker||'')+'" target="_blank" onclick="event.stopPropagation()" style="color:#8b5cf6;text-decoration:none;border-bottom:1px dotted #8b5cf6;">Leg A: '+la.bracket_label+' @ '+Math.round((la.yes_ask||0)*100)+'¢ ↗</a>'
+              +' · '
+              +'<a href="'+mkUrl(lb.ticker||'')+'" target="_blank" onclick="event.stopPropagation()" style="color:#8b5cf6;text-decoration:none;border-bottom:1px dotted #8b5cf6;">Leg B: '+lb.bracket_label+' @ '+Math.round((lb.yes_ask||0)*100)+'¢ ↗</a>';
+            })()}
           </div>
         </div>
         <div class="temp-opp-right">
