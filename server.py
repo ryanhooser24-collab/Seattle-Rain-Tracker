@@ -3664,6 +3664,44 @@ def ensure_tables():
                 CREATE UNIQUE INDEX IF NOT EXISTS calibration_snapshots_ticker_date_idx
                     ON calibration_snapshots (ticker, target_date);
             """)
+            # price_history — continuous price/forecast snapshots every scan cycle
+            # Used to measure lag between model forecast shifts and market repricing.
+            # Every bracket for every city logged on every scan — no grade filter.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS price_history (
+                    id              BIGSERIAL PRIMARY KEY,
+                    scan_ts         TIMESTAMPTZ DEFAULT NOW(),
+                    city            TEXT NOT NULL,
+                    target_date     DATE NOT NULL,
+                    horizon         TEXT,           -- d0 or d1
+                    ticker          TEXT NOT NULL,
+                    bracket_label   TEXT,
+                    lo_temp         NUMERIC(5,1),
+                    hi_temp         NUMERIC(5,1),
+                    -- Market prices at scan time
+                    yes_ask         NUMERIC(6,4),
+                    yes_bid         NUMERIC(6,4),
+                    volume_24h      INTEGER,
+                    open_interest   INTEGER,
+                    -- Model forecast at scan time
+                    mu              NUMERIC(6,2),   -- model center (best_high)
+                    gfs_high        NUMERIC(5,1),
+                    ecmwf_high      NUMERIC(5,1),
+                    sigma           NUMERIC(6,3),
+                    -- Derived
+                    model_prob      NUMERIC(6,4),
+                    net_gap_c       INTEGER,
+                    grade           TEXT
+                );
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS price_history_ticker_ts_idx
+                    ON price_history (ticker, scan_ts DESC);
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS price_history_city_date_idx
+                    ON price_history (city, target_date, scan_ts DESC);
+            """)
         conn.commit()
         print("  ✅ DB tables ready")
     except Exception as e:
@@ -5731,6 +5769,39 @@ class Handler(BaseHTTPRequestHandler):
                         results["calibration_snapshots_idx"] = "ok"
                 except Exception as e:
                     results["calibration_snapshots_idx"] = str(e)
+                # Create price_history table if missing
+                try:
+                    conn_ph = get_db()
+                    if conn_ph:
+                        with conn_ph.cursor() as cur:
+                            cur.execute("""
+                                CREATE TABLE IF NOT EXISTS price_history (
+                                    id BIGSERIAL PRIMARY KEY,
+                                    scan_ts TIMESTAMPTZ DEFAULT NOW(),
+                                    city TEXT NOT NULL, target_date DATE NOT NULL,
+                                    horizon TEXT, ticker TEXT NOT NULL,
+                                    bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1),
+                                    yes_ask NUMERIC(6,4), yes_bid NUMERIC(6,4),
+                                    volume_24h INTEGER, open_interest INTEGER,
+                                    mu NUMERIC(6,2), gfs_high NUMERIC(5,1),
+                                    ecmwf_high NUMERIC(5,1), sigma NUMERIC(6,3),
+                                    model_prob NUMERIC(6,4), net_gap_c INTEGER, grade TEXT
+                                )
+                            """)
+                            cur.execute("""
+                                CREATE INDEX IF NOT EXISTS price_history_ticker_ts_idx
+                                ON price_history (ticker, scan_ts DESC)
+                            """)
+                            cur.execute("""
+                                CREATE INDEX IF NOT EXISTS price_history_city_date_idx
+                                ON price_history (city, target_date, scan_ts DESC)
+                            """)
+                        conn_ph.commit()
+                        conn_ph.close()
+                        results["price_history"] = "ok"
+                except Exception as e:
+                    results["price_history"] = str(e)
+
                 # Migration: add all new columns to existing tables if missing
                 _new_columns = [
                     ("mkt_rank_conf",          "TEXT"),
@@ -5846,6 +5917,57 @@ def _background_scan_scheduler():
         except Exception as e:
             print(f"  ⚠️  Background scan error: {e}")
         _t.sleep(_SCAN_INTERVAL_SECS)
+
+
+def _price_history_log(city_key, fc, markets):
+    """
+    Log price + forecast snapshot for every bracket every scan cycle.
+    No grade filter — logs all brackets including skip.
+    This builds the time series needed to measure:
+      - How fast markets reprice after model forecast shifts
+      - Whether price momentum predicts continued movement
+      - The lag window between HRRR/GFS updates and market repricing
+    """
+    try:
+        conn = get_db()
+        if not conn: return
+        rows = []
+        for m in markets:
+            if not m.get("ticker"): continue
+            rows.append((
+                city_key,
+                fc.get("target_date"),
+                fc.get("horizon"),
+                m["ticker"],
+                m.get("bracket_label"),
+                m.get("lo_temp"),
+                m.get("hi_temp"),
+                m.get("yes_ask"),
+                m.get("yes_bid"),
+                m.get("volume_24h"),
+                m.get("open_interest"),
+                m.get("mu") or fc.get("best_high"),
+                fc.get("gfs_high"),
+                fc.get("ecmwf_high"),
+                m.get("sigma") or fc.get("sigma"),
+                m.get("model_prob"),
+                m.get("net_gap_c"),
+                m.get("grade"),
+            ))
+        if not rows: return
+        with conn.cursor() as cur:
+            cur.executemany("""
+                INSERT INTO price_history
+                (city, target_date, horizon, ticker, bracket_label,
+                 lo_temp, hi_temp, yes_ask, yes_bid, volume_24h,
+                 open_interest, mu, gfs_high, ecmwf_high, sigma,
+                 model_prob, net_gap_c, grade)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, rows)
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"  ⚠️  _price_history_log error: {e}")
 
 
 def _paper_trade_log(city_key, fc, markets):
@@ -5995,7 +6117,9 @@ def _run_background_scan():
                 if result.get("ok"):
                     fc = result.get("forecast", {})
                     all_mkts = result.get("high_markets", []) + result.get("low_markets", [])
-                    # Log individual brackets (all grades) for calibration
+                    # Price history — log ALL brackets every scan for time series analysis
+                    _price_history_log(city_key, fc, all_mkts)
+                    # Calibration — log all grades for bias/market rank analysis
                     _paper_trade_log(city_key, fc, all_mkts)
                     # Log combo signals as A-grade paper trades if applicable
                     for combo in result.get("combo_signals", []):
