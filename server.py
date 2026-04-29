@@ -1021,26 +1021,27 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
         })
         analyzed.append(m)
 
-    # ── Market rank confirmation (DISPLAY ONLY — no grade effect) ────────────
+    # ── Market rank confirmation ──────────────────────────────────────────────
     # Rank all brackets by market price (yes_ask) descending.
     # Market's #1 bracket = highest yes_ask = market's most confident outcome.
-    # Logged to calibration_snapshots so we can measure win rate by rank bucket
-    # after 30+ settled trades and decide empirically whether to apply grade
-    # adjustments.
     #
-    # mkt_rank_conf values:
-    #   top1         — model center in market's #1 bracket (highest yes_ask)
-    #   top2         — model center in market's #2 bracket
-    #   outside_top2 — model center outside market's top 2 brackets
-    #   skip         — bracket graded skip, not evaluated
-    #   tail_only    — tail market with only 1 bracket (can't rank meaningfully)
+    # Grade adjustment rules (activated based on observed loss pattern):
+    #   top1         — model in market's #1 bracket → grade bumps one level
+    #   top2         — model in market's #2 bracket → grade unchanged
+    #   outside_top2 — model outside top 2 → grade drops one level
+    #   tail_only    — single bracket series → no adjustment (can't rank)
+    #   skip         — already skip → unchanged
     #
-    # TAIL BRACKET GUARD: Tail markets (e.g. <89°F, >95°F) are separate Kalshi
-    # series with only one bracket. Ranking a single bracket against itself
-    # always produces top1 — which is meaningless. Flag these as "tail_only"
-    # so they don't pollute the mkt_rank_conf calibration data.
+    # Grade bump/drop scale:
+    #   skip → skip (can never bump a skip)
+    #   C → B (bump) or skip (drop)
+    #   B → A (bump) or C (drop)
+    #   A → A (already max) or B (drop)
+    _grade_up   = {"A": "A", "B": "A", "C": "B", "skip": "skip"}
+    _grade_down = {"A": "B", "B": "C", "C": "skip", "skip": "skip"}
+
     _tradeable_asks = [x for x in analyzed if x.get("yes_ask", 0) > 0.02]
-    _is_tail_series = len(_tradeable_asks) <= 1  # only one bracket in this series
+    _is_tail_series = len(_tradeable_asks) <= 1
 
     if not _is_tail_series:
         _all_asks = sorted(_tradeable_asks, key=lambda x: -x.get("yes_ask", 0))
@@ -1055,15 +1056,20 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
             continue
         if _is_tail_series:
             m["mkt_rank_conf"] = "tail_only"
+            # No grade adjustment for tail series
             continue
         _key = (m.get("lo_temp"), m.get("hi_temp"))
         if _key == _top1_key:
             m["mkt_rank_conf"] = "top1"
+            m["grade"] = _grade_up[m["grade"]]
         elif _key == _top2_key:
             m["mkt_rank_conf"] = "top2"
+            # No adjustment — grade stays as-is
         else:
             m["mkt_rank_conf"] = "outside_top2"
-        # Grade and actionable unchanged — display only
+            m["grade"] = _grade_down[m["grade"]]
+        # Re-sync actionable after grade change
+        m["actionable"] = m["grade"] in ("A", "B")
 
     # Sort: A first, then by gap_c descending
     grade_order = {"A": 0, "B": 1, "C": 2, "skip": 3}
@@ -5690,6 +5696,46 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 self.send_response(404)
                 self.end_headers()
+
+        elif path == "/admin/query":
+            # Secured SQL query endpoint for external analysis.
+            # Accepts POST with JSON body: {"sql": "SELECT ...", "token": "..."}
+            # Read-only — SELECT only, no INSERT/UPDATE/DELETE/DROP.
+            # Token must match QUERY_TOKEN env var (set in Railway Variables).
+            import os as _os
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body   = json.loads(self.rfile.read(length).decode()) if length else {}
+                token  = body.get("token", "")
+                sql    = body.get("sql", "").strip()
+                expected = _os.environ.get("QUERY_TOKEN", "")
+                if not expected:
+                    self.send_json({"ok": False, "error": "QUERY_TOKEN not set in environment"})
+                elif token != expected:
+                    self.send_json({"ok": False, "error": "Invalid token"})
+                elif not sql.upper().startswith("SELECT"):
+                    self.send_json({"ok": False, "error": "Only SELECT queries allowed"})
+                else:
+                    conn_q = get_db()
+                    if not conn_q:
+                        self.send_json({"ok": False, "error": "No DB"})
+                    else:
+                        with conn_q.cursor() as cur:
+                            cur.execute(sql)
+                            cols = [d[0] for d in cur.description]
+                            rows = cur.fetchall()
+                            # Convert to list of dicts, handle non-serializable types
+                            import decimal as _dec
+                            import datetime as _dt
+                            def _ser(v):
+                                if isinstance(v, _dec.Decimal): return float(v)
+                                if isinstance(v, (_dt.date, _dt.datetime)): return str(v)
+                                return v
+                            data = [dict(zip(cols, [_ser(c) for c in r])) for r in rows]
+                        conn_q.close()
+                        self.send_json({"ok": True, "rows": data, "count": len(data)})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
 
         elif path == "/admin/setup-db":
             # Run each table creation independently so one failure doesn't block others
