@@ -2818,7 +2818,7 @@ WHERE settled_temp IS NOT NULL
 ORDER BY settled_ts DESC LIMIT 20`,
 
   temp_snapshots_check: `SELECT city, target_date,
-    settled_temp, settled_correct, settled_ts
+    settled_temp, settled_correct
 FROM temp_snapshots
 WHERE settled_temp IS NOT NULL
 ORDER BY target_date DESC LIMIT 20`,
