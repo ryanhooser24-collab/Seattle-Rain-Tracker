@@ -3859,6 +3859,40 @@ class Handler(BaseHTTPRequestHandler):
                 print(f"  📌 Settlement recorded: {month} = {total}\"")
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)}, 400)
+        elif path == "/admin/query":
+            import os as _os
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body   = json.loads(self.rfile.read(length).decode()) if length else {}
+                token  = body.get("token", "")
+                sql    = body.get("sql", "").strip()
+                expected = _os.environ.get("QUERY_TOKEN", "")
+                if not expected:
+                    self.send_json({"ok": False, "error": "QUERY_TOKEN not set in environment"})
+                elif token != expected:
+                    self.send_json({"ok": False, "error": "Invalid token"})
+                elif not sql.upper().startswith("SELECT"):
+                    self.send_json({"ok": False, "error": "Only SELECT queries allowed"})
+                else:
+                    conn_q = get_db()
+                    if not conn_q:
+                        self.send_json({"ok": False, "error": "No DB"})
+                    else:
+                        with conn_q.cursor() as cur:
+                            cur.execute(sql)
+                            cols = [d[0] for d in cur.description]
+                            rows = cur.fetchall()
+                            import decimal as _dec
+                            import datetime as _dt
+                            def _ser(v):
+                                if isinstance(v, _dec.Decimal): return float(v)
+                                if isinstance(v, (_dt.date, _dt.datetime)): return str(v)
+                                return v
+                            data = [dict(zip(cols, [_ser(c) for c in r])) for r in rows]
+                        conn_q.close()
+                        self.send_json({"ok": True, "rows": data, "count": len(data)})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
         else:
             self.send_response(404)
             self.end_headers()
@@ -3866,7 +3900,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
