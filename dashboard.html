@@ -2728,6 +2728,7 @@ loadData();
         <option value="calibration_count">Calibration Snapshot Count by City</option>
         <option value="recent_settlements">Recent Settlements (last 20)</option>
         <option value="forecast_shifts">Forecast Shifts (mu change between scans)</option>
+        <option value="temp_snapshots_check">Temp Snapshots Settled Data</option>
       </select>
       <input id="analysis-token" type="password" placeholder="Query token" value="raintracker2026!" 
         style="font-family:'DM Mono',monospace;font-size:11px;background:var(--card);border:1px solid var(--border);color:var(--ink);padding:6px 10px;border-radius:4px;width:160px">
@@ -2815,6 +2816,12 @@ GROUP BY city ORDER BY settled DESC`,
 FROM calibration_snapshots
 WHERE settled_temp IS NOT NULL
 ORDER BY settled_ts DESC LIMIT 20`,
+
+  temp_snapshots_check: `SELECT city, target_date,
+    settled_temp, settled_correct, settled_ts
+FROM temp_snapshots
+WHERE settled_temp IS NOT NULL
+ORDER BY target_date DESC LIMIT 20`,
 
   forecast_shifts: `SELECT ph1.city, ph1.ticker, ph1.bracket_label,
     ph1.scan_ts as t1, ph2.scan_ts as t2,
