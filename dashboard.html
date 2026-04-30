@@ -458,6 +458,7 @@ body{max-width:900px;margin:0 auto;}
   <div class="tab" id="t-rules" onclick="sw('rules')">Auto-trader</div>
   <div class="tab" id="t-hist" onclick="sw('hist')">History</div>
   <div class="tab" id="t-bt" onclick="sw('bt')">Backtest</div>
+  <div class="tab" id="t-analysis" onclick="sw('analysis')">Analysis</div>
 </div>
 
 <!-- TEMPERATURE SCANNER -->
@@ -1083,7 +1084,7 @@ function toggleTheme(){
   });
 })();
 function sw(t){
-  ['scan','dash','pos','rules','hist','bt'].forEach(x=>{
+  ['scan','dash','pos','rules','hist','bt','analysis'].forEach(x=>{
     const p=document.getElementById('p-'+x)||document.getElementById('s-'+x);
     if(p)p.style.display=x===t?'block':'none';
     const tb=document.getElementById('t-'+x);
@@ -1678,10 +1679,10 @@ function renderTempCard(b){
           <div class="temp-opp-ctx">
             Combined prob <b>${combinedProb}%</b> · cost <b>${combinedCost}¢</b> · net edge <b>+${netEdge}¢</b>
           </div>
-          <div class="temp-opp-ctx" style="margin-top:2px;">
-            <button onclick="event.stopPropagation();navigator.clipboard.writeText('${la.ticker||''}').then(function(){var el=event.target;var orig=el.textContent;el.textContent='✓ Copied';el.style.color='#3B6D11';setTimeout(function(){el.textContent=orig;el.style.color='';},1500);})" style="font-size:9px;background:none;border:none;padding:0;cursor:pointer;color:var(--muted);font-family:inherit;">Leg A: ${la.bracket_label||''} @ ${Math.round((la.yes_ask||0)*100)}¢ ⊙</button>
-            · 
-            <button onclick="event.stopPropagation();navigator.clipboard.writeText('${lb.ticker||''}').then(function(){var el=event.target;var orig=el.textContent;el.textContent='✓ Copied';el.style.color='#3B6D11';setTimeout(function(){el.textContent=orig;el.style.color='';},1500);})" style="font-size:9px;background:none;border:none;padding:0;cursor:pointer;color:var(--muted);font-family:inherit;">Leg B: ${lb.bracket_label||''} @ ${Math.round((lb.yes_ask||0)*100)}¢ ⊙</button>
+          <div class="temp-opp-ctx" style="margin-top:2px;" id="combo-legs-${la.ticker||'x'}">
+            <button onclick="event.stopPropagation();(function(el,t){navigator.clipboard.writeText(t).then(function(){var o=el.textContent;el.textContent='✓ Copied';el.style.color='#3B6D11';setTimeout(function(){el.textContent=o;el.style.color='';},1500);})})(this,'${(la.ticker||'').replace(/'/g,'')}');" style="font-size:9px;background:none;border:none;padding:0;cursor:pointer;color:var(--muted);font-family:inherit;">Leg A: ${la.bracket_label||''} @ ${Math.round((la.yes_ask||0)*100)}¢ ⧉</button>
+            &middot;
+            <button onclick="event.stopPropagation();(function(el,t){navigator.clipboard.writeText(t).then(function(){var o=el.textContent;el.textContent='✓ Copied';el.style.color='#3B6D11';setTimeout(function(){el.textContent=o;el.style.color='';},1500);})})(this,'${(lb.ticker||'').replace(/'/g,'')}');" style="font-size:9px;background:none;border:none;padding:0;cursor:pointer;color:var(--muted);font-family:inherit;">Leg B: ${lb.bracket_label||''} @ ${Math.round((lb.yes_ask||0)*100)}¢ ⧉</button>
           </div>
         </div>
         <div class="temp-opp-right">
@@ -2705,6 +2706,178 @@ loadData();
     </div>
   </div>
 </div>
+
+<!-- ANALYSIS TAB -->
+<div id="s-analysis" class="section" style="display:none">
+  <div style="max-width:900px;margin:0 auto;padding:0 16px">
+    <h2 style="font-size:13px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin:0 0 16px">Analysis Queries</h2>
+
+    <div style="margin-bottom:12px;font-size:11px;color:var(--muted)">
+      Run pre-built analysis queries against live DB. Results update on each run.
+    </div>
+
+    <!-- Query selector -->
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
+      <select id="analysis-query-select" style="font-family:'DM Mono',monospace;font-size:11px;background:var(--card);border:1px solid var(--border);color:var(--ink);padding:6px 10px;border-radius:4px;flex:1;min-width:200px">
+        <option value="model_accuracy">Model Accuracy by City + Horizon</option>
+        <option value="model_bias">Model Bias by City (mu vs settled)</option>
+        <option value="mkt_rank_winrate">Market Rank Conf Win Rate</option>
+        <option value="grade_winrate">Grade Win Rate (A vs B vs C)</option>
+        <option value="sigma_accuracy">Sigma Accuracy (model vs actual spread)</option>
+        <option value="price_history_count">Price History Row Count by City</option>
+        <option value="calibration_count">Calibration Snapshot Count by City</option>
+        <option value="recent_settlements">Recent Settlements (last 20)</option>
+        <option value="forecast_shifts">Forecast Shifts (mu change between scans)</option>
+      </select>
+      <input id="analysis-token" type="password" placeholder="Query token" value="raintracker2026!" 
+        style="font-family:'DM Mono',monospace;font-size:11px;background:var(--card);border:1px solid var(--border);color:var(--ink);padding:6px 10px;border-radius:4px;width:160px">
+      <button onclick="runAnalysisQuery()" 
+        style="font-family:'DM Mono',monospace;font-size:11px;background:var(--rain);color:#000;border:none;padding:6px 16px;border-radius:4px;cursor:pointer;font-weight:600">
+        Run
+      </button>
+    </div>
+
+    <!-- Results -->
+    <div id="analysis-status" style="font-size:11px;color:var(--muted);margin-bottom:8px"></div>
+    <div id="analysis-results" style="overflow-x:auto"></div>
+  </div>
+</div>
+
+<script>
+const ANALYSIS_QUERIES = {
+  model_accuracy: `SELECT city, horizon,
+    ROUND(AVG(ABS(gfs_high - settled_temp))::numeric, 2) as gfs_mae,
+    ROUND(AVG(ABS(ecmwf_high - settled_temp))::numeric, 2) as ecmwf_mae,
+    ROUND(AVG(gfs_high - settled_temp)::numeric, 2) as gfs_bias,
+    ROUND(AVG(ecmwf_high - settled_temp)::numeric, 2) as ecmwf_bias,
+    COUNT(*) as n
+FROM calibration_snapshots
+WHERE settled_temp IS NOT NULL AND gfs_high IS NOT NULL AND ecmwf_high IS NOT NULL
+GROUP BY city, horizon HAVING COUNT(*) >= 3
+ORDER BY city, horizon`,
+
+  model_bias: `SELECT city,
+    ROUND(AVG(mu - settled_temp)::numeric, 2) as model_bias,
+    ROUND(STDDEV(mu - settled_temp)::numeric, 2) as actual_sigma,
+    ROUND(AVG(sigma)::numeric, 2) as model_sigma,
+    COUNT(*) as n
+FROM calibration_snapshots
+WHERE settled_temp IS NOT NULL AND mu IS NOT NULL
+GROUP BY city HAVING COUNT(*) >= 3
+ORDER BY ABS(AVG(mu - settled_temp)) DESC`,
+
+  mkt_rank_winrate: `SELECT mkt_rank_conf,
+    COUNT(*) as total,
+    COUNT(settled_temp) as settled,
+    ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric * 100, 1) as win_rate_pct,
+    ROUND(AVG(model_prob)::numeric * 100, 1) as avg_model_prob_pct
+FROM calibration_snapshots
+WHERE settled_temp IS NOT NULL AND grade IN ('A','B')
+GROUP BY mkt_rank_conf ORDER BY win_rate_pct DESC`,
+
+  grade_winrate: `SELECT grade,
+    COUNT(*) as total,
+    COUNT(settled_temp) as settled,
+    ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric * 100, 1) as win_rate_pct,
+    ROUND(AVG(model_prob)::numeric * 100, 1) as avg_model_prob_pct,
+    ROUND(AVG(edge_ratio)::numeric, 1) as avg_edge_ratio
+FROM calibration_snapshots
+WHERE settled_temp IS NOT NULL
+GROUP BY grade ORDER BY grade`,
+
+  sigma_accuracy: `SELECT city, horizon,
+    ROUND(AVG(sigma)::numeric, 2) as model_sigma,
+    ROUND(STDDEV(mu - settled_temp)::numeric, 2) as actual_sigma,
+    ROUND((STDDEV(mu - settled_temp) - AVG(sigma))::numeric, 2) as sigma_error,
+    COUNT(*) as n
+FROM calibration_snapshots
+WHERE settled_temp IS NOT NULL AND sigma IS NOT NULL
+GROUP BY city, horizon HAVING COUNT(*) >= 5
+ORDER BY ABS(STDDEV(mu - settled_temp) - AVG(sigma)) DESC`,
+
+  price_history_count: `SELECT city, COUNT(*) as rows,
+    MIN(scan_ts) as first_scan, MAX(scan_ts) as last_scan
+FROM price_history
+GROUP BY city ORDER BY city`,
+
+  calibration_count: `SELECT city,
+    COUNT(*) as total,
+    COUNT(settled_temp) as settled,
+    COUNT(*) FILTER (WHERE scan_ts >= NOW() - INTERVAL '30 days') as last_30d
+FROM calibration_snapshots
+GROUP BY city ORDER BY settled DESC`,
+
+  recent_settlements: `SELECT city, target_date, bracket_label, grade,
+    ROUND(model_prob::numeric * 100, 1) as model_pct,
+    ROUND(yes_ask::numeric * 100) as mkt_c,
+    net_gap_c, mkt_rank_conf,
+    settled_temp, settled_correct
+FROM calibration_snapshots
+WHERE settled_temp IS NOT NULL
+ORDER BY settled_ts DESC LIMIT 20`,
+
+  forecast_shifts: `SELECT ph1.city, ph1.ticker, ph1.bracket_label,
+    ph1.scan_ts as t1, ph2.scan_ts as t2,
+    ROUND(ph1.mu::numeric, 1) as mu_before,
+    ROUND(ph2.mu::numeric, 1) as mu_after,
+    ROUND((ph2.mu - ph1.mu)::numeric, 1) as mu_delta,
+    ROUND(ph1.yes_ask::numeric * 100) as ask_before,
+    ROUND(ph2.yes_ask::numeric * 100) as ask_after,
+    ROUND((ph2.yes_ask - ph1.yes_ask)::numeric * 100) as ask_delta_c
+FROM price_history ph1
+JOIN price_history ph2 ON ph1.ticker = ph2.ticker
+  AND ph2.scan_ts = (
+    SELECT MIN(scan_ts) FROM price_history
+    WHERE ticker = ph1.ticker AND scan_ts > ph1.scan_ts
+  )
+WHERE ABS(ph2.mu - ph1.mu) >= 0.5
+ORDER BY ph1.scan_ts DESC LIMIT 30`
+};
+
+async function runAnalysisQuery(){
+  const qkey  = document.getElementById('analysis-query-select').value;
+  const token = document.getElementById('analysis-token').value;
+  const sql   = ANALYSIS_QUERIES[qkey];
+  const status = document.getElementById('analysis-status');
+  const results = document.getElementById('analysis-results');
+  status.textContent = 'Running...';
+  results.innerHTML = '';
+  try {
+    const r = await fetch('/admin/query', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({token, sql})
+    });
+    const data = await r.json();
+    if(!data.ok){ status.textContent = 'Error: ' + data.error; return; }
+    status.textContent = data.count + ' rows · ' + new Date().toLocaleTimeString();
+    if(!data.rows.length){ results.innerHTML = '<div style="color:var(--muted);font-size:11px">No results yet — not enough settled data.</div>'; return; }
+    // Render table
+    const cols = Object.keys(data.rows[0]);
+    const colStyle = 'padding:6px 10px;border-bottom:1px solid var(--border);font-size:11px;white-space:nowrap;';
+    const hdStyle  = colStyle + 'color:var(--muted);text-transform:uppercase;font-size:9px;letter-spacing:0.5px;';
+    let html = '<table style="width:100%;border-collapse:collapse;background:var(--card);border-radius:6px;overflow:hidden">';
+    html += '<thead><tr>' + cols.map(c=>`<th style="${hdStyle}">${c}</th>`).join('') + '</tr></thead>';
+    html += '<tbody>';
+    for(const row of data.rows){
+      html += '<tr>' + cols.map(c=>{
+        const v = row[c];
+        let style = colStyle;
+        // Color coding for key fields
+        if(c==='win_rate_pct') style += v>=60?'color:#3B6D11;':v>=45?'color:#BA7517;':'color:#A32D2D;';
+        if(c==='settled_correct') style += v?'color:#3B6D11;':'color:#A32D2D;';
+        if(c==='mu_delta'||c==='sigma_error') style += Math.abs(v)>=1?'color:#A32D2D;':'';
+        if(c==='mkt_rank_conf') style += v==='top1'?'color:#3B6D11;':v==='outside_top2'?'color:#A32D2D;':'';
+        return `<td style="${style}">${v===null?'—':v}</td>`;
+      }).join('') + '</tr>';
+    }
+    html += '</tbody></table>';
+    results.innerHTML = html;
+  } catch(e){
+    status.textContent = 'Error: ' + e.message;
+  }
+}
+</script>
 
 <script>
 async function runBiasCalibration(){
