@@ -575,14 +575,24 @@ def fetch_temp_kalshi_markets(city_key, market_type="high"):
             if lo_temp is None and hi_temp is None:
                 above = re.search(r"(?:above|>|or above)\s*(\d+\.?\d*)", title, re.IGNORECASE)
                 below = re.search(r"(?:below|<|or below)\s*(\d+\.?\d*)", title, re.IGNORECASE)
+                # IMPORTANT: Kalshi's tail bracket title says "<48" or "below 48"
+                # but the bracket actually wins on NWS reporting 47 or below
+                # (Kalshi's UI confirms: "47° or below"). The threshold in the
+                # title is the EXCLUSIVE upper bound, not the highest winning
+                # integer. We normalize lo/hi to the winning integers so that
+                # bracket_prob's half-integer shift (upper = hi + 0.5) and the
+                # settlement check (NWS_value <= hi_temp) both give correct
+                # answers. Display label preserves Kalshi's convention.
                 if above:
-                    lo_temp = float(above.group(1))
+                    raw_threshold = float(above.group(1))
+                    lo_temp = raw_threshold + 1   # lowest winning integer (e.g. ">95" wins on 96+)
                     hi_temp = None
-                    bracket_label = f">{int(lo_temp)}°F"
+                    bracket_label = f">{int(raw_threshold)}°F"
                 elif below:
+                    raw_threshold = float(below.group(1))
                     lo_temp = None
-                    hi_temp = float(below.group(1))
-                    bracket_label = f"<{int(hi_temp)}°F"
+                    hi_temp = raw_threshold - 1   # highest winning integer (e.g. "<48" wins on ≤47)
+                    bracket_label = f"<{int(raw_threshold)}°F"
 
             # Last resort: functional_strike field
             if lo_temp is None and hi_temp is None:
@@ -5949,6 +5959,54 @@ class Handler(BaseHTTPRequestHandler):
                         results["schema_migration"] = "ok"
                 except Exception as e:
                     results["schema_migration"] = str(e)
+
+                # ── Tail bracket migration (one-time, idempotent) ─────────
+                # Bug: parser previously set hi_temp = X for "<X°F" brackets,
+                # but the actual winning condition is NWS report ≤ X-1
+                # (Kalshi UI: "<48°F" market = "47° or below"). Same bug for
+                # ">X°F" → lo_temp = X but should be X+1.
+                # Migration corrects existing rows where one bound is NULL
+                # AND the non-NULL bound matches the threshold in the label
+                # (the pre-fix signature). Idempotent: after running, the
+                # match condition no longer holds.
+                migration_results = {}
+                for tbl in ("temp_snapshots", "paper_trades", "calibration_snapshots"):
+                    try:
+                        conn5 = get_db()
+                        if not conn5:
+                            migration_results[tbl] = "no DB"
+                            continue
+                        with conn5.cursor() as cur:
+                            # Fix "<X°F" tail: hi_temp = X → hi_temp = X-1
+                            cur.execute(f"""
+                                UPDATE {tbl}
+                                SET hi_temp = hi_temp - 1
+                                WHERE lo_temp IS NULL
+                                  AND hi_temp IS NOT NULL
+                                  AND bracket_label ~ '^<[0-9]+\u00b0F$'
+                                  AND hi_temp = SUBSTRING(bracket_label FROM '^<([0-9]+)\u00b0F$')::numeric
+                            """)
+                            below_fixed = cur.rowcount
+                            # Fix ">X°F" tail: lo_temp = X → lo_temp = X+1
+                            cur.execute(f"""
+                                UPDATE {tbl}
+                                SET lo_temp = lo_temp + 1
+                                WHERE hi_temp IS NULL
+                                  AND lo_temp IS NOT NULL
+                                  AND bracket_label ~ '^>[0-9]+\u00b0F$'
+                                  AND lo_temp = SUBSTRING(bracket_label FROM '^>([0-9]+)\u00b0F$')::numeric
+                            """)
+                            above_fixed = cur.rowcount
+                        conn5.commit()
+                        conn5.close()
+                        migration_results[tbl] = {
+                            "below_fixed": below_fixed,
+                            "above_fixed": above_fixed,
+                        }
+                    except Exception as e:
+                        migration_results[tbl] = f"error: {e}"
+                results["tail_bracket_migration"] = migration_results
+
                 self.send_json({"ok": all_ok, "tables": results})
 
         elif path == "/debug/cal-log":
