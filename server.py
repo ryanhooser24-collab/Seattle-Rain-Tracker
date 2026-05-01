@@ -1529,6 +1529,8 @@ _SETTLE_LOG           = []          # last N settlement results, in memory
 _SETTLE_LOCK          = _threading.Lock()
 _SETTLE_THREAD        = None
 _LAST_SETTLE_RUN      = {}          # date_str → result dict, prevents duplicate runs
+_PROP_LOG             = []          # last N _paper_trade_settle results — propagation tracking
+_PROP_LOCK            = _threading.Lock()
 
 # ── AUTO-TRADER GLOBALS ───────────────────────────────────────────────────────
 _AT_THREAD   = None
@@ -2116,10 +2118,18 @@ def run_auto_settlement(force=False):
     # Target: yesterday in ET (the date whose high is in this morning's CLI)
     yesterday = (now_et - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # Avoid re-running for the same date more than once per day
-    if not force and _LAST_SETTLE_RUN.get(yesterday, {}).get("ok"):
+    # Avoid re-running for the same date more than once per day — but only
+    # short-circuit if a previous run successfully settled ALL cities that
+    # had unsettled snapshots. Partial success must NOT block retry: NWS CLI
+    # publishes between 6–9 AM ET per city, so the 7 AM scheduler run often
+    # catches some cities before their CLI is up. Without retry, those cities
+    # never get settled. (Bug fix: previously this short-circuited on any
+    # successful run, leaving late-publishing cities permanently unsettled.)
+    prev = _LAST_SETTLE_RUN.get(yesterday, {})
+    if (not force and prev.get("ok")
+        and prev.get("fully_settled") is True):
         return {"ok": True, "skipped": True,
-                "reason": f"Already settled {yesterday} today"}
+                "reason": f"All cities fully settled for {yesterday}"}
 
     conn = get_db()
     if not conn:
@@ -2141,6 +2151,7 @@ def run_auto_settlement(force=False):
 
         if not cities_needed:
             msg = {"ok": True, "date": yesterday, "settled": 0,
+                   "fully_settled": True,  # nothing to do = fully done
                    "note": "No unsettled snapshots for this date"}
             with _SETTLE_LOCK:
                 _SETTLE_LOG.insert(0, {**msg, "run_at": now_et.isoformat()})
@@ -2223,13 +2234,22 @@ def run_auto_settlement(force=False):
         try: conn.close()
         except: pass
 
+    # fully_settled = every city we tried to settle returned ok=True from CLI fetch.
+    # When this is False, the next scheduler tick will retry the failed cities.
+    expected_cities = len(cities_needed)
+    successful_cities = sum(1 for r in results if r.get("ok"))
+    fully_settled = (successful_cities >= expected_cities and expected_cities > 0)
+
     summary = {
-        "ok":        True,
-        "date":      yesterday,
-        "settled":   settled,
-        "attempted": attempted,
-        "cities":    results,
-        "run_at":    now_et.isoformat(),
+        "ok":              True,
+        "date":             yesterday,
+        "settled":          settled,
+        "attempted":        attempted,
+        "expected_cities":  expected_cities,
+        "successful_cities": successful_cities,
+        "fully_settled":    fully_settled,
+        "cities":           results,
+        "run_at":           now_et.isoformat(),
     }
     with _SETTLE_LOCK:
         _SETTLE_LOG.insert(0, summary)
@@ -2245,7 +2265,13 @@ def _settlement_scheduler():
     print("  🕐 Auto-settlement scheduler started")
     while True:
         try:
-            run_auto_settlement()
+            res = run_auto_settlement()
+            # Propagate settlements from temp_snapshots → calibration_snapshots
+            # + paper_trades. Run on EVERY scheduler tick (not just when new
+            # settlements landed) so we backfill any prior settlements that
+            # failed to propagate. _paper_trade_settle is a no-op if there's
+            # nothing to update.
+            _paper_trade_settle()
         except Exception as e:
             print(f"  ⚠️  Settlement scheduler error: {e}")
         _t.sleep(SETTLE_POLL_INTERVAL)
@@ -5286,10 +5312,15 @@ class Handler(BaseHTTPRequestHandler):
                                     """, (actual, actual, actual, res["city"], override, mtype))
                                     settled += cur.rowcount
                         conn.commit(); conn.close()
+                        # Propagate the override-date settlements through to
+                        # calibration_snapshots + paper_trades.
+                        _paper_trade_settle()
                         self.send_json({"ok": True, "date": override,
                                         "settled": settled, "cities": results})
                 else:
                     result = run_auto_settlement(force=True)
+                    # Propagate after every manual trigger.
+                    _paper_trade_settle()
                     self.send_json(result)
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
@@ -5921,55 +5952,120 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": all_ok, "tables": results})
 
         elif path == "/debug/cal-log":
-            # Returns last scan result for calibration_snapshots debugging
+            # Full settlement+propagation diagnostic. Surfaces:
+            #  - calibration_snapshots state (total / settled / per city/date)
+            #  - temp_snapshots state (total / settled / per city/date)
+            #  - propagation gap (settled in temp_snapshots but NOT in cal_snap)
+            #  - last 20 _PROP_LOG entries (errors, rowcounts, eligible pairs)
             try:
                 conn = get_db()
                 if not conn:
                     self.send_json({"ok": False, "error": "No DB"})
                 else:
+                    out = {"ok": True}
                     with conn.cursor() as cur:
-                        # Table exists?
+                        # ── Table existence ────────────────────────────────
                         cur.execute("""
-                            SELECT EXISTS (
-                                SELECT FROM information_schema.tables
-                                WHERE table_name = 'calibration_snapshots'
-                            )
+                            SELECT table_name FROM information_schema.tables
+                            WHERE table_name IN ('calibration_snapshots',
+                                                 'temp_snapshots',
+                                                 'paper_trades')
                         """)
-                        table_exists = cur.fetchone()[0]
+                        tables = {r[0] for r in cur.fetchall()}
+                        out["tables_exist"] = sorted(tables)
 
-                        # Count all rows
-                        total = 0
-                        grade_counts = {}
-                        if table_exists:
-                            cur.execute("SELECT COUNT(*) FROM calibration_snapshots")
-                            total = cur.fetchone()[0]
+                        # ── calibration_snapshots ──────────────────────────
+                        if "calibration_snapshots" in tables:
+                            cur.execute("""
+                                SELECT COUNT(*),
+                                       COUNT(settled_temp),
+                                       COUNT(*) FILTER
+                                       (WHERE scan_ts >= NOW() - INTERVAL '30 days')
+                                FROM calibration_snapshots
+                            """)
+                            t, s, l30 = cur.fetchone()
+                            out["calibration_snapshots"] = {
+                                "total": t, "settled": s, "last_30d": l30,
+                                "settled_pct": round(100.0 * s / t, 1) if t else 0.0,
+                            }
                             cur.execute("""
                                 SELECT grade, COUNT(*)
                                 FROM calibration_snapshots
                                 GROUP BY grade
                             """)
-                            grade_counts = {r[0]: r[1] for r in cur.fetchall()}
+                            out["calibration_snapshots"]["by_grade"] = {
+                                (r[0] or "null"): r[1] for r in cur.fetchall()
+                            }
 
-                        # Last scan markets sample
-                        cur.execute("""
-                            SELECT city, grade, ticker, hours_to_cutoff
-                            FROM paper_trades
-                            ORDER BY scan_ts DESC LIMIT 5
-                        """)
-                        recent = [{"city": r[0], "grade": r[1],
-                                   "ticker": r[2], "htc": float(r[3]) if r[3] else None}
-                                  for r in cur.fetchall()]
+                        # ── temp_snapshots ─────────────────────────────────
+                        if "temp_snapshots" in tables:
+                            cur.execute("""
+                                SELECT COUNT(*), COUNT(settled_temp)
+                                FROM temp_snapshots
+                            """)
+                            t, s = cur.fetchone()
+                            out["temp_snapshots"] = {"total": t, "settled": s}
+                            cur.execute("""
+                                SELECT city, target_date,
+                                       COUNT(*) AS rows,
+                                       COUNT(settled_temp) AS settled
+                                FROM temp_snapshots
+                                WHERE settled_temp IS NOT NULL
+                                GROUP BY city, target_date
+                                ORDER BY target_date DESC, city
+                                LIMIT 30
+                            """)
+                            out["temp_snapshots"]["settled_by_city_date"] = [
+                                {"city": r[0], "target_date": str(r[1]),
+                                 "rows": r[2], "settled": r[3]}
+                                for r in cur.fetchall()
+                            ]
+
+                        # ── Propagation gap (the diagnostic gold) ──────────
+                        if {"temp_snapshots", "calibration_snapshots"} <= tables:
+                            cur.execute("""
+                                SELECT t.city, t.target_date,
+                                       t.temp_settled,
+                                       COALESCE(c.cal_total, 0) AS cal_total,
+                                       COALESCE(c.cal_settled, 0) AS cal_settled
+                                FROM (
+                                    SELECT city, target_date,
+                                           COUNT(*) AS temp_settled
+                                    FROM temp_snapshots
+                                    WHERE settled_temp IS NOT NULL
+                                    GROUP BY city, target_date
+                                ) t
+                                LEFT JOIN (
+                                    SELECT city, target_date,
+                                           COUNT(*) AS cal_total,
+                                           COUNT(settled_temp) AS cal_settled
+                                    FROM calibration_snapshots
+                                    GROUP BY city, target_date
+                                ) c USING (city, target_date)
+                                ORDER BY t.target_date DESC, t.city
+                                LIMIT 50
+                            """)
+                            out["propagation_gap"] = [
+                                {"city": r[0], "target_date": str(r[1]),
+                                 "temp_settled": r[2], "cal_total": r[3],
+                                 "cal_settled": r[4],
+                                 "gap": r[3] - r[4]}  # how many cal rows still NULL
+                                for r in cur.fetchall()
+                            ]
 
                     conn.close()
-                    self.send_json({
-                        "ok": True,
-                        "table_exists": table_exists,
-                        "total_rows": total,
-                        "grade_counts": grade_counts,
-                        "recent_paper_trades": recent,
-                    })
+
+                    # ── In-memory propagation log ──────────────────────────
+                    with _PROP_LOCK:
+                        out["recent_prop_runs"] = list(_PROP_LOG[:20])
+                    with _SETTLE_LOCK:
+                        out["recent_settle_runs"] = list(_SETTLE_LOG[:5])
+
+                    self.send_json(out)
             except Exception as e:
-                self.send_json({"ok": False, "error": str(e)})
+                import traceback
+                self.send_json({"ok": False, "error": str(e),
+                                "traceback": traceback.format_exc()})
 
         elif path == "/health":
             self.send_json({"ok": True, "message": "Server running"})
@@ -6149,11 +6245,25 @@ def _paper_trade_log(city_key, fc, markets):
 def _paper_trade_settle():
     """
     Settle open paper trades and calibration_snapshots by matching against
-    temp_snapshots settled_temp. Called by the settlement scheduler.
+    temp_snapshots.settled_temp. Called after every successful run_auto_settlement
+    AND at the end of each background scan.
+
+    Records every run in _PROP_LOG (in-memory ring buffer, surfaces in
+    /debug/cal-log) and prints to Railway logs. Previously failed silently —
+    that hid every propagation error since deployment.
     """
+    import datetime as _dt
+    run_at = _dt.datetime.utcnow().isoformat()
+    result = {"run_at": run_at, "ok": False, "rowcounts": {}, "error": None}
     try:
         conn = get_db()
-        if not conn: return
+        if not conn:
+            result["error"] = "No DB connection"
+            print(f"  ⚠️  _paper_trade_settle: no DB")
+            with _PROP_LOCK:
+                _PROP_LOG.insert(0, result)
+                _PROP_LOG[:] = _PROP_LOG[:50]
+            return
 
         settle_sql = """
             SET
@@ -6172,6 +6282,7 @@ def _paper_trade_settle():
                     city, target_date, settled_temp
                 FROM temp_snapshots
                 WHERE settled_temp IS NOT NULL
+                ORDER BY city, target_date, scan_ts DESC
             ) ts
             WHERE {tbl}.city        = ts.city
               AND {tbl}.target_date = ts.target_date
@@ -6179,12 +6290,32 @@ def _paper_trade_settle():
         """
 
         with conn.cursor() as cur:
+            # Pre-check: how many (city,target_date) pairs are eligible to propagate
+            cur.execute("""
+                SELECT COUNT(DISTINCT (city, target_date))
+                FROM temp_snapshots
+                WHERE settled_temp IS NOT NULL
+            """)
+            result["eligible_pairs"] = cur.fetchone()[0]
+
             for tbl in ("paper_trades", "calibration_snapshots"):
                 cur.execute(f"UPDATE {tbl} " + settle_sql.format(tbl=tbl))
+                result["rowcounts"][tbl] = cur.rowcount
         conn.commit()
         conn.close()
-    except Exception:
-        pass
+        result["ok"] = True
+        print(f"  📌 _paper_trade_settle: {result['rowcounts']} "
+              f"(eligible {result['eligible_pairs']} pairs)")
+    except Exception as e:
+        import traceback
+        result["error"] = str(e)
+        result["traceback"] = traceback.format_exc()
+        print(f"  ⚠️  _paper_trade_settle FAILED: {e}")
+        traceback.print_exc()
+    finally:
+        with _PROP_LOCK:
+            _PROP_LOG.insert(0, result)
+            _PROP_LOG[:] = _PROP_LOG[:50]
 
 
 def _run_background_scan():
