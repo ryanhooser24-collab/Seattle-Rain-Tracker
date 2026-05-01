@@ -1370,12 +1370,25 @@ def scan_temp_city(city_key, horizon="d1"):
                                     int(m.get("open_interest",0)), int(m.get("volume_24h",0)),
                                     m.get("hours_to_cutoff"),
                                 ))
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                # Log first occurrence per city to avoid flooding
+                                if not _SCAN_ERR_LOGGED.get(city_key):
+                                    import datetime as _dt
+                                    err_entry = {
+                                        "city": city_key,
+                                        "error": str(e),
+                                        "ticker": m.get("ticker"),
+                                        "timestamp": _dt.datetime.utcnow().isoformat(),
+                                    }
+                                    with _SCAN_ERR_LOCK:
+                                        _SCAN_ERR_LOG.insert(0, err_entry)
+                                        _SCAN_ERR_LOG[:] = _SCAN_ERR_LOG[:50]
+                                    print(f"  ⚠️  temp_snapshots INSERT failed [{city_key}]: {e}")
+                                    _SCAN_ERR_LOGGED[city_key] = True
                 conn.commit()
                 conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  ⚠️  temp_snapshots DB connection/commit failed for {city_key}: {e}")
 
         return result
 
@@ -1541,6 +1554,9 @@ _SETTLE_THREAD        = None
 _LAST_SETTLE_RUN      = {}          # date_str → result dict, prevents duplicate runs
 _PROP_LOG             = []          # last N _paper_trade_settle results — propagation tracking
 _PROP_LOCK            = _threading.Lock()
+_SCAN_ERR_LOG         = []          # last N temp_snapshots INSERT failures
+_SCAN_ERR_LOCK        = _threading.Lock()
+_SCAN_ERR_LOGGED      = {}          # city_key → True (dedupes per-city per-process)
 
 # ── AUTO-TRADER GLOBALS ───────────────────────────────────────────────────────
 _AT_THREAD   = None
@@ -6118,6 +6134,8 @@ class Handler(BaseHTTPRequestHandler):
                         out["recent_prop_runs"] = list(_PROP_LOG[:20])
                     with _SETTLE_LOCK:
                         out["recent_settle_runs"] = list(_SETTLE_LOG[:5])
+                    with _SCAN_ERR_LOCK:
+                        out["scan_errors"] = list(_SCAN_ERR_LOG[:20])
 
                     self.send_json(out)
             except Exception as e:
