@@ -1324,6 +1324,21 @@ def scan_temp_city(city_key, horizon="d1"):
         # Detect combo signals — adjacent bracket pairs with combined positive edge
         combo_signals = detect_combo_signals(high_markets, fc)
 
+        # When a combo exists, mark its constituent legs as combo-covered so
+        # they don't generate duplicate auto-trader bets. The combo signal
+        # itself handles betting both legs via the combo-aware order placement.
+        # Without this, auto-trader could double-bet on a single bracket
+        # (once via combo, once via standalone leg).
+        _combo_tickers = set()
+        for c in combo_signals:
+            if c.get("actionable"):
+                for t in c.get("tickers", []):
+                    _combo_tickers.add(t)
+        for m in high_markets + low_markets:
+            if m.get("ticker") in _combo_tickers:
+                m["combo_leg"] = True
+                m["actionable"] = False  # remove from standalone actionable list
+
         # Best edge across both market types (including combos)
         all_mkts = [m for m in high_markets + low_markets if m.get("actionable")]
         all_actionable = all_mkts + [c for c in combo_signals if c.get("actionable")]
@@ -5971,6 +5986,7 @@ class Handler(BaseHTTPRequestHandler):
                     ("any_model_inside",       "BOOLEAN"),
                     ("spread_exceeds_bracket", "BOOLEAN"),
                     ("book_limited",           "BOOLEAN"),
+                    ("is_combo",               "BOOLEAN"),
                 ]
                 try:
                     conn4 = get_db()
@@ -6297,6 +6313,7 @@ def _paper_trade_log(city_key, fc, markets):
                     m.get("any_model_inside"),
                     m.get("spread_exceeds_bracket"),
                     m.get("book_limited"),
+                    m.get("is_combo", False),
                 )
 
                 _cols = """city, nws_station, target_date, horizon, ticker,
@@ -6306,8 +6323,9 @@ def _paper_trade_log(city_key, fc, markets):
                          gfs_high, ecmwf_high, model_spread,
                          edge_ratio, gap_c, spread_c, kelly_frac,
                          yes_bid, liq_grade, open_interest, volume_24h, fillable_a,
-                         is_tail_bet, any_model_inside, spread_exceeds_bracket, book_limited"""
-                _vals = ",".join(["%s"] * 33)
+                         is_tail_bet, any_model_inside, spread_exceeds_bracket, book_limited,
+                         is_combo"""
+                _vals = ",".join(["%s"] * 34)
 
                 # paper_trades — A-grade only (bet simulation)
                 if m.get("grade") == "A":
