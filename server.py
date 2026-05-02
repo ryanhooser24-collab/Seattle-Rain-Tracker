@@ -1057,7 +1057,13 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
     _grade_up   = {"A": "A", "B": "A", "C": "B", "skip": "skip"}
     _grade_down = {"A": "B", "B": "C", "C": "skip", "skip": "skip"}
 
-    _tradeable_asks = [x for x in analyzed if x.get("yes_ask", 0) > 0.02]
+    # Only rank tradeable, non-skip markets. Skip-graded markets include
+    # settled-stale ones (ask >= 0.98) which would otherwise dominate the #1
+    # rank with their near-100% prices, pushing real markets to #2+ and
+    # blocking auto-trader on otherwise valid A signals.
+    _tradeable_asks = [x for x in analyzed
+                       if 0.02 < x.get("yes_ask", 0) < 0.98
+                       and x.get("grade") != "skip"]
     _is_tail_series = len(_tradeable_asks) <= 1
 
     if not _is_tail_series:
