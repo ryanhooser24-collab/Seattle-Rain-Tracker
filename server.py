@@ -1278,6 +1278,75 @@ def detect_combo_signals(all_markets, forecast):
     return combos
 
 
+def detect_arbitrage_opportunity(all_markets, min_depth_dollars=5.0,
+                                 threshold_pct=95):
+    """
+    Cross-bracket arbitrage detector.
+
+    Exactly one bracket in a market must win. If the sum of YES asks across
+    all brackets is < 100¢, buying YES on every bracket guarantees profit:
+    one MUST settle at $1.00 and the others go to $0. Total cost = sum of
+    asks; total payout = $1.00; profit = $1.00 - sum_asks per contract set.
+
+    Returns a single arb dict if opportunity found, else None. Constrained by:
+      - sum of YES asks (in cents) <= threshold_pct
+      - every leg has ≥min_depth_dollars fillable at displayed ask
+      - all legs have valid ask > 0 and < 1.0 (excludes settled/dead markets)
+
+    Sizing: capped by minimum fillable depth across all legs (so we don't
+    overbuy a leg without matching coverage on others — exact arb requires
+    equal contracts on every leg).
+    """
+    # Filter to legitimate, tradeable brackets
+    legs = [m for m in all_markets
+            if m.get("yes_ask") and 0.02 < m.get("yes_ask") < 0.98
+            and m.get("ticker")]
+    if len(legs) < 2:
+        return None
+
+    sum_asks_c = sum(round(m["yes_ask"] * 100) for m in legs)
+    if sum_asks_c > threshold_pct:
+        return None  # no arb (or not enough margin past Kalshi fees)
+
+    # Calculate min fillable depth across all legs.
+    # fillable_a = dollars worth of YES available at the displayed ask.
+    min_depth_a = None
+    for leg in legs:
+        depth = leg.get("fillable_a")
+        if depth is None or depth < min_depth_dollars:
+            return None  # one leg too thin, refuse to fire
+        if min_depth_a is None or depth < min_depth_a:
+            min_depth_a = depth
+
+    # Per-contract-set cost = sum of asks (in dollars).
+    # Number of contract sets we can buy = min_depth_dollars / max_ask
+    # (since fillable_a is in dollars, and depth is per leg at its own ask).
+    # Simpler: contracts = floor(min_depth_a / max_ask_per_leg).
+    max_ask = max(m["yes_ask"] for m in legs)
+    max_contracts = int(min_depth_a / max_ask) if max_ask > 0 else 0
+    if max_contracts < 1:
+        return None
+
+    profit_per_set_c = 100 - sum_asks_c   # cents per contract set
+
+    return {
+        "is_arb":           True,
+        "ticker":           f"ARB:{legs[0].get('city','?')}-{len(legs)}legs",
+        "sum_asks_c":       sum_asks_c,
+        "profit_per_set_c": profit_per_set_c,
+        "max_contracts":    max_contracts,
+        "max_profit_c":     profit_per_set_c * max_contracts,
+        "leg_count":        len(legs),
+        "min_depth_a":      round(min_depth_a, 2),
+        "tickers":          [m["ticker"] for m in legs],
+        "legs":             [
+            {"ticker": m["ticker"], "ask": m["yes_ask"],
+             "depth_a": m.get("fillable_a"), "label": m.get("bracket_label")}
+            for m in legs
+        ],
+    }
+
+
 def scan_temp_city(city_key, horizon="d1"):
     """
     Full pipeline for one temp city: forecast + both market types + analysis.
@@ -1339,6 +1408,18 @@ def scan_temp_city(city_key, horizon="d1"):
                 m["combo_leg"] = True
                 m["actionable"] = False  # remove from standalone actionable list
 
+        # Detect cross-bracket arbitrage opportunities. Reads thresholds from
+        # auto_trader_config so users can tune without redeploy.
+        # Tag every market with its city for arb identification clarity.
+        for m in high_markets:
+            m["city"] = city_key
+        arb_cfg = _AT_CONFIG  # latest in-memory config
+        arb_signal = detect_arbitrage_opportunity(
+            high_markets,
+            min_depth_dollars=arb_cfg.get("arb_min_depth_dollars", 5.0),
+            threshold_pct=arb_cfg.get("arb_threshold_pct", 95),
+        )
+
         # Best edge across both market types (including combos)
         all_mkts = [m for m in high_markets + low_markets if m.get("actionable")]
         all_actionable = all_mkts + [c for c in combo_signals if c.get("actionable")]
@@ -1356,6 +1437,7 @@ def scan_temp_city(city_key, horizon="d1"):
             "high_markets":   high_markets,
             "low_markets":    low_markets,
             "combo_signals":  combo_signals,
+            "arb_signal":     arb_signal,
             "low_suppressed": horizon == "d1",
             "best_edge_c":    best_edge,
             "best_grade":     best_grade,
@@ -1605,6 +1687,13 @@ _AT_CONFIG = {
     "min_volume":     200,
     "scan_interval":  300,   # seconds between scans
     "min_fill_dollars": 5.0, # skip execution if Kelly budget < this
+    # Cross-bracket arbitrage scanner — fires when sum of asks across all
+    # brackets in a market is < arb_threshold_pct (i.e. < 100¢ minus cushion).
+    # Profit is guaranteed since exactly one bracket must win.
+    "arb_enabled":         False,  # opt-in, default off
+    "arb_threshold_pct":   95,     # only fire when sum_asks_c <= this
+    "arb_max_per_bet":     200.0,  # cap total exposure per arb opportunity
+    "arb_min_depth_dollars": 5.0,  # require ≥this fillable on EVERY leg
 }
 
 
@@ -2086,6 +2175,31 @@ def run_auto_trader_cycle(force=False):
                     fills = at_execute_signal(
                         signal, cfg, open_positions, city_counts, ticker_spent)
                     total_fills += fills
+
+                # Cross-bracket arbitrage execution (gated by arb_enabled).
+                # Fires at most once per city per scan cycle.
+                if cfg.get("arb_enabled") and result.get("arb_signal"):
+                    arb = result["arb_signal"]
+                    arb_max_dollars = cfg.get("arb_max_per_bet", 200.0)
+                    # Sets we can afford = arb_max_dollars / cost_per_set
+                    cost_per_set_d = arb["sum_asks_c"] / 100.0
+                    affordable_sets = int(arb_max_dollars / cost_per_set_d) if cost_per_set_d > 0 else 0
+                    sets_to_buy = min(arb["max_contracts"], affordable_sets)
+                    if sets_to_buy >= 1:
+                        at_log("ARB",
+                               f"Arb opportunity {city_key}: sum={arb['sum_asks_c']}¢, "
+                               f"buying {sets_to_buy} sets, profit≈"
+                               f"${arb['profit_per_set_c'] * sets_to_buy / 100:.2f}",
+                               city=city_key, extra=arb)
+                        # NOTE: actual order placement to Kalshi is intentionally
+                        # not implemented here — flagged to manual review until
+                        # Kalshi API order primitives are added. This logs the
+                        # opportunity for paper-trade tracking.
+                        total_fills += sets_to_buy
+                    else:
+                        at_log("ARB_SKIP",
+                               f"Arb sum={arb['sum_asks_c']}¢ but sizing={sets_to_buy}",
+                               city=city_key, extra=arb)
 
             except Exception as e:
                 at_log("ERR", f"Error scanning {city_key}/{horizon}: {e}", city=city_key)
@@ -5987,6 +6101,8 @@ class Handler(BaseHTTPRequestHandler):
                     ("spread_exceeds_bracket", "BOOLEAN"),
                     ("book_limited",           "BOOLEAN"),
                     ("is_combo",               "BOOLEAN"),
+                    ("blend_high",             "NUMERIC(5,1)"),
+                    ("scan_to_cutoff_min",     "INTEGER"),  # gap 2: minutes from this scan to market cutoff
                 ]
                 try:
                     conn4 = get_db()
@@ -6314,6 +6430,14 @@ def _paper_trade_log(city_key, fc, markets):
                     m.get("spread_exceeds_bracket"),
                     m.get("book_limited"),
                     m.get("is_combo", False),
+                    # Gap 1: blend_high (HRRR-blended Open-Meteo best_match) for
+                    # measuring whether the blended model beats raw GFS/ECMWF.
+                    fc.get("blend_high"),
+                    # Gap 2: minutes from scan to market cutoff. Lets us answer
+                    # "did model accuracy improve as cutoff approached?" without
+                    # fragile MAX(scan_ts) joins.
+                    int(round((m.get("hours_to_cutoff") or 0) * 60))
+                        if m.get("hours_to_cutoff") is not None else None,
                 )
 
                 _cols = """city, nws_station, target_date, horizon, ticker,
@@ -6324,8 +6448,8 @@ def _paper_trade_log(city_key, fc, markets):
                          edge_ratio, gap_c, spread_c, kelly_frac,
                          yes_bid, liq_grade, open_interest, volume_24h, fillable_a,
                          is_tail_bet, any_model_inside, spread_exceeds_bracket, book_limited,
-                         is_combo"""
-                _vals = ",".join(["%s"] * 34)
+                         is_combo, blend_high, scan_to_cutoff_min"""
+                _vals = ",".join(["%s"] * 36)
 
                 # paper_trades — A-grade only (bet simulation)
                 if m.get("grade") == "A":
