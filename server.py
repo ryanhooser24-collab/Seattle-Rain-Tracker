@@ -954,7 +954,13 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
         # For open-ended brackets (no lo or no hi), use 2°F as reference width
         # since that's the standard bracket width. A 6°F spread on <66°F is
         # just as dangerous as a 6°F spread on a 66–68°F bracket.
-        bracket_width_ref = (hi - lo) if (hi is not None and lo is not None) else 2.0
+        # Bracket "65-66" wins on integers 65 AND 66 (inclusive), so the
+        # actual winning temperature range is 64.5–66.5°F = 2°F wide, not
+        # the integer difference of 1°F. Use (hi - lo + 1) to account for
+        # both endpoints being inclusive winners. Without this fix, model
+        # spreads of ~0.9°F incorrectly trigger spread_exceeds_bracket on
+        # standard 2-integer brackets and downgrade A signals to B.
+        bracket_width_ref = (hi - lo + 1) if (hi is not None and lo is not None) else 2.0
         spread_exceeds_bracket = (raw_spread > 0 and
                                   raw_spread >= bracket_width_ref * 0.75)
 
