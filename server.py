@@ -3556,11 +3556,11 @@ def ensure_tables():
                     grade,
                     COUNT(*)                                            AS n,
                     ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END), 3) AS win_rate,
-                    ROUND(AVG(model_prob::float), 3)                    AS avg_model_prob,
-                    ROUND(AVG(yes_ask::float), 3)                       AS avg_market_price,
+                    ROUND(AVG(model_prob::numeric), 3)                    AS avg_model_prob,
+                    ROUND(AVG(yes_ask::numeric), 3)                       AS avg_market_price,
                     ROUND(AVG(gap_c), 1)                                AS avg_gap_c,
                     ROUND(AVG(net_gap_c), 1)                            AS avg_net_gap_c,
-                    ROUND(AVG(edge_ratio::float), 3)                    AS avg_edge_ratio,
+                    ROUND(AVG(edge_ratio::numeric), 3)                    AS avg_edge_ratio,
                     ROUND(STDDEV(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END), 3) AS win_rate_stddev
                 FROM temp_snapshots
                 WHERE settled_correct IS NOT NULL
