@@ -6108,12 +6108,24 @@ class Handler(BaseHTTPRequestHandler):
                     conn4 = get_db()
                     if conn4:
                         with conn4.cursor() as cur:
-                            for tbl in ("paper_trades", "calibration_snapshots"):
+                            # Include temp_snapshots in migrations — it shares
+                            # most columns with paper_trades/calibration_snapshots
+                            # and previously was missing them, causing silent
+                            # INSERT failures (e.g. hours_to_cutoff missing
+                            # since May 2 2026). Most columns are no-ops for
+                            # temp_snapshots' INSERT path (which has its own
+                            # column list), but hours_to_cutoff is critical
+                            # and shared.
+                            for tbl in ("paper_trades", "calibration_snapshots", "temp_snapshots"):
                                 for col, dtype in _new_columns:
-                                    cur.execute(f"""
-                                        ALTER TABLE {tbl}
-                                        ADD COLUMN IF NOT EXISTS {col} {dtype}
-                                    """)
+                                    try:
+                                        cur.execute(f"""
+                                            ALTER TABLE {tbl}
+                                            ADD COLUMN IF NOT EXISTS {col} {dtype}
+                                        """)
+                                    except Exception as col_err:
+                                        # Don't let one column failure block others
+                                        print(f"    ⚠️  ALTER {tbl}.{col}: {col_err}")
                         conn4.commit()
                         conn4.close()
                         results["schema_migration"] = "ok"
@@ -6552,6 +6564,10 @@ def _run_background_scan():
     import time as _t
     start = _t.time()
     total = 0
+    # Reset per-city error dedup so each new cycle can re-surface errors.
+    # Without this, a one-time fix wouldn't show "errors stopped" — and a
+    # newly-arising error post-fix would be hidden by old dedup state.
+    _SCAN_ERR_LOGGED.clear()
     for horizon in ["d0", "d1"]:
         for city_key in TEMP_CITIES:
             try:
