@@ -6083,6 +6083,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 # Migration: add all new columns to existing tables if missing
                 _new_columns = [
+                    ("hours_to_cutoff",        "NUMERIC(5,1)"),  # CRITICAL: missing from temp_snapshots in prod, breaking all writes
                     ("mkt_rank_conf",          "TEXT"),
                     ("gfs_high",               "NUMERIC(5,1)"),
                     ("ecmwf_high",             "NUMERIC(5,1)"),
@@ -6301,6 +6302,82 @@ class Handler(BaseHTTPRequestHandler):
 
         elif path == "/health":
             self.send_json({"ok": True, "message": "Server running"})
+
+        elif path == "/health/pipeline":
+            # Green/red health check for the data pipeline. Returns:
+            #   OK            — pipeline healthy
+            #   FAIL: reason  — something is broken, with the reason
+            # Designed for fast eyeball or external monitoring.
+            import datetime as _dt
+            try:
+                problems = []
+
+                # 1. Any scan errors in the ring buffer? (Patch 6 surfaces these)
+                with _SCAN_ERR_LOCK:
+                    recent_errs = list(_SCAN_ERR_LOG[:20])
+                if recent_errs:
+                    # Only count errors from the last 6 hours as "active"
+                    cutoff = _dt.datetime.utcnow() - _dt.timedelta(hours=6)
+                    active = [e for e in recent_errs
+                              if _dt.datetime.fromisoformat(e["timestamp"]) > cutoff]
+                    if active:
+                        problems.append(f"{len(active)} scan errors in last 6h: "
+                                        f"{active[0].get('error','?')[:80]}")
+
+                # 2. Any propagation errors?
+                with _PROP_LOCK:
+                    recent_props = list(_PROP_LOG[:5])
+                prop_failures = [p for p in recent_props if not p.get("ok")]
+                if prop_failures:
+                    problems.append(f"Propagation failed: {prop_failures[0].get('error','?')[:80]}")
+
+                # 3. Are scans actually running? (fresh prop run within 5 hours)
+                if recent_props:
+                    last_prop = recent_props[0].get("run_at", "")
+                    try:
+                        last_dt = _dt.datetime.fromisoformat(last_prop)
+                        age_hr = (_dt.datetime.utcnow() - last_dt).total_seconds() / 3600
+                        if age_hr > 5:
+                            problems.append(f"No scans in {age_hr:.1f}h (expected ≤4h cadence)")
+                    except Exception:
+                        pass
+                else:
+                    problems.append("No propagation runs recorded — scheduler may be dead")
+
+                # 4. Is fresh data landing in temp_snapshots? (today or yesterday)
+                conn = get_db()
+                if conn:
+                    try:
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                SELECT MAX(target_date) FROM temp_snapshots
+                            """)
+                            latest = cur.fetchone()[0]
+                        if latest:
+                            today = _dt.date.today()
+                            days_stale = (today - latest).days
+                            if days_stale > 2:
+                                problems.append(f"temp_snapshots stalest write was {days_stale}d ago ({latest})")
+                        else:
+                            problems.append("temp_snapshots is empty")
+                    finally:
+                        conn.close()
+
+                if problems:
+                    self.send_response(503)
+                    self.send_header("Content-Type", "text/plain")
+                    self.end_headers()
+                    self.wfile.write(("FAIL:\n  " + "\n  ".join(problems)).encode())
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain")
+                    self.end_headers()
+                    self.wfile.write(b"OK")
+            except Exception as e:
+                self.send_response(500)
+                self.send_header("Content-Type", "text/plain")
+                self.end_headers()
+                self.wfile.write(f"FAIL: health check itself errored: {e}".encode())
 
         else:
             self.send_response(404)
@@ -6560,6 +6637,75 @@ def _paper_trade_settle():
             _PROP_LOG[:] = _PROP_LOG[:50]
 
 
+def _auto_heal_schema():
+    """
+    Self-healing: if scan errors mention missing columns, auto-run column
+    migration once per process lifetime. Stops the "wait a week, find a bug,
+    fix it, wait another week" pattern.
+    """
+    global _AUTO_HEAL_ATTEMPTED
+    try:
+        _AUTO_HEAL_ATTEMPTED
+    except NameError:
+        _AUTO_HEAL_ATTEMPTED = False
+    if _AUTO_HEAL_ATTEMPTED:
+        return
+    with _SCAN_ERR_LOCK:
+        errs = list(_SCAN_ERR_LOG[:20])
+    column_errors = [e for e in errs
+                     if "does not exist" in str(e.get("error", ""))
+                     and "column" in str(e.get("error", "")).lower()]
+    if not column_errors:
+        return
+
+    print(f"  🔧 Self-healing: detected {len(column_errors)} column errors, "
+          f"running schema migration...")
+    _AUTO_HEAL_ATTEMPTED = True
+    try:
+        # Replay the migration loop directly (mirroring /admin/setup-db)
+        _migration_columns = [
+            ("hours_to_cutoff",        "NUMERIC(5,1)"),
+            ("mkt_rank_conf",          "TEXT"),
+            ("gfs_high",               "NUMERIC(5,1)"),
+            ("ecmwf_high",             "NUMERIC(5,1)"),
+            ("model_spread",           "NUMERIC(5,2)"),
+            ("edge_ratio",             "NUMERIC(8,3)"),
+            ("gap_c",                  "INTEGER"),
+            ("spread_c",               "INTEGER"),
+            ("kelly_frac",             "NUMERIC(6,4)"),
+            ("yes_bid",                "NUMERIC(6,4)"),
+            ("liq_grade",              "TEXT"),
+            ("open_interest",          "INTEGER"),
+            ("volume_24h",             "INTEGER"),
+            ("fillable_a",             "NUMERIC(8,2)"),
+            ("is_tail_bet",            "BOOLEAN"),
+            ("any_model_inside",       "BOOLEAN"),
+            ("spread_exceeds_bracket", "BOOLEAN"),
+            ("book_limited",           "BOOLEAN"),
+            ("is_combo",               "BOOLEAN"),
+            ("blend_high",             "NUMERIC(5,1)"),
+            ("scan_to_cutoff_min",     "INTEGER"),
+        ]
+        conn = get_db()
+        if conn:
+            with conn.cursor() as cur:
+                for tbl in ("temp_snapshots", "paper_trades", "calibration_snapshots"):
+                    for col, dtype in _migration_columns:
+                        try:
+                            cur.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS {col} {dtype}")
+                        except Exception as ce:
+                            print(f"    ⚠️  ALTER {tbl}.{col}: {ce}")
+            conn.commit()
+            conn.close()
+            print(f"  ✅ Self-healing migration complete")
+            # Clear scan errors so health check goes green if this worked
+            with _SCAN_ERR_LOCK:
+                _SCAN_ERR_LOG.clear()
+            _SCAN_ERR_LOGGED.clear()
+    except Exception as e:
+        print(f"  ⚠️  Self-healing failed: {e}")
+
+
 def _run_background_scan():
     import time as _t
     start = _t.time()
@@ -6586,6 +6732,8 @@ def _run_background_scan():
                 total += 1
             except Exception:
                 pass
+    # Self-heal: if column errors surfaced this cycle, auto-fix the schema.
+    _auto_heal_schema()
     _paper_trade_settle()
     print(f"  📊 Background scan: {total} cities in {round(_t.time()-start,1)}s")
 
