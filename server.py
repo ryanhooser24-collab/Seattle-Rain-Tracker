@@ -5939,7 +5939,10 @@ class Handler(BaseHTTPRequestHandler):
 
                         # Count all rows
                         total = 0
-                        grade_counts = {}
+                        grade_counts    = {}
+                        settled_by_grade = {}
+                        wins_by_grade    = {}
+                        settled_by_city  = []
                         if table_exists:
                             cur.execute("SELECT COUNT(*) FROM calibration_snapshots")
                             total = cur.fetchone()[0]
@@ -5949,6 +5952,38 @@ class Handler(BaseHTTPRequestHandler):
                                 GROUP BY grade
                             """)
                             grade_counts = {r[0]: r[1] for r in cur.fetchall()}
+
+                            # Settled counts + win rate by grade
+                            cur.execute("""
+                                SELECT grade,
+                                       COUNT(*) FILTER (WHERE settled_correct IS NOT NULL) AS settled,
+                                       COUNT(*) FILTER (WHERE settled_correct = TRUE)      AS wins
+                                FROM calibration_snapshots
+                                WHERE grade IN ('A','B','C')
+                                GROUP BY grade ORDER BY grade
+                            """)
+                            for r in cur.fetchall():
+                                settled_by_grade[r[0]] = r[1]
+                                wins_by_grade[r[0]]    = r[2]
+
+                            # Settled per city (A+B) for Tier 1 gating
+                            cur.execute("""
+                                SELECT city,
+                                       COUNT(*) FILTER (WHERE settled_correct IS NOT NULL) AS settled,
+                                       COUNT(*) FILTER (WHERE settled_correct = TRUE)      AS wins
+                                FROM calibration_snapshots
+                                WHERE grade IN ('A','B')
+                                GROUP BY city ORDER BY settled DESC
+                            """)
+                            settled_by_city = [
+                                {"city": r[0], "settled": r[1], "wins": r[2],
+                                 "win_rate": round(r[2]/r[1], 3) if r[1] > 0 else None}
+                                for r in cur.fetchall()
+                            ]
+
+                        total_settled_ab = sum(settled_by_grade.get(g, 0) for g in ("A","B"))
+                        total_wins_ab    = sum(wins_by_grade.get(g, 0)    for g in ("A","B"))
+                        tier1_ready      = total_settled_ab >= 150
 
                         # Last scan markets sample
                         cur.execute("""
@@ -5966,6 +6001,17 @@ class Handler(BaseHTTPRequestHandler):
                         "table_exists": table_exists,
                         "total_rows": total,
                         "grade_counts": grade_counts,
+                        "tier1": {
+                            "ready": tier1_ready,
+                            "settled_ab": total_settled_ab,
+                            "wins_ab":    total_wins_ab,
+                            "win_rate_ab": round(total_wins_ab/total_settled_ab, 3)
+                                           if total_settled_ab > 0 else None,
+                            "needed": max(0, 150 - total_settled_ab),
+                        },
+                        "settled_by_grade": settled_by_grade,
+                        "wins_by_grade":    wins_by_grade,
+                        "settled_by_city":  settled_by_city,
                         "recent_paper_trades": recent,
                     })
             except Exception as e:
@@ -5998,15 +6044,16 @@ class Handler(BaseHTTPRequestHandler):
                                 "series": series, "n": 0, "vol_24h": 0, "oi": 0,
                                 "avg_spread_c": None, "ask_depth_total": 0,
                                 "note": "no open markets"}
-                    vol = sum((m.get("volume_24h") or 0) for m in raw)
-                    oi  = sum((m.get("open_interest") or 0) for m in raw)
-                    depth = sum((m.get("yes_ask_size") or 0) for m in raw)
+                    vol = sum((m.get("volume_24h_fp")    or 0) for m in raw)
+                    oi  = sum((m.get("open_interest_fp") or 0) for m in raw)
+                    depth = sum((m.get("yes_ask_size_fp") or 0) for m in raw)
                     spreads = []
                     for m in raw:
-                        ya, yb = m.get("yes_ask"), m.get("yes_bid")
+                        ya = m.get("yes_ask_dollars")
+                        yb = m.get("yes_bid_dollars")
                         if ya is not None and yb is not None and ya > 0:
-                            # Kalshi prices are in cents (1-99)
-                            spreads.append(ya - yb)
+                            # Kalshi prices are dollars (0–1); convert spread to cents
+                            spreads.append((ya - yb) * 100)
                     avg_spr = round(sum(spreads)/len(spreads), 1) if spreads else None
                     return {"city": city_key, "label": label, "type": mtype,
                             "series": series, "n": len(raw), "vol_24h": vol,
