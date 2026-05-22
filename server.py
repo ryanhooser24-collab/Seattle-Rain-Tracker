@@ -575,24 +575,14 @@ def fetch_temp_kalshi_markets(city_key, market_type="high"):
             if lo_temp is None and hi_temp is None:
                 above = re.search(r"(?:above|>|or above)\s*(\d+\.?\d*)", title, re.IGNORECASE)
                 below = re.search(r"(?:below|<|or below)\s*(\d+\.?\d*)", title, re.IGNORECASE)
-                # IMPORTANT: Kalshi's tail bracket title says "<48" or "below 48"
-                # but the bracket actually wins on NWS reporting 47 or below
-                # (Kalshi's UI confirms: "47° or below"). The threshold in the
-                # title is the EXCLUSIVE upper bound, not the highest winning
-                # integer. We normalize lo/hi to the winning integers so that
-                # bracket_prob's half-integer shift (upper = hi + 0.5) and the
-                # settlement check (NWS_value <= hi_temp) both give correct
-                # answers. Display label preserves Kalshi's convention.
                 if above:
-                    raw_threshold = float(above.group(1))
-                    lo_temp = raw_threshold + 1   # lowest winning integer (e.g. ">95" wins on 96+)
+                    lo_temp = float(above.group(1))
                     hi_temp = None
-                    bracket_label = f">{int(raw_threshold)}°F"
+                    bracket_label = f">{int(lo_temp)}°F"
                 elif below:
-                    raw_threshold = float(below.group(1))
                     lo_temp = None
-                    hi_temp = raw_threshold - 1   # highest winning integer (e.g. "<48" wins on ≤47)
-                    bracket_label = f"<{int(raw_threshold)}°F"
+                    hi_temp = float(below.group(1))
+                    bracket_label = f"<{int(hi_temp)}°F"
 
             # Last resort: functional_strike field
             if lo_temp is None and hi_temp is None:
@@ -954,13 +944,7 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
         # For open-ended brackets (no lo or no hi), use 2°F as reference width
         # since that's the standard bracket width. A 6°F spread on <66°F is
         # just as dangerous as a 6°F spread on a 66–68°F bracket.
-        # Bracket "65-66" wins on integers 65 AND 66 (inclusive), so the
-        # actual winning temperature range is 64.5–66.5°F = 2°F wide, not
-        # the integer difference of 1°F. Use (hi - lo + 1) to account for
-        # both endpoints being inclusive winners. Without this fix, model
-        # spreads of ~0.9°F incorrectly trigger spread_exceeds_bracket on
-        # standard 2-integer brackets and downgrade A signals to B.
-        bracket_width_ref = (hi - lo + 1) if (hi is not None and lo is not None) else 2.0
+        bracket_width_ref = (hi - lo) if (hi is not None and lo is not None) else 2.0
         spread_exceeds_bracket = (raw_spread > 0 and
                                   raw_spread >= bracket_width_ref * 0.75)
 
@@ -1057,13 +1041,7 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
     _grade_up   = {"A": "A", "B": "A", "C": "B", "skip": "skip"}
     _grade_down = {"A": "B", "B": "C", "C": "skip", "skip": "skip"}
 
-    # Only rank tradeable, non-skip markets. Skip-graded markets include
-    # settled-stale ones (ask >= 0.98) which would otherwise dominate the #1
-    # rank with their near-100% prices, pushing real markets to #2+ and
-    # blocking auto-trader on otherwise valid A signals.
-    _tradeable_asks = [x for x in analyzed
-                       if 0.02 < x.get("yes_ask", 0) < 0.98
-                       and x.get("grade") != "skip"]
+    _tradeable_asks = [x for x in analyzed if x.get("yes_ask", 0) > 0.02]
     _is_tail_series = len(_tradeable_asks) <= 1
 
     if not _is_tail_series:
@@ -1278,75 +1256,6 @@ def detect_combo_signals(all_markets, forecast):
     return combos
 
 
-def detect_arbitrage_opportunity(all_markets, min_depth_dollars=5.0,
-                                 threshold_pct=95):
-    """
-    Cross-bracket arbitrage detector.
-
-    Exactly one bracket in a market must win. If the sum of YES asks across
-    all brackets is < 100¢, buying YES on every bracket guarantees profit:
-    one MUST settle at $1.00 and the others go to $0. Total cost = sum of
-    asks; total payout = $1.00; profit = $1.00 - sum_asks per contract set.
-
-    Returns a single arb dict if opportunity found, else None. Constrained by:
-      - sum of YES asks (in cents) <= threshold_pct
-      - every leg has ≥min_depth_dollars fillable at displayed ask
-      - all legs have valid ask > 0 and < 1.0 (excludes settled/dead markets)
-
-    Sizing: capped by minimum fillable depth across all legs (so we don't
-    overbuy a leg without matching coverage on others — exact arb requires
-    equal contracts on every leg).
-    """
-    # Filter to legitimate, tradeable brackets
-    legs = [m for m in all_markets
-            if m.get("yes_ask") and 0.02 < m.get("yes_ask") < 0.98
-            and m.get("ticker")]
-    if len(legs) < 2:
-        return None
-
-    sum_asks_c = sum(round(m["yes_ask"] * 100) for m in legs)
-    if sum_asks_c > threshold_pct:
-        return None  # no arb (or not enough margin past Kalshi fees)
-
-    # Calculate min fillable depth across all legs.
-    # fillable_a = dollars worth of YES available at the displayed ask.
-    min_depth_a = None
-    for leg in legs:
-        depth = leg.get("fillable_a")
-        if depth is None or depth < min_depth_dollars:
-            return None  # one leg too thin, refuse to fire
-        if min_depth_a is None or depth < min_depth_a:
-            min_depth_a = depth
-
-    # Per-contract-set cost = sum of asks (in dollars).
-    # Number of contract sets we can buy = min_depth_dollars / max_ask
-    # (since fillable_a is in dollars, and depth is per leg at its own ask).
-    # Simpler: contracts = floor(min_depth_a / max_ask_per_leg).
-    max_ask = max(m["yes_ask"] for m in legs)
-    max_contracts = int(min_depth_a / max_ask) if max_ask > 0 else 0
-    if max_contracts < 1:
-        return None
-
-    profit_per_set_c = 100 - sum_asks_c   # cents per contract set
-
-    return {
-        "is_arb":           True,
-        "ticker":           f"ARB:{legs[0].get('city','?')}-{len(legs)}legs",
-        "sum_asks_c":       sum_asks_c,
-        "profit_per_set_c": profit_per_set_c,
-        "max_contracts":    max_contracts,
-        "max_profit_c":     profit_per_set_c * max_contracts,
-        "leg_count":        len(legs),
-        "min_depth_a":      round(min_depth_a, 2),
-        "tickers":          [m["ticker"] for m in legs],
-        "legs":             [
-            {"ticker": m["ticker"], "ask": m["yes_ask"],
-             "depth_a": m.get("fillable_a"), "label": m.get("bracket_label")}
-            for m in legs
-        ],
-    }
-
-
 def scan_temp_city(city_key, horizon="d1"):
     """
     Full pipeline for one temp city: forecast + both market types + analysis.
@@ -1393,33 +1302,6 @@ def scan_temp_city(city_key, horizon="d1"):
         # Detect combo signals — adjacent bracket pairs with combined positive edge
         combo_signals = detect_combo_signals(high_markets, fc)
 
-        # When a combo exists, mark its constituent legs as combo-covered so
-        # they don't generate duplicate auto-trader bets. The combo signal
-        # itself handles betting both legs via the combo-aware order placement.
-        # Without this, auto-trader could double-bet on a single bracket
-        # (once via combo, once via standalone leg).
-        _combo_tickers = set()
-        for c in combo_signals:
-            if c.get("actionable"):
-                for t in c.get("tickers", []):
-                    _combo_tickers.add(t)
-        for m in high_markets + low_markets:
-            if m.get("ticker") in _combo_tickers:
-                m["combo_leg"] = True
-                m["actionable"] = False  # remove from standalone actionable list
-
-        # Detect cross-bracket arbitrage opportunities. Reads thresholds from
-        # auto_trader_config so users can tune without redeploy.
-        # Tag every market with its city for arb identification clarity.
-        for m in high_markets:
-            m["city"] = city_key
-        arb_cfg = _AT_CONFIG  # latest in-memory config
-        arb_signal = detect_arbitrage_opportunity(
-            high_markets,
-            min_depth_dollars=arb_cfg.get("arb_min_depth_dollars", 5.0),
-            threshold_pct=arb_cfg.get("arb_threshold_pct", 95),
-        )
-
         # Best edge across both market types (including combos)
         all_mkts = [m for m in high_markets + low_markets if m.get("actionable")]
         all_actionable = all_mkts + [c for c in combo_signals if c.get("actionable")]
@@ -1437,7 +1319,6 @@ def scan_temp_city(city_key, horizon="d1"):
             "high_markets":   high_markets,
             "low_markets":    low_markets,
             "combo_signals":  combo_signals,
-            "arb_signal":     arb_signal,
             "low_suppressed": horizon == "d1",
             "best_edge_c":    best_edge,
             "best_grade":     best_grade,
@@ -1479,25 +1360,12 @@ def scan_temp_city(city_key, horizon="d1"):
                                     int(m.get("open_interest",0)), int(m.get("volume_24h",0)),
                                     m.get("hours_to_cutoff"),
                                 ))
-                            except Exception as e:
-                                # Log first occurrence per city to avoid flooding
-                                if not _SCAN_ERR_LOGGED.get(city_key):
-                                    import datetime as _dt
-                                    err_entry = {
-                                        "city": city_key,
-                                        "error": str(e),
-                                        "ticker": m.get("ticker"),
-                                        "timestamp": _dt.datetime.utcnow().isoformat(),
-                                    }
-                                    with _SCAN_ERR_LOCK:
-                                        _SCAN_ERR_LOG.insert(0, err_entry)
-                                        _SCAN_ERR_LOG[:] = _SCAN_ERR_LOG[:50]
-                                    print(f"  ⚠️  temp_snapshots INSERT failed [{city_key}]: {e}")
-                                    _SCAN_ERR_LOGGED[city_key] = True
+                            except Exception:
+                                pass
                 conn.commit()
                 conn.close()
-        except Exception as e:
-            print(f"  ⚠️  temp_snapshots DB connection/commit failed for {city_key}: {e}")
+        except Exception:
+            pass
 
         return result
 
@@ -1661,11 +1529,6 @@ _SETTLE_LOG           = []          # last N settlement results, in memory
 _SETTLE_LOCK          = _threading.Lock()
 _SETTLE_THREAD        = None
 _LAST_SETTLE_RUN      = {}          # date_str → result dict, prevents duplicate runs
-_PROP_LOG             = []          # last N _paper_trade_settle results — propagation tracking
-_PROP_LOCK            = _threading.Lock()
-_SCAN_ERR_LOG         = []          # last N temp_snapshots INSERT failures
-_SCAN_ERR_LOCK        = _threading.Lock()
-_SCAN_ERR_LOGGED      = {}          # city_key → True (dedupes per-city per-process)
 
 # ── AUTO-TRADER GLOBALS ───────────────────────────────────────────────────────
 _AT_THREAD   = None
@@ -1687,13 +1550,6 @@ _AT_CONFIG = {
     "min_volume":     200,
     "scan_interval":  300,   # seconds between scans
     "min_fill_dollars": 5.0, # skip execution if Kelly budget < this
-    # Cross-bracket arbitrage scanner — fires when sum of asks across all
-    # brackets in a market is < arb_threshold_pct (i.e. < 100¢ minus cushion).
-    # Profit is guaranteed since exactly one bracket must win.
-    "arb_enabled":         False,  # opt-in, default off
-    "arb_threshold_pct":   95,     # only fire when sum_asks_c <= this
-    "arb_max_per_bet":     200.0,  # cap total exposure per arb opportunity
-    "arb_min_depth_dollars": 5.0,  # require ≥this fillable on EVERY leg
 }
 
 
@@ -2176,31 +2032,6 @@ def run_auto_trader_cycle(force=False):
                         signal, cfg, open_positions, city_counts, ticker_spent)
                     total_fills += fills
 
-                # Cross-bracket arbitrage execution (gated by arb_enabled).
-                # Fires at most once per city per scan cycle.
-                if cfg.get("arb_enabled") and result.get("arb_signal"):
-                    arb = result["arb_signal"]
-                    arb_max_dollars = cfg.get("arb_max_per_bet", 200.0)
-                    # Sets we can afford = arb_max_dollars / cost_per_set
-                    cost_per_set_d = arb["sum_asks_c"] / 100.0
-                    affordable_sets = int(arb_max_dollars / cost_per_set_d) if cost_per_set_d > 0 else 0
-                    sets_to_buy = min(arb["max_contracts"], affordable_sets)
-                    if sets_to_buy >= 1:
-                        at_log("ARB",
-                               f"Arb opportunity {city_key}: sum={arb['sum_asks_c']}¢, "
-                               f"buying {sets_to_buy} sets, profit≈"
-                               f"${arb['profit_per_set_c'] * sets_to_buy / 100:.2f}",
-                               city=city_key, extra=arb)
-                        # NOTE: actual order placement to Kalshi is intentionally
-                        # not implemented here — flagged to manual review until
-                        # Kalshi API order primitives are added. This logs the
-                        # opportunity for paper-trade tracking.
-                        total_fills += sets_to_buy
-                    else:
-                        at_log("ARB_SKIP",
-                               f"Arb sum={arb['sum_asks_c']}¢ but sizing={sets_to_buy}",
-                               city=city_key, extra=arb)
-
             except Exception as e:
                 at_log("ERR", f"Error scanning {city_key}/{horizon}: {e}", city=city_key)
 
@@ -2285,18 +2116,10 @@ def run_auto_settlement(force=False):
     # Target: yesterday in ET (the date whose high is in this morning's CLI)
     yesterday = (now_et - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # Avoid re-running for the same date more than once per day — but only
-    # short-circuit if a previous run successfully settled ALL cities that
-    # had unsettled snapshots. Partial success must NOT block retry: NWS CLI
-    # publishes between 6–9 AM ET per city, so the 7 AM scheduler run often
-    # catches some cities before their CLI is up. Without retry, those cities
-    # never get settled. (Bug fix: previously this short-circuited on any
-    # successful run, leaving late-publishing cities permanently unsettled.)
-    prev = _LAST_SETTLE_RUN.get(yesterday, {})
-    if (not force and prev.get("ok")
-        and prev.get("fully_settled") is True):
+    # Avoid re-running for the same date more than once per day
+    if not force and _LAST_SETTLE_RUN.get(yesterday, {}).get("ok"):
         return {"ok": True, "skipped": True,
-                "reason": f"All cities fully settled for {yesterday}"}
+                "reason": f"Already settled {yesterday} today"}
 
     conn = get_db()
     if not conn:
@@ -2318,7 +2141,6 @@ def run_auto_settlement(force=False):
 
         if not cities_needed:
             msg = {"ok": True, "date": yesterday, "settled": 0,
-                   "fully_settled": True,  # nothing to do = fully done
                    "note": "No unsettled snapshots for this date"}
             with _SETTLE_LOCK:
                 _SETTLE_LOG.insert(0, {**msg, "run_at": now_et.isoformat()})
@@ -2401,22 +2223,13 @@ def run_auto_settlement(force=False):
         try: conn.close()
         except: pass
 
-    # fully_settled = every city we tried to settle returned ok=True from CLI fetch.
-    # When this is False, the next scheduler tick will retry the failed cities.
-    expected_cities = len(cities_needed)
-    successful_cities = sum(1 for r in results if r.get("ok"))
-    fully_settled = (successful_cities >= expected_cities and expected_cities > 0)
-
     summary = {
-        "ok":              True,
-        "date":             yesterday,
-        "settled":          settled,
-        "attempted":        attempted,
-        "expected_cities":  expected_cities,
-        "successful_cities": successful_cities,
-        "fully_settled":    fully_settled,
-        "cities":           results,
-        "run_at":           now_et.isoformat(),
+        "ok":        True,
+        "date":      yesterday,
+        "settled":   settled,
+        "attempted": attempted,
+        "cities":    results,
+        "run_at":    now_et.isoformat(),
     }
     with _SETTLE_LOCK:
         _SETTLE_LOG.insert(0, summary)
@@ -2432,13 +2245,7 @@ def _settlement_scheduler():
     print("  🕐 Auto-settlement scheduler started")
     while True:
         try:
-            res = run_auto_settlement()
-            # Propagate settlements from temp_snapshots → calibration_snapshots
-            # + paper_trades. Run on EVERY scheduler tick (not just when new
-            # settlements landed) so we backfill any prior settlements that
-            # failed to propagate. _paper_trade_settle is a no-op if there's
-            # nothing to update.
-            _paper_trade_settle()
+            run_auto_settlement()
         except Exception as e:
             print(f"  ⚠️  Settlement scheduler error: {e}")
         _t.sleep(SETTLE_POLL_INTERVAL)
@@ -3691,11 +3498,11 @@ def ensure_tables():
                     grade,
                     COUNT(*)                                            AS n,
                     ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END), 3) AS win_rate,
-                    ROUND(AVG(model_prob::numeric), 3)                    AS avg_model_prob,
-                    ROUND(AVG(yes_ask::numeric), 3)                       AS avg_market_price,
+                    ROUND(AVG(model_prob::float), 3)                    AS avg_model_prob,
+                    ROUND(AVG(yes_ask::float), 3)                       AS avg_market_price,
                     ROUND(AVG(gap_c), 1)                                AS avg_gap_c,
                     ROUND(AVG(net_gap_c), 1)                            AS avg_net_gap_c,
-                    ROUND(AVG(edge_ratio::numeric), 3)                    AS avg_edge_ratio,
+                    ROUND(AVG(edge_ratio::float), 3)                    AS avg_edge_ratio,
                     ROUND(STDDEV(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END), 3) AS win_rate_stddev
                 FROM temp_snapshots
                 WHERE settled_correct IS NOT NULL
@@ -5479,15 +5286,10 @@ class Handler(BaseHTTPRequestHandler):
                                     """, (actual, actual, actual, res["city"], override, mtype))
                                     settled += cur.rowcount
                         conn.commit(); conn.close()
-                        # Propagate the override-date settlements through to
-                        # calibration_snapshots + paper_trades.
-                        _paper_trade_settle()
                         self.send_json({"ok": True, "date": override,
                                         "settled": settled, "cities": results})
                 else:
                     result = run_auto_settlement(force=True)
-                    # Propagate after every manual trigger.
-                    _paper_trade_settle()
                     self.send_json(result)
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
@@ -6083,7 +5885,6 @@ class Handler(BaseHTTPRequestHandler):
 
                 # Migration: add all new columns to existing tables if missing
                 _new_columns = [
-                    ("hours_to_cutoff",        "NUMERIC(5,1)"),  # CRITICAL: missing from temp_snapshots in prod, breaking all writes
                     ("mkt_rank_conf",          "TEXT"),
                     ("gfs_high",               "NUMERIC(5,1)"),
                     ("ecmwf_high",             "NUMERIC(5,1)"),
@@ -6101,283 +5902,201 @@ class Handler(BaseHTTPRequestHandler):
                     ("any_model_inside",       "BOOLEAN"),
                     ("spread_exceeds_bracket", "BOOLEAN"),
                     ("book_limited",           "BOOLEAN"),
-                    ("is_combo",               "BOOLEAN"),
-                    ("blend_high",             "NUMERIC(5,1)"),
-                    ("scan_to_cutoff_min",     "INTEGER"),  # gap 2: minutes from this scan to market cutoff
                 ]
                 try:
                     conn4 = get_db()
                     if conn4:
                         with conn4.cursor() as cur:
-                            # Include temp_snapshots in migrations — it shares
-                            # most columns with paper_trades/calibration_snapshots
-                            # and previously was missing them, causing silent
-                            # INSERT failures (e.g. hours_to_cutoff missing
-                            # since May 2 2026). Most columns are no-ops for
-                            # temp_snapshots' INSERT path (which has its own
-                            # column list), but hours_to_cutoff is critical
-                            # and shared.
-                            for tbl in ("paper_trades", "calibration_snapshots", "temp_snapshots"):
+                            for tbl in ("paper_trades", "calibration_snapshots"):
                                 for col, dtype in _new_columns:
-                                    try:
-                                        cur.execute(f"""
-                                            ALTER TABLE {tbl}
-                                            ADD COLUMN IF NOT EXISTS {col} {dtype}
-                                        """)
-                                    except Exception as col_err:
-                                        # Don't let one column failure block others
-                                        print(f"    ⚠️  ALTER {tbl}.{col}: {col_err}")
+                                    cur.execute(f"""
+                                        ALTER TABLE {tbl}
+                                        ADD COLUMN IF NOT EXISTS {col} {dtype}
+                                    """)
                         conn4.commit()
                         conn4.close()
                         results["schema_migration"] = "ok"
                 except Exception as e:
                     results["schema_migration"] = str(e)
-
-                # ── Tail bracket migration (one-time, idempotent) ─────────
-                # Bug: parser previously set hi_temp = X for "<X°F" brackets,
-                # but the actual winning condition is NWS report ≤ X-1
-                # (Kalshi UI: "<48°F" market = "47° or below"). Same bug for
-                # ">X°F" → lo_temp = X but should be X+1.
-                # Migration corrects existing rows where one bound is NULL
-                # AND the non-NULL bound matches the threshold in the label
-                # (the pre-fix signature). Idempotent: after running, the
-                # match condition no longer holds.
-                migration_results = {}
-                for tbl in ("temp_snapshots", "paper_trades", "calibration_snapshots"):
-                    try:
-                        conn5 = get_db()
-                        if not conn5:
-                            migration_results[tbl] = "no DB"
-                            continue
-                        with conn5.cursor() as cur:
-                            # Fix "<X°F" tail: hi_temp = X → hi_temp = X-1
-                            cur.execute(f"""
-                                UPDATE {tbl}
-                                SET hi_temp = hi_temp - 1
-                                WHERE lo_temp IS NULL
-                                  AND hi_temp IS NOT NULL
-                                  AND bracket_label ~ '^<[0-9]+\u00b0F$'
-                                  AND hi_temp = SUBSTRING(bracket_label FROM '^<([0-9]+)\u00b0F$')::numeric
-                            """)
-                            below_fixed = cur.rowcount
-                            # Fix ">X°F" tail: lo_temp = X → lo_temp = X+1
-                            cur.execute(f"""
-                                UPDATE {tbl}
-                                SET lo_temp = lo_temp + 1
-                                WHERE hi_temp IS NULL
-                                  AND lo_temp IS NOT NULL
-                                  AND bracket_label ~ '^>[0-9]+\u00b0F$'
-                                  AND lo_temp = SUBSTRING(bracket_label FROM '^>([0-9]+)\u00b0F$')::numeric
-                            """)
-                            above_fixed = cur.rowcount
-                        conn5.commit()
-                        conn5.close()
-                        migration_results[tbl] = {
-                            "below_fixed": below_fixed,
-                            "above_fixed": above_fixed,
-                        }
-                    except Exception as e:
-                        migration_results[tbl] = f"error: {e}"
-                results["tail_bracket_migration"] = migration_results
-
                 self.send_json({"ok": all_ok, "tables": results})
 
         elif path == "/debug/cal-log":
-            # Full settlement+propagation diagnostic. Surfaces:
-            #  - calibration_snapshots state (total / settled / per city/date)
-            #  - temp_snapshots state (total / settled / per city/date)
-            #  - propagation gap (settled in temp_snapshots but NOT in cal_snap)
-            #  - last 20 _PROP_LOG entries (errors, rowcounts, eligible pairs)
+            # Returns last scan result for calibration_snapshots debugging
             try:
                 conn = get_db()
                 if not conn:
                     self.send_json({"ok": False, "error": "No DB"})
                 else:
-                    out = {"ok": True}
                     with conn.cursor() as cur:
-                        # ── Table existence ────────────────────────────────
+                        # Table exists?
                         cur.execute("""
-                            SELECT table_name FROM information_schema.tables
-                            WHERE table_name IN ('calibration_snapshots',
-                                                 'temp_snapshots',
-                                                 'paper_trades')
+                            SELECT EXISTS (
+                                SELECT FROM information_schema.tables
+                                WHERE table_name = 'calibration_snapshots'
+                            )
                         """)
-                        tables = {r[0] for r in cur.fetchall()}
-                        out["tables_exist"] = sorted(tables)
+                        table_exists = cur.fetchone()[0]
 
-                        # ── calibration_snapshots ──────────────────────────
-                        if "calibration_snapshots" in tables:
-                            cur.execute("""
-                                SELECT COUNT(*),
-                                       COUNT(settled_temp),
-                                       COUNT(*) FILTER
-                                       (WHERE scan_ts >= NOW() - INTERVAL '30 days')
-                                FROM calibration_snapshots
-                            """)
-                            t, s, l30 = cur.fetchone()
-                            out["calibration_snapshots"] = {
-                                "total": t, "settled": s, "last_30d": l30,
-                                "settled_pct": round(100.0 * s / t, 1) if t else 0.0,
-                            }
+                        # Count all rows
+                        total = 0
+                        grade_counts = {}
+                        if table_exists:
+                            cur.execute("SELECT COUNT(*) FROM calibration_snapshots")
+                            total = cur.fetchone()[0]
                             cur.execute("""
                                 SELECT grade, COUNT(*)
                                 FROM calibration_snapshots
                                 GROUP BY grade
                             """)
-                            out["calibration_snapshots"]["by_grade"] = {
-                                (r[0] or "null"): r[1] for r in cur.fetchall()
-                            }
+                            grade_counts = {r[0]: r[1] for r in cur.fetchall()}
 
-                        # ── temp_snapshots ─────────────────────────────────
-                        if "temp_snapshots" in tables:
-                            cur.execute("""
-                                SELECT COUNT(*), COUNT(settled_temp)
-                                FROM temp_snapshots
-                            """)
-                            t, s = cur.fetchone()
-                            out["temp_snapshots"] = {"total": t, "settled": s}
-                            cur.execute("""
-                                SELECT city, target_date,
-                                       COUNT(*) AS rows,
-                                       COUNT(settled_temp) AS settled
-                                FROM temp_snapshots
-                                WHERE settled_temp IS NOT NULL
-                                GROUP BY city, target_date
-                                ORDER BY target_date DESC, city
-                                LIMIT 30
-                            """)
-                            out["temp_snapshots"]["settled_by_city_date"] = [
-                                {"city": r[0], "target_date": str(r[1]),
-                                 "rows": r[2], "settled": r[3]}
-                                for r in cur.fetchall()
-                            ]
-
-                        # ── Propagation gap (the diagnostic gold) ──────────
-                        if {"temp_snapshots", "calibration_snapshots"} <= tables:
-                            cur.execute("""
-                                SELECT t.city, t.target_date,
-                                       t.temp_settled,
-                                       COALESCE(c.cal_total, 0) AS cal_total,
-                                       COALESCE(c.cal_settled, 0) AS cal_settled
-                                FROM (
-                                    SELECT city, target_date,
-                                           COUNT(*) AS temp_settled
-                                    FROM temp_snapshots
-                                    WHERE settled_temp IS NOT NULL
-                                    GROUP BY city, target_date
-                                ) t
-                                LEFT JOIN (
-                                    SELECT city, target_date,
-                                           COUNT(*) AS cal_total,
-                                           COUNT(settled_temp) AS cal_settled
-                                    FROM calibration_snapshots
-                                    GROUP BY city, target_date
-                                ) c USING (city, target_date)
-                                ORDER BY t.target_date DESC, t.city
-                                LIMIT 50
-                            """)
-                            out["propagation_gap"] = [
-                                {"city": r[0], "target_date": str(r[1]),
-                                 "temp_settled": r[2], "cal_total": r[3],
-                                 "cal_settled": r[4],
-                                 "gap": r[3] - r[4]}  # how many cal rows still NULL
-                                for r in cur.fetchall()
-                            ]
+                        # Last scan markets sample
+                        cur.execute("""
+                            SELECT city, grade, ticker, hours_to_cutoff
+                            FROM paper_trades
+                            ORDER BY scan_ts DESC LIMIT 5
+                        """)
+                        recent = [{"city": r[0], "grade": r[1],
+                                   "ticker": r[2], "htc": float(r[3]) if r[3] else None}
+                                  for r in cur.fetchall()]
 
                     conn.close()
-
-                    # ── In-memory propagation log ──────────────────────────
-                    with _PROP_LOCK:
-                        out["recent_prop_runs"] = list(_PROP_LOG[:20])
-                    with _SETTLE_LOCK:
-                        out["recent_settle_runs"] = list(_SETTLE_LOG[:5])
-                    with _SCAN_ERR_LOCK:
-                        out["scan_errors"] = list(_SCAN_ERR_LOG[:20])
-
-                    self.send_json(out)
+                    self.send_json({
+                        "ok": True,
+                        "table_exists": table_exists,
+                        "total_rows": total,
+                        "grade_counts": grade_counts,
+                        "recent_paper_trades": recent,
+                    })
             except Exception as e:
-                import traceback
-                self.send_json({"ok": False, "error": str(e),
-                                "traceback": traceback.format_exc()})
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/debug/low-vol":
+            # Compares LOW vs HIGH temp market liquidity across all cities.
+            # Pulls live volume_24h, open_interest, spread, ask depth.
+            # Used to assess whether low markets are efficient (tight, deep)
+            # or inefficient (wide, thin) — informs whether building a low
+            # forecast model would yield exploitable edge.
+            import concurrent.futures as _cf
+
+            def _fetch_series_stats(city_key, series, mtype, label):
+                if not series:
+                    return {"city": city_key, "label": label, "type": mtype,
+                            "series": None, "n": 0, "vol_24h": 0, "oi": 0,
+                            "avg_spread_c": None, "ask_depth_total": 0,
+                            "note": "no series configured"}
+                try:
+                    p   = "/trade-api/v2/markets"
+                    url = f"{KALSHI_BASE}/markets"
+                    params  = {"series_ticker": series, "status": "open", "limit": 50}
+                    headers = kalshi_auth_headers("GET", p)
+                    r = requests.get(url, params=params, headers=headers, timeout=8)
+                    r.raise_for_status()
+                    raw = r.json().get("markets", [])
+                    if not raw:
+                        return {"city": city_key, "label": label, "type": mtype,
+                                "series": series, "n": 0, "vol_24h": 0, "oi": 0,
+                                "avg_spread_c": None, "ask_depth_total": 0,
+                                "note": "no open markets"}
+                    vol = sum((m.get("volume_24h") or 0) for m in raw)
+                    oi  = sum((m.get("open_interest") or 0) for m in raw)
+                    depth = sum((m.get("yes_ask_size") or 0) for m in raw)
+                    spreads = []
+                    for m in raw:
+                        ya, yb = m.get("yes_ask"), m.get("yes_bid")
+                        if ya is not None and yb is not None and ya > 0:
+                            # Kalshi prices are in cents (1-99)
+                            spreads.append(ya - yb)
+                    avg_spr = round(sum(spreads)/len(spreads), 1) if spreads else None
+                    return {"city": city_key, "label": label, "type": mtype,
+                            "series": series, "n": len(raw), "vol_24h": vol,
+                            "oi": oi, "avg_spread_c": avg_spr,
+                            "ask_depth_total": depth}
+                except Exception as e:
+                    return {"city": city_key, "label": label, "type": mtype,
+                            "series": series, "n": -1, "vol_24h": 0, "oi": 0,
+                            "avg_spread_c": None, "ask_depth_total": 0,
+                            "error": str(e)[:100]}
+
+            jobs = []
+            for ck, cfg in TEMP_CITIES.items():
+                jobs.append((ck, cfg.get("kalshi_high"), "high", cfg.get("label", ck)))
+                jobs.append((ck, cfg.get("kalshi_low"),  "low",  cfg.get("label", ck)))
+
+            results = []
+            with _cf.ThreadPoolExecutor(max_workers=8) as ex:
+                futs = [ex.submit(_fetch_series_stats, *j) for j in jobs]
+                for f in futs:
+                    try:
+                        results.append(f.result(timeout=12))
+                    except Exception as e:
+                        results.append({"error": str(e)[:100]})
+
+            # Build paired comparison per city
+            by_city = {}
+            for r in results:
+                ck = r.get("city")
+                if not ck: continue
+                by_city.setdefault(ck, {"label": r.get("label")})
+                by_city[ck][r["type"]] = r
+
+            paired = []
+            tot_low_vol = tot_high_vol = 0
+            tot_low_oi  = tot_high_oi  = 0
+            for ck, d in by_city.items():
+                hi  = d.get("high", {})
+                lo  = d.get("low",  {})
+                hv  = hi.get("vol_24h", 0) or 0
+                lv  = lo.get("vol_24h", 0) or 0
+                hoi = hi.get("oi", 0)      or 0
+                loi = lo.get("oi", 0)      or 0
+                tot_high_vol += hv;  tot_low_vol += lv
+                tot_high_oi  += hoi; tot_low_oi  += loi
+                vol_ratio = round(lv / hv, 3) if hv > 0 else None
+                oi_ratio  = round(loi / hoi, 3) if hoi > 0 else None
+                paired.append({
+                    "city": ck,
+                    "label": d.get("label"),
+                    "high_series": hi.get("series"),
+                    "low_series":  lo.get("series"),
+                    "high_brackets": hi.get("n"),
+                    "low_brackets":  lo.get("n"),
+                    "high_vol_24h": hv,
+                    "low_vol_24h":  lv,
+                    "high_oi":      hoi,
+                    "low_oi":       loi,
+                    "high_avg_spread_c": hi.get("avg_spread_c"),
+                    "low_avg_spread_c":  lo.get("avg_spread_c"),
+                    "high_ask_depth": hi.get("ask_depth_total", 0),
+                    "low_ask_depth":  lo.get("ask_depth_total", 0),
+                    "vol_ratio_low_to_high": vol_ratio,
+                    "oi_ratio_low_to_high":  oi_ratio,
+                    "low_configured": lo.get("series") is not None,
+                    "low_error":      lo.get("error"),
+                })
+            paired.sort(key=lambda x: -(x["low_vol_24h"] or 0))
+
+            self.send_json({
+                "ok": True,
+                "summary": {
+                    "total_high_vol_24h": tot_high_vol,
+                    "total_low_vol_24h":  tot_low_vol,
+                    "total_high_oi":      tot_high_oi,
+                    "total_low_oi":       tot_low_oi,
+                    "low_vs_high_vol_pct": round(100 * tot_low_vol / tot_high_vol, 1)
+                                           if tot_high_vol > 0 else None,
+                    "low_vs_high_oi_pct":  round(100 * tot_low_oi / tot_high_oi, 1)
+                                           if tot_high_oi > 0 else None,
+                    "cities_with_low_series": sum(1 for p in paired if p["low_configured"]),
+                    "cities_total": len(paired),
+                },
+                "cities": paired,
+                "note": "Higher low/high vol ratio = more equal interest. "
+                        "Wider spreads in low markets = more potential edge for a calibrated model.",
+            })
 
         elif path == "/health":
             self.send_json({"ok": True, "message": "Server running"})
-
-        elif path == "/health/pipeline":
-            # Green/red health check for the data pipeline. Returns:
-            #   OK            — pipeline healthy
-            #   FAIL: reason  — something is broken, with the reason
-            # Designed for fast eyeball or external monitoring.
-            import datetime as _dt
-            try:
-                problems = []
-
-                # 1. Any scan errors in the ring buffer? (Patch 6 surfaces these)
-                with _SCAN_ERR_LOCK:
-                    recent_errs = list(_SCAN_ERR_LOG[:20])
-                if recent_errs:
-                    # Only count errors from the last 6 hours as "active"
-                    cutoff = _dt.datetime.utcnow() - _dt.timedelta(hours=6)
-                    active = [e for e in recent_errs
-                              if _dt.datetime.fromisoformat(e["timestamp"]) > cutoff]
-                    if active:
-                        problems.append(f"{len(active)} scan errors in last 6h: "
-                                        f"{active[0].get('error','?')[:80]}")
-
-                # 2. Any propagation errors?
-                with _PROP_LOCK:
-                    recent_props = list(_PROP_LOG[:5])
-                prop_failures = [p for p in recent_props if not p.get("ok")]
-                if prop_failures:
-                    problems.append(f"Propagation failed: {prop_failures[0].get('error','?')[:80]}")
-
-                # 3. Are scans actually running? (fresh prop run within 5 hours)
-                if recent_props:
-                    last_prop = recent_props[0].get("run_at", "")
-                    try:
-                        last_dt = _dt.datetime.fromisoformat(last_prop)
-                        age_hr = (_dt.datetime.utcnow() - last_dt).total_seconds() / 3600
-                        if age_hr > 5:
-                            problems.append(f"No scans in {age_hr:.1f}h (expected ≤4h cadence)")
-                    except Exception:
-                        pass
-                else:
-                    problems.append("No propagation runs recorded — scheduler may be dead")
-
-                # 4. Is fresh data landing in temp_snapshots? (today or yesterday)
-                conn = get_db()
-                if conn:
-                    try:
-                        with conn.cursor() as cur:
-                            cur.execute("""
-                                SELECT MAX(target_date) FROM temp_snapshots
-                            """)
-                            latest = cur.fetchone()[0]
-                        if latest:
-                            today = _dt.date.today()
-                            days_stale = (today - latest).days
-                            if days_stale > 2:
-                                problems.append(f"temp_snapshots stalest write was {days_stale}d ago ({latest})")
-                        else:
-                            problems.append("temp_snapshots is empty")
-                    finally:
-                        conn.close()
-
-                if problems:
-                    self.send_response(503)
-                    self.send_header("Content-Type", "text/plain")
-                    self.end_headers()
-                    self.wfile.write(("FAIL:\n  " + "\n  ".join(problems)).encode())
-                else:
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/plain")
-                    self.end_headers()
-                    self.wfile.write(b"OK")
-            except Exception as e:
-                self.send_response(500)
-                self.send_header("Content-Type", "text/plain")
-                self.end_headers()
-                self.wfile.write(f"FAIL: health check itself errored: {e}".encode())
 
         else:
             self.send_response(404)
@@ -6518,15 +6237,6 @@ def _paper_trade_log(city_key, fc, markets):
                     m.get("any_model_inside"),
                     m.get("spread_exceeds_bracket"),
                     m.get("book_limited"),
-                    m.get("is_combo", False),
-                    # Gap 1: blend_high (HRRR-blended Open-Meteo best_match) for
-                    # measuring whether the blended model beats raw GFS/ECMWF.
-                    fc.get("blend_high"),
-                    # Gap 2: minutes from scan to market cutoff. Lets us answer
-                    # "did model accuracy improve as cutoff approached?" without
-                    # fragile MAX(scan_ts) joins.
-                    int(round((m.get("hours_to_cutoff") or 0) * 60))
-                        if m.get("hours_to_cutoff") is not None else None,
                 )
 
                 _cols = """city, nws_station, target_date, horizon, ticker,
@@ -6536,9 +6246,8 @@ def _paper_trade_log(city_key, fc, markets):
                          gfs_high, ecmwf_high, model_spread,
                          edge_ratio, gap_c, spread_c, kelly_frac,
                          yes_bid, liq_grade, open_interest, volume_24h, fillable_a,
-                         is_tail_bet, any_model_inside, spread_exceeds_bracket, book_limited,
-                         is_combo, blend_high, scan_to_cutoff_min"""
-                _vals = ",".join(["%s"] * 36)
+                         is_tail_bet, any_model_inside, spread_exceeds_bracket, book_limited"""
+                _vals = ",".join(["%s"] * 33)
 
                 # paper_trades — A-grade only (bet simulation)
                 if m.get("grade") == "A":
@@ -6564,25 +6273,11 @@ def _paper_trade_log(city_key, fc, markets):
 def _paper_trade_settle():
     """
     Settle open paper trades and calibration_snapshots by matching against
-    temp_snapshots.settled_temp. Called after every successful run_auto_settlement
-    AND at the end of each background scan.
-
-    Records every run in _PROP_LOG (in-memory ring buffer, surfaces in
-    /debug/cal-log) and prints to Railway logs. Previously failed silently —
-    that hid every propagation error since deployment.
+    temp_snapshots settled_temp. Called by the settlement scheduler.
     """
-    import datetime as _dt
-    run_at = _dt.datetime.utcnow().isoformat()
-    result = {"run_at": run_at, "ok": False, "rowcounts": {}, "error": None}
     try:
         conn = get_db()
-        if not conn:
-            result["error"] = "No DB connection"
-            print(f"  ⚠️  _paper_trade_settle: no DB")
-            with _PROP_LOCK:
-                _PROP_LOG.insert(0, result)
-                _PROP_LOG[:] = _PROP_LOG[:50]
-            return
+        if not conn: return
 
         settle_sql = """
             SET
@@ -6601,7 +6296,6 @@ def _paper_trade_settle():
                     city, target_date, settled_temp
                 FROM temp_snapshots
                 WHERE settled_temp IS NOT NULL
-                ORDER BY city, target_date, scan_ts DESC
             ) ts
             WHERE {tbl}.city        = ts.city
               AND {tbl}.target_date = ts.target_date
@@ -6609,111 +6303,18 @@ def _paper_trade_settle():
         """
 
         with conn.cursor() as cur:
-            # Pre-check: how many (city,target_date) pairs are eligible to propagate
-            cur.execute("""
-                SELECT COUNT(DISTINCT (city, target_date))
-                FROM temp_snapshots
-                WHERE settled_temp IS NOT NULL
-            """)
-            result["eligible_pairs"] = cur.fetchone()[0]
-
             for tbl in ("paper_trades", "calibration_snapshots"):
                 cur.execute(f"UPDATE {tbl} " + settle_sql.format(tbl=tbl))
-                result["rowcounts"][tbl] = cur.rowcount
         conn.commit()
         conn.close()
-        result["ok"] = True
-        print(f"  📌 _paper_trade_settle: {result['rowcounts']} "
-              f"(eligible {result['eligible_pairs']} pairs)")
-    except Exception as e:
-        import traceback
-        result["error"] = str(e)
-        result["traceback"] = traceback.format_exc()
-        print(f"  ⚠️  _paper_trade_settle FAILED: {e}")
-        traceback.print_exc()
-    finally:
-        with _PROP_LOCK:
-            _PROP_LOG.insert(0, result)
-            _PROP_LOG[:] = _PROP_LOG[:50]
-
-
-def _auto_heal_schema():
-    """
-    Self-healing: if scan errors mention missing columns, auto-run column
-    migration once per process lifetime. Stops the "wait a week, find a bug,
-    fix it, wait another week" pattern.
-    """
-    global _AUTO_HEAL_ATTEMPTED
-    try:
-        _AUTO_HEAL_ATTEMPTED
-    except NameError:
-        _AUTO_HEAL_ATTEMPTED = False
-    if _AUTO_HEAL_ATTEMPTED:
-        return
-    with _SCAN_ERR_LOCK:
-        errs = list(_SCAN_ERR_LOG[:20])
-    column_errors = [e for e in errs
-                     if "does not exist" in str(e.get("error", ""))
-                     and "column" in str(e.get("error", "")).lower()]
-    if not column_errors:
-        return
-
-    print(f"  🔧 Self-healing: detected {len(column_errors)} column errors, "
-          f"running schema migration...")
-    _AUTO_HEAL_ATTEMPTED = True
-    try:
-        # Replay the migration loop directly (mirroring /admin/setup-db)
-        _migration_columns = [
-            ("hours_to_cutoff",        "NUMERIC(5,1)"),
-            ("mkt_rank_conf",          "TEXT"),
-            ("gfs_high",               "NUMERIC(5,1)"),
-            ("ecmwf_high",             "NUMERIC(5,1)"),
-            ("model_spread",           "NUMERIC(5,2)"),
-            ("edge_ratio",             "NUMERIC(8,3)"),
-            ("gap_c",                  "INTEGER"),
-            ("spread_c",               "INTEGER"),
-            ("kelly_frac",             "NUMERIC(6,4)"),
-            ("yes_bid",                "NUMERIC(6,4)"),
-            ("liq_grade",              "TEXT"),
-            ("open_interest",          "INTEGER"),
-            ("volume_24h",             "INTEGER"),
-            ("fillable_a",             "NUMERIC(8,2)"),
-            ("is_tail_bet",            "BOOLEAN"),
-            ("any_model_inside",       "BOOLEAN"),
-            ("spread_exceeds_bracket", "BOOLEAN"),
-            ("book_limited",           "BOOLEAN"),
-            ("is_combo",               "BOOLEAN"),
-            ("blend_high",             "NUMERIC(5,1)"),
-            ("scan_to_cutoff_min",     "INTEGER"),
-        ]
-        conn = get_db()
-        if conn:
-            with conn.cursor() as cur:
-                for tbl in ("temp_snapshots", "paper_trades", "calibration_snapshots"):
-                    for col, dtype in _migration_columns:
-                        try:
-                            cur.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS {col} {dtype}")
-                        except Exception as ce:
-                            print(f"    ⚠️  ALTER {tbl}.{col}: {ce}")
-            conn.commit()
-            conn.close()
-            print(f"  ✅ Self-healing migration complete")
-            # Clear scan errors so health check goes green if this worked
-            with _SCAN_ERR_LOCK:
-                _SCAN_ERR_LOG.clear()
-            _SCAN_ERR_LOGGED.clear()
-    except Exception as e:
-        print(f"  ⚠️  Self-healing failed: {e}")
+    except Exception:
+        pass
 
 
 def _run_background_scan():
     import time as _t
     start = _t.time()
     total = 0
-    # Reset per-city error dedup so each new cycle can re-surface errors.
-    # Without this, a one-time fix wouldn't show "errors stopped" — and a
-    # newly-arising error post-fix would be hidden by old dedup state.
-    _SCAN_ERR_LOGGED.clear()
     for horizon in ["d0", "d1"]:
         for city_key in TEMP_CITIES:
             try:
@@ -6732,8 +6333,6 @@ def _run_background_scan():
                 total += 1
             except Exception:
                 pass
-    # Self-heal: if column errors surfaced this cycle, auto-fix the schema.
-    _auto_heal_schema()
     _paper_trade_settle()
     print(f"  📊 Background scan: {total} cities in {round(_t.time()-start,1)}s")
 
