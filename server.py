@@ -1593,6 +1593,24 @@ _AT_CONFIG = {
     "min_volume":     200,
     "scan_interval":  300,   # seconds between scans
     "min_fill_dollars": 5.0, # skip execution if Kelly budget < this
+    # Rank confidence multipliers — applied to kelly_budget at execution time
+    # Based on EV/dollar analysis: tail_only=+0.97, top1=+0.13, combo=+0.02, top2=-0.40
+    "rank_conf_mult": {
+        "tail_only": 1.5,   # highest EV/dollar — size up
+        "combo":     1.0,   # neutral
+        "top1":      1.0,   # neutral
+        "top2":      0.0,   # blocked — negative EV/dollar
+    },
+    # HTC (hours-to-cutoff) kelly multipliers — based on EV/dollar, not just win rate.
+    # >18hr and 12-18hr reverted to 1.0 pending htc_edge EV analysis — market may be
+    # more mispriced at those windows even if win rate is lower. Deploy after reviewing
+    # htc_edge.ev_per_dollar from /debug/cal-log.
+    "htc_mult": {
+        "lt6":   1.25,  # <6hr — size up, 68.8% win rate + highest confidence
+        "lt12":  1.0,   # 6-12hr — neutral pending EV data
+        "lt18":  1.0,   # 12-18hr — neutral pending EV data (may have high gap_c)
+        "gt18":  1.0,   # >18hr — neutral pending EV data (may have high gap_c)
+    },
 }
 
 
@@ -1831,10 +1849,11 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
                f"net_edge={signal.get('combined_net_edge_c')}¢",
                city=city_key)
         # Split Kelly budget evenly across both legs
+        _combo_city_mult = AUTO_TRADER_CITY_KELLY_MULT.get(signal.get("city_key",""), 1.0)
         combo_budget = min(
             signal.get("kelly_size", 0.0) or 0.0,
             cfg.get("max_per_ticker", 75.0)
-        ) * (cfg.get("bankroll_unit", 100.0) / 100.0) * (cfg.get("kelly_mult", 0.5) / 0.5)
+        ) * (cfg.get("bankroll_unit", 100.0) / 100.0) * (cfg.get("kelly_mult", 0.5) / 0.5) * _combo_city_mult
         leg_budget = round(combo_budget / 2, 2)
         signal["kelly_size"] = leg_budget
 
@@ -1870,10 +1889,50 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
     # Scale by config bankroll_unit / 100 to respect current settings.
     scan_kelly_sz  = signal.get("kelly_size", 0.0) or 0.0
     # Rescale if bankroll_unit differs from default $100
-    bankroll_scale = cfg.get("bankroll_unit", 100.0) / 100.0
+    bankroll_scale   = cfg.get("bankroll_unit", 100.0) / 100.0
     kelly_mult_scale = cfg.get("kelly_mult", 0.5) / 0.5  # scale vs default 0.5x
-    kelly_budget   = round(scan_kelly_sz * bankroll_scale * kelly_mult_scale, 2)
-    kelly_budget   = min(kelly_budget, cfg.get("max_per_ticker", 75.0))
+    kelly_budget     = round(scan_kelly_sz * bankroll_scale * kelly_mult_scale, 2)
+    kelly_budget     = min(kelly_budget, cfg.get("max_per_ticker", 75.0))
+
+    # ── Rank confidence multiplier ──────────────────────────────────────────
+    rank_conf      = signal.get("mkt_rank_conf", "")
+    rc_mults       = cfg.get("rank_conf_mult", {})
+    rc_mult        = rc_mults.get(rank_conf, 1.0)
+    if rc_mult == 0.0:
+        at_log("SKIP", f"{ticker} rank_conf={rank_conf} blocked (kelly_mult=0) — negative EV",
+               ticker=ticker, city=city_key)
+        return 0
+    kelly_budget = round(kelly_budget * rc_mult, 2)
+
+    # ── HTC (hours-to-cutoff) multiplier ───────────────────────────────────
+    htc        = signal.get("hours_to_cutoff") or 0.0
+    htc_mults  = cfg.get("htc_mult", {})
+    if htc < 6:
+        htc_mult = htc_mults.get("lt6",  1.0)
+        htc_label = "<6hr"
+    elif htc < 12:
+        htc_mult = htc_mults.get("lt12", 1.0)
+        htc_label = "6-12hr"
+    elif htc < 18:
+        htc_mult = htc_mults.get("lt18", 1.0)
+        htc_label = "12-18hr"
+    else:
+        htc_mult = htc_mults.get("gt18", 1.0)
+        htc_label = ">18hr"
+    kelly_budget = round(kelly_budget * htc_mult, 2)
+
+    # ── City-level soft-flag Kelly multiplier ──────────────────────────────
+    city_mult = AUTO_TRADER_CITY_KELLY_MULT.get(city_key, 1.0)
+    if city_mult != 1.0:
+        at_log("INFO", f"{ticker} city={city_key} soft-flagged — kelly x{city_mult}",
+               ticker=ticker, city=city_key)
+    kelly_budget = round(kelly_budget * city_mult, 2)
+
+    at_log("INFO",
+           f"{ticker} kelly adj: rank_conf={rank_conf}(x{rc_mult}) "
+           f"htc={htc_label}(x{htc_mult}) city_mult={city_mult} "
+           f"→ budget=${kelly_budget:.2f}",
+           ticker=ticker, city=city_key)
 
     # Min fill check — if Kelly budget is below threshold, skip entirely
     min_fill = cfg.get("min_fill_dollars", 5.0)
@@ -6019,6 +6078,7 @@ class Handler(BaseHTTPRequestHandler):
                         win_by_horizon   = {}
                         win_by_rank_conf = {}
                         htc_bias_curve   = []
+                        htc_edge         = []
                         ev_by_city       = []
                         ev_by_rank_conf  = []
                         ev_by_horizon    = []
@@ -6116,6 +6176,57 @@ class Handler(BaseHTTPRequestHandler):
                             {"bucket": r[0], "n": r[1],
                              "avg_bias": float(r[2]) if r[2] else None,
                              "win_rate": float(r[3]) if r[3] else None}
+                            for r in cur.fetchall()
+                        ]
+
+                        # HTC edge analysis — market mispricing vs model per time bucket
+                        # Key question: at each HTC window, is model_prob > yes_ask by enough
+                        # to justify betting? net_gap_c = (model_prob - yes_ask)*100
+                        # avg_model_prob vs avg_yes_ask shows directional market vs model gap.
+                        # ev_per_dollar_htc accounts for actual payout odds, not just win rate.
+                        cur.execute("""
+                            SELECT
+                                CASE
+                                    WHEN hours_to_cutoff > 18 THEN '>18hr'
+                                    WHEN hours_to_cutoff > 12 THEN '12-18hr'
+                                    WHEN hours_to_cutoff > 6  THEN '6-12hr'
+                                    ELSE '<6hr'
+                                END AS bucket,
+                                COUNT(*)                                           AS n,
+                                ROUND(AVG(net_gap_c)::numeric, 1)                  AS avg_net_gap_c,
+                                ROUND(AVG(model_prob)::numeric, 4)                 AS avg_model_prob,
+                                ROUND(AVG(yes_ask)::numeric, 4)                    AS avg_mkt_prob,
+                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) AS win_rate,
+                                ROUND(SUM(CASE
+                                    WHEN settled_correct = TRUE
+                                        THEN kelly_size * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
+                                    WHEN settled_correct = FALSE
+                                        THEN -kelly_size
+                                    ELSE 0 END)::numeric, 2)                       AS sim_pnl,
+                                ROUND(AVG(CASE
+                                    WHEN settled_correct IS NOT NULL
+                                        THEN CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END
+                                             * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
+                                             - CASE WHEN NOT settled_correct THEN 1.0 ELSE 0.0 END
+                                        ELSE NULL END)::numeric, 4)                AS ev_per_dollar
+                            FROM calibration_snapshots
+                            WHERE settled_correct IS NOT NULL
+                              AND hours_to_cutoff IS NOT NULL
+                              AND yes_ask IS NOT NULL AND yes_ask > 0
+                              AND kelly_size IS NOT NULL
+                              AND grade IN ('A','B')
+                            GROUP BY 1 ORDER BY MIN(hours_to_cutoff) DESC
+                        """)
+                        htc_edge = [
+                            {"bucket":        r[0],
+                             "n":             r[1],
+                             "avg_net_gap_c": float(r[2]) if r[2] else None,
+                             "avg_model_prob":float(r[3]) if r[3] else None,
+                             "avg_mkt_prob":  float(r[4]) if r[4] else None,
+                             "model_vs_mkt":  round(float(r[3]) - float(r[4]), 4) if r[3] and r[4] else None,
+                             "win_rate":      float(r[5]) if r[5] else None,
+                             "sim_pnl":       float(r[6]) if r[6] else None,
+                             "ev_per_dollar": float(r[7]) if r[7] else None}
                             for r in cur.fetchall()
                         ]
 
@@ -6261,6 +6372,7 @@ class Handler(BaseHTTPRequestHandler):
                         "win_by_horizon":   win_by_horizon,
                         "win_by_rank_conf": win_by_rank_conf,
                         "htc_bias_curve":   htc_bias_curve,
+                        "htc_edge":         htc_edge,
                         "ev_by_city":       ev_by_city,
                         "ev_by_rank_conf":  ev_by_rank_conf,
                         "ev_by_horizon":    ev_by_horizon,
