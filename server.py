@@ -6019,6 +6019,9 @@ class Handler(BaseHTTPRequestHandler):
                         win_by_horizon   = {}
                         win_by_rank_conf = {}
                         htc_bias_curve   = []
+                        ev_by_city       = []
+                        ev_by_rank_conf  = []
+                        ev_by_horizon    = []
                         if table_exists:
                             cur.execute("SELECT COUNT(*) FROM calibration_snapshots")
                             total = cur.fetchone()[0]
@@ -6116,6 +6119,118 @@ class Handler(BaseHTTPRequestHandler):
                             for r in cur.fetchall()
                         ]
 
+                        # EV analysis — simulated PnL per city (grade A only)
+                        # payout per $1 risked on a YES = (1 - yes_ask) / yes_ask
+                        # EV per trade = win * payout - loss * 1
+                        cur.execute("""
+                            SELECT
+                                city,
+                                COUNT(*) FILTER (WHERE settled_correct IS NOT NULL) AS n,
+                                ROUND(AVG(yes_ask)::numeric, 4)                    AS avg_ask,
+                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) AS win_rate,
+                                ROUND(SUM(CASE
+                                    WHEN settled_correct = TRUE
+                                        THEN kelly_size * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
+                                    WHEN settled_correct = FALSE
+                                        THEN -kelly_size
+                                    ELSE 0 END)::numeric, 2)                       AS sim_pnl,
+                                ROUND(AVG(CASE
+                                    WHEN settled_correct IS NOT NULL
+                                        THEN CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END
+                                             * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
+                                             - CASE WHEN NOT settled_correct THEN 1.0 ELSE 0.0 END
+                                        ELSE NULL END)::numeric, 4)                AS ev_per_dollar
+                            FROM calibration_snapshots
+                            WHERE grade = 'A'
+                              AND settled_correct IS NOT NULL
+                              AND yes_ask IS NOT NULL AND yes_ask > 0
+                              AND kelly_size IS NOT NULL
+                            GROUP BY city
+                            ORDER BY sim_pnl DESC
+                        """)
+                        ev_by_city = [
+                            {"city": r[0], "n": r[1],
+                             "avg_ask": float(r[2]) if r[2] else None,
+                             "win_rate": float(r[3]) if r[3] else None,
+                             "sim_pnl": float(r[4]) if r[4] else None,
+                             "ev_per_dollar": float(r[5]) if r[5] else None,
+                             "implied_breakeven_wr": round(float(r[2]), 4) if r[2] else None}
+                            for r in cur.fetchall()
+                        ]
+
+                        # EV by rank_conf (grade A)
+                        cur.execute("""
+                            SELECT
+                                mkt_rank_conf,
+                                COUNT(*) FILTER (WHERE settled_correct IS NOT NULL) AS n,
+                                ROUND(AVG(yes_ask)::numeric, 4)                    AS avg_ask,
+                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) AS win_rate,
+                                ROUND(SUM(CASE
+                                    WHEN settled_correct = TRUE
+                                        THEN kelly_size * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
+                                    WHEN settled_correct = FALSE
+                                        THEN -kelly_size
+                                    ELSE 0 END)::numeric, 2)                       AS sim_pnl,
+                                ROUND(AVG(CASE
+                                    WHEN settled_correct IS NOT NULL
+                                        THEN CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END
+                                             * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
+                                             - CASE WHEN NOT settled_correct THEN 1.0 ELSE 0.0 END
+                                        ELSE NULL END)::numeric, 4)                AS ev_per_dollar
+                            FROM calibration_snapshots
+                            WHERE grade = 'A'
+                              AND settled_correct IS NOT NULL
+                              AND yes_ask IS NOT NULL AND yes_ask > 0
+                              AND kelly_size IS NOT NULL
+                              AND mkt_rank_conf IS NOT NULL
+                            GROUP BY mkt_rank_conf
+                            ORDER BY sim_pnl DESC
+                        """)
+                        ev_by_rank_conf = [
+                            {"rank_conf": r[0], "n": r[1],
+                             "avg_ask": float(r[2]) if r[2] else None,
+                             "win_rate": float(r[3]) if r[3] else None,
+                             "sim_pnl": float(r[4]) if r[4] else None,
+                             "ev_per_dollar": float(r[5]) if r[5] else None}
+                            for r in cur.fetchall()
+                        ]
+
+                        # EV by horizon (grade A)
+                        cur.execute("""
+                            SELECT
+                                horizon,
+                                COUNT(*) FILTER (WHERE settled_correct IS NOT NULL) AS n,
+                                ROUND(AVG(yes_ask)::numeric, 4)                    AS avg_ask,
+                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) AS win_rate,
+                                ROUND(SUM(CASE
+                                    WHEN settled_correct = TRUE
+                                        THEN kelly_size * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
+                                    WHEN settled_correct = FALSE
+                                        THEN -kelly_size
+                                    ELSE 0 END)::numeric, 2)                       AS sim_pnl,
+                                ROUND(AVG(CASE
+                                    WHEN settled_correct IS NOT NULL
+                                        THEN CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END
+                                             * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
+                                             - CASE WHEN NOT settled_correct THEN 1.0 ELSE 0.0 END
+                                        ELSE NULL END)::numeric, 4)                AS ev_per_dollar
+                            FROM calibration_snapshots
+                            WHERE grade = 'A'
+                              AND settled_correct IS NOT NULL
+                              AND yes_ask IS NOT NULL AND yes_ask > 0
+                              AND kelly_size IS NOT NULL
+                            GROUP BY horizon
+                            ORDER BY sim_pnl DESC
+                        """)
+                        ev_by_horizon = [
+                            {"horizon": r[0], "n": r[1],
+                             "avg_ask": float(r[2]) if r[2] else None,
+                             "win_rate": float(r[3]) if r[3] else None,
+                             "sim_pnl": float(r[4]) if r[4] else None,
+                             "ev_per_dollar": float(r[5]) if r[5] else None}
+                            for r in cur.fetchall()
+                        ]
+
                         # Last scan markets sample
                         cur.execute("""
                             SELECT city, grade, ticker, hours_to_cutoff
@@ -6146,6 +6261,9 @@ class Handler(BaseHTTPRequestHandler):
                         "win_by_horizon":   win_by_horizon,
                         "win_by_rank_conf": win_by_rank_conf,
                         "htc_bias_curve":   htc_bias_curve,
+                        "ev_by_city":       ev_by_city,
+                        "ev_by_rank_conf":  ev_by_rank_conf,
+                        "ev_by_horizon":    ev_by_horizon,
                         "recent_paper_trades": recent,
                     })
             except Exception as e:
