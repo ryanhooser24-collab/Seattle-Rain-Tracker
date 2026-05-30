@@ -405,13 +405,56 @@ def fetch_temp_forecast(city_key, horizon="d1"):
         if not results:
             return {"ok": False, "error": "; ".join(errors)}
 
-        # Bias correction disabled — insufficient settled trade data to calibrate reliably.
-        # Re-enable once 30+ settled trades per city are available.
-        bias_cache = _TEMP_BIAS_CACHE.get(city_key, {})
-        gfs_bias_high   = 0.0
-        ecmwf_bias_high = 0.0
-        blend_bias_high = 0.0
-        gfs_bias_low    = 0.0
+        # Bias correction: HTC-bucket bias from calibration_snapshots.
+        # Buckets: >18hr, 12-18hr, 6-12hr, <6hr — bias shrinks closer to settlement
+        # as the model ingests more observations. Falls back to combined, then 0.0.
+        # Minimum 10 settled rows required globally to activate any bias.
+        bias_cache  = _TEMP_BIAS_CACHE.get(city_key, {})
+        bias_n      = bias_cache.get("bias_n", 0)
+        htc_buckets = bias_cache.get("htc_buckets", {})  # {bucket_label: bias_val}
+        htc_ns      = bias_cache.get("htc_ns", {})       # {bucket_label: n}
+
+        # Determine which HTC bucket this scan falls in using hours_to_cutoff.
+        # hours_to_cutoff is not available at forecast time (it's per-market),
+        # so we use horizon as a proxy: d1 ≈ >18hr, d0 ≈ 6-12hr.
+        # The scan capture hour is known at trade time — bias applied per-market below.
+        # For the forecast mu, we apply the bucket matching the current UTC hour offset.
+        import datetime as _dt
+        _now_utc = _dt.datetime.utcnow()
+        _cfg_tz  = cfg.get("tz", "America/Chicago")
+        try:
+            import pytz as _pytz
+            _local_now = _dt.datetime.utcnow().replace(tzinfo=_pytz.utc).astimezone(_pytz.timezone(_cfg_tz))
+            _cutoff_local = _local_now.replace(hour=6, minute=0, second=0, microsecond=0)
+            if _local_now.hour >= 6:
+                _cutoff_local += _dt.timedelta(days=1)
+            _est_htc = round((_cutoff_local - _local_now).total_seconds() / 3600, 1)
+        except Exception:
+            _est_htc = 20.0 if horizon == "d1" else 10.0
+
+        if _est_htc > 18:
+            _htc_bucket = ">18hr"
+        elif _est_htc > 12:
+            _htc_bucket = "12-18hr"
+        elif _est_htc > 6:
+            _htc_bucket = "6-12hr"
+        else:
+            _htc_bucket = "<6hr"
+
+        _bucket_n    = htc_ns.get(_htc_bucket, 0)
+        _bucket_bias = htc_buckets.get(_htc_bucket, None)
+
+        if _bucket_n >= 10 and _bucket_bias is not None:
+            _active_bias = _bucket_bias
+        elif bias_n >= 10:
+            _active_bias = bias_cache.get("gfs_bias", 0.0)
+        else:
+            _active_bias = 0.0
+
+        gfs_bias_high   = _active_bias
+        ecmwf_bias_high = _active_bias
+        blend_bias_high = _active_bias
+        gfs_bias_low    = 0.0   # low σ not yet separately calibrated
         ecmwf_bias_low  = 0.0
 
         gfs_raw    = results.get("gfs",   {})
@@ -5141,38 +5184,64 @@ class Handler(BaseHTTPRequestHandler):
                     σ_d1 = round(sum(rmse_vals) / len(rmse_vals), 2) if rmse_vals else cfg["σ_d1"]
                     σ_d0 = round(σ_d1 * 0.70, 2)
 
-                    # ── Bias source selection ─────────────────────────────
-                    # Prefer calibration_snapshots (real trade data, rolling 30d)
-                    # over archive API (unreliable — model overwrites prior runs).
-                    # Bias only applied when >= 30 settled rows in last 30 days.
-                    BIAS_MIN_TRADES = 30
-                    live_gfs_bias   = 0.0
-                    live_ecmwf_bias = 0.0
-                    live_n          = 0
-                    bias_source     = "disabled"
+                    # ── Bias source: HTC-bucket bias from calibration_snapshots ──
+                    # Four buckets by hours_to_cutoff: >18hr, 12-18hr, 6-12hr, <6hr.
+                    # Bias shrinks as we approach settlement — captures model convergence.
+                    # Global (cross-city) bucket bias used until per-city N is sufficient.
+                    # Minimum 10 settled rows to activate any bias correction.
+                    BIAS_MIN_TRADES  = 10
+                    live_gfs_bias    = 0.0
+                    live_ecmwf_bias  = 0.0
+                    live_n           = 0
+                    bias_source      = "disabled"
+                    htc_buckets      = {}   # bucket_label -> bias_val
+                    htc_ns           = {}   # bucket_label -> n
 
                     conn_cal = get_db()
                     if conn_cal:
                         try:
                             with conn_cal.cursor() as cur_cal:
+                                # Overall combined bias (fallback)
                                 cur_cal.execute("""
-                                    SELECT
-                                        COUNT(*) AS n,
-                                        AVG(mu - settled_temp) AS raw_bias
+                                    SELECT COUNT(*), AVG(mu - settled_temp)
                                     FROM calibration_snapshots
                                     WHERE city = %s
                                       AND settled_temp IS NOT NULL
-                                      AND scan_ts >= NOW() - INTERVAL '30 days'
+                                      AND scan_ts >= NOW() - INTERVAL '60 days'
                                 """, (city_key,))
                                 row = cur_cal.fetchone()
                                 if row and row[0] >= BIAS_MIN_TRADES and row[1] is not None:
-                                    live_n        = int(row[0])
-                                    # mu is the raw (unbiased) model center.
-                                    # raw_bias = avg(mu - actual): positive means model runs warm.
-                                    # We store as gfs_bias/ecmwf_bias since both use same mu.
+                                    live_n          = int(row[0])
                                     live_gfs_bias   = round(float(row[1]), 2)
                                     live_ecmwf_bias = round(float(row[1]), 2)
                                     bias_source     = f"calibration_snapshots (n={live_n})"
+
+                                # HTC-bucket bias — bias as a function of hours to cutoff
+                                cur_cal.execute("""
+                                    SELECT
+                                        CASE
+                                            WHEN hours_to_cutoff > 18 THEN '>18hr'
+                                            WHEN hours_to_cutoff > 12 THEN '12-18hr'
+                                            WHEN hours_to_cutoff > 6  THEN '6-12hr'
+                                            ELSE '<6hr'
+                                        END AS htc_bucket,
+                                        COUNT(*)                  AS n,
+                                        AVG(mu - settled_temp)    AS bias
+                                    FROM calibration_snapshots
+                                    WHERE city = %s
+                                      AND settled_temp IS NOT NULL
+                                      AND hours_to_cutoff IS NOT NULL
+                                      AND scan_ts >= NOW() - INTERVAL '60 days'
+                                    GROUP BY 1
+                                    ORDER BY 1
+                                """, (city_key,))
+                                for brow in cur_cal.fetchall():
+                                    blabel, bn, bbias = brow[0], int(brow[1]), float(brow[2]) if brow[2] else 0.0
+                                    htc_ns[blabel]      = bn
+                                    if bn >= BIAS_MIN_TRADES:
+                                        htc_buckets[blabel] = round(bbias, 2)
+                                        if not bias_source.startswith("calibration"):
+                                            bias_source = f"htc_buckets (n={live_n})"
                         except Exception:
                             pass
                         finally:
@@ -5181,6 +5250,8 @@ class Handler(BaseHTTPRequestHandler):
                     _TEMP_BIAS_CACHE[city_key] = {
                         "gfs_bias":    live_gfs_bias,
                         "ecmwf_bias":  live_ecmwf_bias,
+                        "htc_buckets": htc_buckets,  # {'>18hr':bias, '12-18hr':bias, ...}
+                        "htc_ns":      htc_ns,        # {'>18hr':n, ...}
                         "gfs_rmse":    gfs_rmse,
                         "ecmwf_rmse":  ecmwf_rmse,
                         "best_model":  best_model,
@@ -5198,13 +5269,15 @@ class Handler(BaseHTTPRequestHandler):
                         "n_days":      len(errors_gfs),
                         "gfs_bias":    live_gfs_bias,
                         "ecmwf_bias":  live_ecmwf_bias,
+                        "htc_buckets": htc_buckets,
+                        "htc_ns":      htc_ns,
                         "gfs_rmse":    gfs_rmse,
                         "ecmwf_rmse":  ecmwf_rmse,
                         "best_model":  best_model,
                         "σ_d1":        σ_d1,       "σ_d0":       σ_d0,
                         "bias_n":      live_n,
                         "bias_source": bias_source,
-                        "bias_active": live_n >= 30,
+                        "bias_active": live_n >= BIAS_MIN_TRADES,
                     }
 
                 except Exception as e:
@@ -5939,10 +6012,13 @@ class Handler(BaseHTTPRequestHandler):
 
                         # Count all rows
                         total = 0
-                        grade_counts    = {}
+                        grade_counts     = {}
                         settled_by_grade = {}
                         wins_by_grade    = {}
                         settled_by_city  = []
+                        win_by_horizon   = {}
+                        win_by_rank_conf = {}
+                        htc_bias_curve   = []
                         if table_exists:
                             cur.execute("SELECT COUNT(*) FROM calibration_snapshots")
                             total = cur.fetchone()[0]
@@ -5985,6 +6061,61 @@ class Handler(BaseHTTPRequestHandler):
                         total_wins_ab    = sum(wins_by_grade.get(g, 0)    for g in ("A","B"))
                         tier1_ready      = total_settled_ab >= 150
 
+                        # Win rate by horizon — A grade only
+                        cur.execute("""
+                            SELECT horizon,
+                                   COUNT(*) FILTER (WHERE settled_correct IS NOT NULL),
+                                   COUNT(*) FILTER (WHERE settled_correct = TRUE)
+                            FROM calibration_snapshots
+                            WHERE grade = 'A' AND horizon IN ('d0','d1')
+                            GROUP BY horizon
+                        """)
+                        win_by_horizon = {
+                            r[0]: {"settled": r[1], "wins": r[2],
+                                   "win_rate": round(r[2]/r[1], 3) if r[1] > 0 else None}
+                            for r in cur.fetchall()
+                        }
+
+                        # Win rate by mkt_rank_conf — A grade only
+                        cur.execute("""
+                            SELECT mkt_rank_conf,
+                                   COUNT(*) FILTER (WHERE settled_correct IS NOT NULL),
+                                   COUNT(*) FILTER (WHERE settled_correct = TRUE)
+                            FROM calibration_snapshots
+                            WHERE grade = 'A' AND mkt_rank_conf IS NOT NULL
+                            GROUP BY mkt_rank_conf ORDER BY 2 DESC
+                        """)
+                        win_by_rank_conf = {
+                            r[0]: {"settled": r[1], "wins": r[2],
+                                   "win_rate": round(r[2]/r[1], 3) if r[1] > 0 else None}
+                            for r in cur.fetchall()
+                        }
+
+                        # HTC-bucket bias curve (all grades, settled only)
+                        cur.execute("""
+                            SELECT
+                                CASE
+                                    WHEN hours_to_cutoff > 18 THEN '>18hr'
+                                    WHEN hours_to_cutoff > 12 THEN '12-18hr'
+                                    WHEN hours_to_cutoff > 6  THEN '6-12hr'
+                                    ELSE '<6hr'
+                                END AS bucket,
+                                COUNT(*)               AS n,
+                                ROUND(AVG(mu - settled_temp)::numeric, 2) AS avg_bias,
+                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) AS win_rate
+                            FROM calibration_snapshots
+                            WHERE settled_temp IS NOT NULL
+                              AND hours_to_cutoff IS NOT NULL
+                              AND grade IN ('A','B')
+                            GROUP BY 1 ORDER BY MIN(hours_to_cutoff) DESC
+                        """)
+                        htc_bias_curve = [
+                            {"bucket": r[0], "n": r[1],
+                             "avg_bias": float(r[2]) if r[2] else None,
+                             "win_rate": float(r[3]) if r[3] else None}
+                            for r in cur.fetchall()
+                        ]
+
                         # Last scan markets sample
                         cur.execute("""
                             SELECT city, grade, ticker, hours_to_cutoff
@@ -6012,6 +6143,9 @@ class Handler(BaseHTTPRequestHandler):
                         "settled_by_grade": settled_by_grade,
                         "wins_by_grade":    wins_by_grade,
                         "settled_by_city":  settled_by_city,
+                        "win_by_horizon":   win_by_horizon,
+                        "win_by_rank_conf": win_by_rank_conf,
+                        "htc_bias_curve":   htc_bias_curve,
                         "recent_paper_trades": recent,
                     })
             except Exception as e:
