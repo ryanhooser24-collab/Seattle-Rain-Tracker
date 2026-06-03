@@ -6303,6 +6303,110 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
+        elif path == "/debug/cap-sweep":
+            # Tests multiple cap configurations against settled data to quantify
+            # whether raising per-fill / per-ticker limits would improve PnL.
+            # Applies the SAME multiplier rules as /debug/backtest, then caps
+            # adj_kelly at various max_per_ticker levels. Per-fill capping is
+            # approximated by capping total ticker deployment (close enough for
+            # the single-fill paper rows we have).
+            # Also reports half-Kelly multiplier sweep (0.5 / 0.65 / 0.75 / 1.0).
+            try:
+                conn = get_db()
+                if not conn:
+                    self.send_json({"ok": False, "error": "No DB"})
+                else:
+                    with conn.cursor() as cur:
+                        # Pull row-level adjusted kelly + outcome once, sweep in Python
+                        cur.execute("""
+                            SELECT
+                                city, hours_to_cutoff, yes_ask, kelly_size, settled_correct,
+                                CASE mkt_rank_conf
+                                    WHEN 'tail_only' THEN 1.5
+                                    WHEN 'top2'      THEN 0.0
+                                    ELSE 1.0 END AS rc_mult,
+                                CASE
+                                    WHEN hours_to_cutoff < 6  THEN 1.25
+                                    WHEN hours_to_cutoff < 12 THEN 0.5
+                                    WHEN hours_to_cutoff < 18 THEN 0.5
+                                    ELSE 1.5 END AS htc_mult,
+                                CASE city
+                                    WHEN 'atlanta' THEN 0.5
+                                    WHEN 'miami'   THEN 0.5
+                                    ELSE 1.0 END AS city_mult
+                            FROM calibration_snapshots
+                            WHERE grade = 'A'
+                              AND settled_correct IS NOT NULL
+                              AND yes_ask IS NOT NULL AND yes_ask > 0
+                              AND kelly_size IS NOT NULL
+                        """)
+                        rows = cur.fetchall()
+                    conn.close()
+
+                    # Build adjusted kelly per row (pre-cap)
+                    trades = []
+                    for r in rows:
+                        city, htc, ask, ksz, won = r[0], r[1], float(r[2]), float(r[3]), r[4]
+                        rc, hm, cm = float(r[5]), float(r[6]), float(r[7])
+                        if rc == 0.0:
+                            continue  # top2 blocked
+                        adj = ksz * rc * hm * cm
+                        trades.append({"adj": adj, "ask": ask, "won": won})
+
+                    def sim(cap_ticker, kelly_scale=1.0):
+                        # kelly_scale rescales the base 0.5 half-Kelly: 1.0 = current 0.5x,
+                        # 1.3 ≈ 0.65 Kelly, 1.5 ≈ 0.75 Kelly, 2.0 = full Kelly
+                        pnl = 0.0
+                        deployed = 0.0
+                        capped_count = 0
+                        for t in trades:
+                            size = t["adj"] * kelly_scale
+                            if size > cap_ticker:
+                                size = cap_ticker
+                                capped_count += 1
+                            deployed += size
+                            if t["won"]:
+                                pnl += size * (1.0 - t["ask"]) / t["ask"]
+                            else:
+                                pnl -= size
+                        roi = round(100 * pnl / deployed, 2) if deployed > 0 else None
+                        return {"pnl": round(pnl, 2), "deployed": round(deployed, 2),
+                                "roi_pct": roi, "trades_capped": capped_count}
+
+                    # Cap sweep at current half-Kelly (0.5)
+                    cap_levels = [50, 75, 100, 150, 250, 99999]
+                    cap_sweep = {f"max_ticker_${c if c < 99999 else 'inf'}": sim(c, 1.0)
+                                 for c in cap_levels}
+
+                    # Kelly multiplier sweep at uncapped (to isolate Kelly effect)
+                    kelly_sweep = {
+                        "half_kelly_0.50x":    sim(99999, 1.0),
+                        "0.65_kelly_1.30x":    sim(99999, 1.30),
+                        "0.75_kelly_1.50x":    sim(99999, 1.50),
+                        "full_kelly_2.00x":    sim(99999, 2.0),
+                    }
+
+                    # Realistic: cap at $75 (current) vs raised, at half-Kelly
+                    self.send_json({
+                        "ok": True,
+                        "n_trades": len(trades),
+                        "warning": "In-sample. Higher Kelly = higher variance and ruin risk. "
+                                   "ROI per deployed dollar is the comparable metric, not raw PnL.",
+                        "current_config": {"max_per_ticker": 75, "kelly_mult": 0.5,
+                                           "result": sim(75, 1.0)},
+                        "cap_sweep_at_half_kelly": cap_sweep,
+                        "kelly_mult_sweep_uncapped": kelly_sweep,
+                        "interpretation": {
+                            "cap_question": "If trades_capped > 0 and PnL keeps rising as cap "
+                                            "rises, the cap is binding on +EV trades — raising it "
+                                            "helps. If PnL plateaus, cap is not the constraint.",
+                            "kelly_question": "Higher Kelly multiplies both PnL and variance. ROI% "
+                                              "stays ~flat (same edge); only absolute PnL and risk grow."
+                        }
+                    })
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
         elif path == "/debug/cal-log":
             # Returns last scan result for calibration_snapshots debugging
             try:
