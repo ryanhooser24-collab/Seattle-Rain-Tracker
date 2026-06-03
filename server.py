@@ -1601,15 +1601,15 @@ _AT_CONFIG = {
         "top1":      1.0,   # neutral
         "top2":      0.0,   # blocked — negative EV/dollar
     },
-    # HTC (hours-to-cutoff) kelly multipliers — based on EV/dollar, not just win rate.
-    # >18hr and 12-18hr reverted to 1.0 pending htc_edge EV analysis — market may be
-    # more mispriced at those windows even if win rate is lower. Deploy after reviewing
-    # htc_edge.ev_per_dollar from /debug/cal-log.
+    # HTC (hours-to-cutoff) kelly multipliers — based on EV/dollar from htc_edge analysis.
+    # The model's gap_c is flat (~35-40c) across all windows. What changes is avg_mkt_prob:
+    # the market reprices during 12-18hr, making contracts expensive without win rate improving.
+    # This creates a U-shaped EV curve: >18hr and <6hr are profitable, middle is the dead zone.
     "htc_mult": {
-        "lt6":   1.25,  # <6hr — size up, 68.8% win rate + highest confidence
-        "lt12":  1.0,   # 6-12hr — neutral pending EV data
-        "lt18":  1.0,   # 12-18hr — neutral pending EV data (may have high gap_c)
-        "gt18":  1.0,   # >18hr — neutral pending EV data (may have high gap_c)
+        "lt6":   1.25,  # <6hr  — EV +$0.21/dollar, high confidence, size up
+        "lt12":  0.5,   # 6-12hr — EV -$0.08/dollar, dead zone, size down
+        "lt18":  0.5,   # 12-18hr — EV -$0.08/dollar, dead zone (n=72, most confident bucket)
+        "gt18":  1.5,   # >18hr — EV +$0.35/dollar, cheap contracts, largest edge window
     },
 }
 
@@ -6051,6 +6051,257 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:
                     results["schema_migration"] = str(e)
                 self.send_json({"ok": all_ok, "tables": results})
+
+        elif path == "/debug/backtest":
+            # Pseudo-backtest: applies current auto-trader rules to all settled
+            # calibration_snapshots rows and reports simulated PnL.
+            # WARNING: in-sample only — same data used to derive rules.
+            # Use for logic validation and rule impact quantification only.
+            # True OOS backtest requires 300+ settled rows (Tier 2).
+            #
+            # Rules applied:
+            #   rank_conf_mult: tail_only=1.5, combo=1.0, top1=1.0, top2=0.0 (blocked)
+            #   htc_mult:       gt18=1.5, lt18=0.5, lt12=0.5, lt6=1.25
+            #   city_mult:      atlanta=0.5, miami=0.5, all others=1.0
+            #   phoenix:        reinstated (removed from blacklist)
+            #   grade filter:   A only
+            try:
+                conn = get_db()
+                if not conn:
+                    self.send_json({"ok": False, "error": "No DB"})
+                else:
+                    with conn.cursor() as cur:
+
+                        # Full trade-level backtest with all multipliers applied
+                        cur.execute("""
+                            WITH rules AS (
+                                SELECT
+                                    id, city, ticker, grade, mkt_rank_conf,
+                                    hours_to_cutoff, yes_ask, kelly_size,
+                                    settled_correct, horizon, scan_ts,
+
+                                    -- rank_conf multiplier
+                                    CASE mkt_rank_conf
+                                        WHEN 'tail_only' THEN 1.5
+                                        WHEN 'combo'     THEN 1.0
+                                        WHEN 'top1'      THEN 1.0
+                                        WHEN 'top2'      THEN 0.0
+                                        ELSE 1.0
+                                    END AS rc_mult,
+
+                                    -- HTC multiplier
+                                    CASE
+                                        WHEN hours_to_cutoff < 6  THEN 1.25
+                                        WHEN hours_to_cutoff < 12 THEN 0.5
+                                        WHEN hours_to_cutoff < 18 THEN 0.5
+                                        ELSE 1.5
+                                    END AS htc_mult,
+
+                                    -- City multiplier
+                                    CASE city
+                                        WHEN 'atlanta' THEN 0.5
+                                        WHEN 'miami'   THEN 0.5
+                                        ELSE 1.0
+                                    END AS city_mult
+
+                                FROM calibration_snapshots
+                                WHERE grade = 'A'
+                                  AND settled_correct IS NOT NULL
+                                  AND yes_ask IS NOT NULL AND yes_ask > 0
+                                  AND kelly_size IS NOT NULL
+                            ),
+                            sized AS (
+                                SELECT *,
+                                    -- combined multiplier (top2 blocked via rc_mult=0)
+                                    ROUND((kelly_size * rc_mult * htc_mult * city_mult)::numeric, 2)
+                                        AS adj_kelly,
+                                    -- baseline (no rules)
+                                    kelly_size AS base_kelly
+                                FROM rules
+                                WHERE rc_mult > 0  -- drop top2
+                            ),
+                            pnl AS (
+                                SELECT *,
+                                    -- adjusted PnL
+                                    CASE WHEN settled_correct
+                                        THEN adj_kelly * (1.0 - yes_ask) / yes_ask
+                                        ELSE -adj_kelly
+                                    END AS adj_pnl,
+                                    -- baseline PnL (no rules, all trades)
+                                    CASE WHEN settled_correct
+                                        THEN base_kelly * (1.0 - yes_ask) / yes_ask
+                                        ELSE -base_kelly
+                                    END AS base_pnl
+                                FROM sized
+                            )
+
+                            SELECT
+                                -- Overall summary
+                                COUNT(*)                                           AS n_trades,
+                                ROUND(SUM(base_pnl)::numeric, 2)                  AS baseline_pnl,
+                                ROUND(SUM(adj_pnl)::numeric, 2)                   AS adjusted_pnl,
+                                ROUND((SUM(adj_pnl) - SUM(base_pnl))::numeric, 2) AS pnl_delta,
+                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) AS win_rate,
+                                ROUND(AVG(adj_kelly)::numeric, 2)                 AS avg_adj_kelly,
+                                ROUND(SUM(adj_kelly)::numeric, 2)                 AS total_deployed
+                            FROM pnl
+                        """)
+                        summary_row = cur.fetchone()
+                        summary = {
+                            "n_trades":      summary_row[0],
+                            "baseline_pnl":  float(summary_row[1]) if summary_row[1] else 0,
+                            "adjusted_pnl":  float(summary_row[2]) if summary_row[2] else 0,
+                            "pnl_delta":     float(summary_row[3]) if summary_row[3] else 0,
+                            "win_rate":      float(summary_row[4]) if summary_row[4] else 0,
+                            "avg_adj_kelly": float(summary_row[5]) if summary_row[5] else 0,
+                            "total_deployed":float(summary_row[6]) if summary_row[6] else 0,
+                        }
+
+                        # Per-city breakdown
+                        cur.execute("""
+                            WITH rules AS (
+                                SELECT city, mkt_rank_conf, hours_to_cutoff,
+                                       yes_ask, kelly_size, settled_correct,
+                                       CASE mkt_rank_conf
+                                           WHEN 'tail_only' THEN 1.5
+                                           WHEN 'top2'      THEN 0.0
+                                           ELSE 1.0 END AS rc_mult,
+                                       CASE
+                                           WHEN hours_to_cutoff < 6  THEN 1.25
+                                           WHEN hours_to_cutoff < 12 THEN 0.5
+                                           WHEN hours_to_cutoff < 18 THEN 0.5
+                                           ELSE 1.5 END AS htc_mult,
+                                       CASE city
+                                           WHEN 'atlanta' THEN 0.5
+                                           WHEN 'miami'   THEN 0.5
+                                           ELSE 1.0 END AS city_mult
+                                FROM calibration_snapshots
+                                WHERE grade = 'A'
+                                  AND settled_correct IS NOT NULL
+                                  AND yes_ask IS NOT NULL AND yes_ask > 0
+                                  AND kelly_size IS NOT NULL
+                            ),
+                            sized AS (
+                                SELECT *,
+                                    ROUND((kelly_size * rc_mult * htc_mult * city_mult)::numeric, 2) AS adj_kelly
+                                FROM rules WHERE rc_mult > 0
+                            )
+                            SELECT
+                                city,
+                                COUNT(*)                                           AS n,
+                                ROUND(SUM(CASE WHEN settled_correct
+                                    THEN kelly_size*(1.0-yes_ask)/yes_ask
+                                    ELSE -kelly_size END)::numeric,2)              AS baseline_pnl,
+                                ROUND(SUM(CASE WHEN settled_correct
+                                    THEN adj_kelly*(1.0-yes_ask)/yes_ask
+                                    ELSE -adj_kelly END)::numeric,2)               AS adjusted_pnl,
+                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric,3) AS win_rate,
+                                ROUND(AVG(adj_kelly)::numeric,2)                   AS avg_adj_kelly
+                            FROM sized
+                            GROUP BY city
+                            ORDER BY adjusted_pnl DESC
+                        """)
+                        city_rows = cur.fetchall()
+                        by_city = [
+                            {"city": r[0], "n": r[1],
+                             "baseline_pnl": float(r[2]) if r[2] else 0,
+                             "adjusted_pnl": float(r[3]) if r[3] else 0,
+                             "pnl_delta":    round(float(r[3] or 0) - float(r[2] or 0), 2),
+                             "win_rate":     float(r[4]) if r[4] else 0,
+                             "avg_adj_kelly":float(r[5]) if r[5] else 0}
+                            for r in city_rows
+                        ]
+
+                        # Per HTC bucket
+                        cur.execute("""
+                            WITH rules AS (
+                                SELECT hours_to_cutoff, yes_ask, kelly_size,
+                                       settled_correct, mkt_rank_conf, city,
+                                       CASE mkt_rank_conf
+                                           WHEN 'tail_only' THEN 1.5
+                                           WHEN 'top2'      THEN 0.0
+                                           ELSE 1.0 END AS rc_mult,
+                                       CASE
+                                           WHEN hours_to_cutoff < 6  THEN 1.25
+                                           WHEN hours_to_cutoff < 12 THEN 0.5
+                                           WHEN hours_to_cutoff < 18 THEN 0.5
+                                           ELSE 1.5 END AS htc_mult,
+                                       CASE city
+                                           WHEN 'atlanta' THEN 0.5
+                                           WHEN 'miami'   THEN 0.5
+                                           ELSE 1.0 END AS city_mult,
+                                       CASE
+                                           WHEN hours_to_cutoff < 6  THEN '<6hr'
+                                           WHEN hours_to_cutoff < 12 THEN '6-12hr'
+                                           WHEN hours_to_cutoff < 18 THEN '12-18hr'
+                                           ELSE '>18hr' END AS bucket
+                                FROM calibration_snapshots
+                                WHERE grade = 'A'
+                                  AND settled_correct IS NOT NULL
+                                  AND yes_ask IS NOT NULL AND yes_ask > 0
+                                  AND kelly_size IS NOT NULL
+                            ),
+                            sized AS (
+                                SELECT *,
+                                    ROUND((kelly_size * rc_mult * htc_mult * city_mult)::numeric,2) AS adj_kelly
+                                FROM rules WHERE rc_mult > 0
+                            )
+                            SELECT bucket,
+                                COUNT(*)                                           AS n,
+                                ROUND(SUM(CASE WHEN settled_correct
+                                    THEN kelly_size*(1.0-yes_ask)/yes_ask
+                                    ELSE -kelly_size END)::numeric,2)              AS baseline_pnl,
+                                ROUND(SUM(CASE WHEN settled_correct
+                                    THEN adj_kelly*(1.0-yes_ask)/yes_ask
+                                    ELSE -adj_kelly END)::numeric,2)               AS adjusted_pnl,
+                                ROUND(AVG(adj_kelly)::numeric,2)                   AS avg_adj_kelly,
+                                htc_mult
+                            FROM sized
+                            GROUP BY bucket, htc_mult
+                            ORDER BY MIN(hours_to_cutoff) DESC
+                        """)
+                        htc_rows = cur.fetchall()
+                        by_htc = [
+                            {"bucket":        r[0], "n": r[1],
+                             "baseline_pnl":  float(r[2]) if r[2] else 0,
+                             "adjusted_pnl":  float(r[3]) if r[3] else 0,
+                             "pnl_delta":     round(float(r[3] or 0) - float(r[2] or 0), 2),
+                             "avg_adj_kelly": float(r[4]) if r[4] else 0,
+                             "htc_mult":      float(r[5]) if r[5] else 1.0}
+                            for r in htc_rows
+                        ]
+
+                        # Trades blocked by top2 rule
+                        cur.execute("""
+                            SELECT COUNT(*),
+                                   ROUND(SUM(CASE WHEN settled_correct
+                                       THEN kelly_size*(1.0-yes_ask)/yes_ask
+                                       ELSE -kelly_size END)::numeric,2) AS would_have_been_pnl
+                            FROM calibration_snapshots
+                            WHERE grade = 'A'
+                              AND mkt_rank_conf = 'top2'
+                              AND settled_correct IS NOT NULL
+                              AND yes_ask IS NOT NULL AND yes_ask > 0
+                              AND kelly_size IS NOT NULL
+                        """)
+                        blocked = cur.fetchone()
+
+                    conn.close()
+                    self.send_json({
+                        "ok": True,
+                        "warning": "In-sample pseudo-backtest — rules derived from same data. "
+                                   "Expect optimistic results. OOS backtest requires 300+ settled rows.",
+                        "summary": summary,
+                        "by_city": by_city,
+                        "by_htc_bucket": by_htc,
+                        "top2_blocked": {
+                            "n_trades_blocked": blocked[0] if blocked else 0,
+                            "avoided_pnl":      float(blocked[1]) if blocked and blocked[1] else 0,
+                            "note": "negative = we correctly avoided losses by blocking top2"
+                        },
+                    })
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
 
         elif path == "/debug/cal-log":
             # Returns last scan result for calibration_snapshots debugging
