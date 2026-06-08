@@ -6585,6 +6585,99 @@ class Handler(BaseHTTPRequestHandler):
                             for r in cur.fetchall()
                         ]
 
+                        # ── BOOK DEPTH ANALYSIS ─────────────────────────────────
+                        # Per HTC bucket: distribution of fillable_a, pct book-limited,
+                        # and headroom counts. Answers: how often is Kelly capped by
+                        # book depth, and how much room exists if we raise Kelly mult?
+                        cur.execute("""
+                            SELECT
+                                CASE
+                                    WHEN hours_to_cutoff > 18 THEN '>18hr'
+                                    WHEN hours_to_cutoff > 12 THEN '12-18hr'
+                                    WHEN hours_to_cutoff > 6  THEN '6-12hr'
+                                    ELSE '<6hr'
+                                END AS bucket,
+                                COUNT(*)                                                       AS n,
+                                COUNT(*) FILTER (WHERE book_limited = TRUE)                    AS n_book_limited,
+                                ROUND(AVG(fillable_a)::numeric, 2)                             AS avg_fillable_a,
+                                ROUND(percentile_cont(0.5) WITHIN GROUP (ORDER BY fillable_a)::numeric, 2) AS median_fillable_a,
+                                ROUND(percentile_cont(0.25) WITHIN GROUP (ORDER BY fillable_a)::numeric, 2) AS p25_fillable_a,
+                                ROUND(percentile_cont(0.75) WITHIN GROUP (ORDER BY fillable_a)::numeric, 2) AS p75_fillable_a,
+                                ROUND(AVG(kelly_size)::numeric, 2)                             AS avg_kelly_size,
+                                COUNT(*) FILTER (WHERE fillable_a >= kelly_size * 2)           AS n_headroom_2x,
+                                COUNT(*) FILTER (WHERE fillable_a >= kelly_size * 3)           AS n_headroom_3x
+                            FROM calibration_snapshots
+                            WHERE grade IN ('A','B')
+                              AND hours_to_cutoff IS NOT NULL
+                              AND fillable_a IS NOT NULL
+                              AND kelly_size IS NOT NULL AND kelly_size > 0
+                            GROUP BY 1 ORDER BY MIN(hours_to_cutoff) DESC
+                        """)
+                        book_depth_by_htc = [
+                            {"bucket":            r[0],
+                             "n":                 r[1],
+                             "n_book_limited":    r[2],
+                             "pct_book_limited":  round(100.0 * r[2] / r[1], 1) if r[1] else 0,
+                             "avg_fillable_a":    float(r[3]) if r[3] else None,
+                             "median_fillable_a": float(r[4]) if r[4] else None,
+                             "p25_fillable_a":    float(r[5]) if r[5] else None,
+                             "p75_fillable_a":    float(r[6]) if r[6] else None,
+                             "avg_kelly_size":    float(r[7]) if r[7] else None,
+                             "n_headroom_2x":     r[8],
+                             "n_headroom_3x":     r[9],
+                             "pct_headroom_2x":   round(100.0 * r[8] / r[1], 1) if r[1] else 0,
+                             "pct_headroom_3x":   round(100.0 * r[9] / r[1], 1) if r[1] else 0}
+                            for r in cur.fetchall()
+                        ]
+
+                        # EV split by book_limited flag, per HTC bucket
+                        # Critical question: are book-limited trades HIGHER EV than
+                        # unconstrained ones? If yes, raising Kelly captures real money.
+                        # If lower, the book cap was protecting us from bad trades.
+                        cur.execute("""
+                            SELECT
+                                CASE
+                                    WHEN hours_to_cutoff > 18 THEN '>18hr'
+                                    WHEN hours_to_cutoff > 12 THEN '12-18hr'
+                                    WHEN hours_to_cutoff > 6  THEN '6-12hr'
+                                    ELSE '<6hr'
+                                END AS bucket,
+                                book_limited,
+                                COUNT(*) AS n,
+                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) AS win_rate,
+                                ROUND(AVG(CASE
+                                    WHEN settled_correct IS NOT NULL
+                                        THEN CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END
+                                             * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
+                                             - CASE WHEN NOT settled_correct THEN 1.0 ELSE 0.0 END
+                                        ELSE NULL END)::numeric, 4) AS ev_per_dollar,
+                                ROUND(SUM(CASE
+                                    WHEN settled_correct = TRUE
+                                        THEN kelly_size * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
+                                    WHEN settled_correct = FALSE
+                                        THEN -kelly_size
+                                    ELSE 0 END)::numeric, 2) AS sim_pnl
+                            FROM calibration_snapshots
+                            WHERE grade IN ('A','B')
+                              AND settled_correct IS NOT NULL
+                              AND hours_to_cutoff IS NOT NULL
+                              AND yes_ask IS NOT NULL AND yes_ask > 0
+                              AND kelly_size IS NOT NULL
+                              AND book_limited IS NOT NULL
+                            GROUP BY 1, 2
+                            ORDER BY 1, 2
+                        """)
+                        ev_by_book_limited = [
+                            {"bucket":        r[0],
+                             "book_limited":  r[1],
+                             "n":             r[2],
+                             "win_rate":      float(r[3]) if r[3] else None,
+                             "ev_per_dollar": float(r[4]) if r[4] else None,
+                             "sim_pnl":       float(r[5]) if r[5] else None}
+                            for r in cur.fetchall()
+                        ]
+
+
                         # EV analysis — simulated PnL per city (grade A only)
                         # payout per $1 risked on a YES = (1 - yes_ask) / yes_ask
                         # EV per trade = win * payout - loss * 1
@@ -6728,6 +6821,8 @@ class Handler(BaseHTTPRequestHandler):
                         "win_by_rank_conf": win_by_rank_conf,
                         "htc_bias_curve":   htc_bias_curve,
                         "htc_edge":         htc_edge,
+                        "book_depth_by_htc":  book_depth_by_htc,
+                        "ev_by_book_limited": ev_by_book_limited,
                         "ev_by_city":       ev_by_city,
                         "ev_by_rank_conf":  ev_by_rank_conf,
                         "ev_by_horizon":    ev_by_horizon,
