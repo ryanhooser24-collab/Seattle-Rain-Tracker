@@ -5932,8 +5932,8 @@ class Handler(BaseHTTPRequestHandler):
                     ("model_forecasts", "CREATE TABLE IF NOT EXISTS model_forecasts (id SERIAL PRIMARY KEY, city TEXT NOT NULL, nws_station TEXT NOT NULL DEFAULT '', target_date DATE NOT NULL, actual_high NUMERIC(5,1), gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), nbm_high NUMERIC(5,1), graphcast_high NUMERIC(5,1), gem_high NUMERIC(5,1), icon_high NUMERIC(5,1), spread_gfs_ecmwf NUMERIC(5,2), UNIQUE(city, target_date))"),
                     ("auto_trader_config", "CREATE TABLE IF NOT EXISTS auto_trader_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())"),
                     ("auto_trader_log", "CREATE TABLE IF NOT EXISTS auto_trader_log (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT NOW(), level TEXT NOT NULL, msg TEXT NOT NULL, ticker TEXT, city TEXT, extra JSONB DEFAULT '{}')"),
-                    ("paper_trades", "CREATE TABLE IF NOT EXISTS paper_trades (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), kelly_size_uncapped NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), mkt_rank_conf TEXT, gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), model_spread NUMERIC(5,2), edge_ratio NUMERIC(8,3), gap_c INTEGER, spread_c INTEGER, kelly_frac NUMERIC(6,4), yes_bid NUMERIC(6,4), liq_grade TEXT, open_interest INTEGER, volume_24h INTEGER, fillable_a NUMERIC(8,2), is_tail_bet BOOLEAN, any_model_inside BOOLEAN, spread_exceeds_bracket BOOLEAN, book_limited BOOLEAN, settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
-                    ("calibration_snapshots", "CREATE TABLE IF NOT EXISTS calibration_snapshots (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), kelly_size_uncapped NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), mkt_rank_conf TEXT, gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), model_spread NUMERIC(5,2), edge_ratio NUMERIC(8,3), gap_c INTEGER, spread_c INTEGER, kelly_frac NUMERIC(6,4), yes_bid NUMERIC(6,4), liq_grade TEXT, open_interest INTEGER, volume_24h INTEGER, fillable_a NUMERIC(8,2), is_tail_bet BOOLEAN, any_model_inside BOOLEAN, spread_exceeds_bracket BOOLEAN, book_limited BOOLEAN, settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
+                    ("paper_trades", "CREATE TABLE IF NOT EXISTS paper_trades (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), kelly_size_uncapped NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), mkt_rank_conf TEXT, gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), model_spread NUMERIC(5,2), edge_ratio NUMERIC(8,3), gap_c INTEGER, spread_c INTEGER, kelly_frac NUMERIC(6,4), yes_bid NUMERIC(6,4), liq_grade TEXT, open_interest INTEGER, volume_24h INTEGER, fillable_a NUMERIC(8,2), ask_size INTEGER, is_tail_bet BOOLEAN, any_model_inside BOOLEAN, spread_exceeds_bracket BOOLEAN, book_limited BOOLEAN, settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
+                    ("calibration_snapshots", "CREATE TABLE IF NOT EXISTS calibration_snapshots (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), kelly_size_uncapped NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), mkt_rank_conf TEXT, gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), model_spread NUMERIC(5,2), edge_ratio NUMERIC(8,3), gap_c INTEGER, spread_c INTEGER, kelly_frac NUMERIC(6,4), yes_bid NUMERIC(6,4), liq_grade TEXT, open_interest INTEGER, volume_24h INTEGER, fillable_a NUMERIC(8,2), ask_size INTEGER, is_tail_bet BOOLEAN, any_model_inside BOOLEAN, spread_exceeds_bracket BOOLEAN, book_limited BOOLEAN, settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
                 ]
                 for name, sql in tables:
                     try:
@@ -6035,6 +6035,7 @@ class Handler(BaseHTTPRequestHandler):
                     ("spread_exceeds_bracket", "BOOLEAN"),
                     ("book_limited",           "BOOLEAN"),
                     ("kelly_size_uncapped",    "NUMERIC(8,2)"),
+                    ("ask_size",               "INTEGER"),
                 ]
                 try:
                     conn4 = get_db()
@@ -7201,6 +7202,8 @@ def _paper_trade_log(city_key, fc, markets):
                     m.get("open_interest"),
                     m.get("volume_24h"),
                     m.get("fillable_a"),
+                    # Top-of-book size at scan — proxy for real depth (Kalshi /orderbook is unreliable)
+                    m.get("ask_size"),
                     # Structural flags
                     m.get("is_tail_bet"),
                     m.get("any_model_inside"),
@@ -7216,10 +7219,10 @@ def _paper_trade_log(city_key, fc, markets):
                          kelly_size, hours_to_cutoff, mkt_rank_conf,
                          gfs_high, ecmwf_high, model_spread,
                          edge_ratio, gap_c, spread_c, kelly_frac,
-                         yes_bid, liq_grade, open_interest, volume_24h, fillable_a,
+                         yes_bid, liq_grade, open_interest, volume_24h, fillable_a, ask_size,
                          is_tail_bet, any_model_inside, spread_exceeds_bracket, book_limited,
                          kelly_size_uncapped"""
-                _vals = ",".join(["%s"] * 34)
+                _vals = ",".join(["%s"] * 35)
 
                 # paper_trades — A-grade only (bet simulation)
                 if m.get("grade") == "A":
