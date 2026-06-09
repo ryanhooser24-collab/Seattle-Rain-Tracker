@@ -5932,8 +5932,8 @@ class Handler(BaseHTTPRequestHandler):
                     ("model_forecasts", "CREATE TABLE IF NOT EXISTS model_forecasts (id SERIAL PRIMARY KEY, city TEXT NOT NULL, nws_station TEXT NOT NULL DEFAULT '', target_date DATE NOT NULL, actual_high NUMERIC(5,1), gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), nbm_high NUMERIC(5,1), graphcast_high NUMERIC(5,1), gem_high NUMERIC(5,1), icon_high NUMERIC(5,1), spread_gfs_ecmwf NUMERIC(5,2), UNIQUE(city, target_date))"),
                     ("auto_trader_config", "CREATE TABLE IF NOT EXISTS auto_trader_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())"),
                     ("auto_trader_log", "CREATE TABLE IF NOT EXISTS auto_trader_log (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT NOW(), level TEXT NOT NULL, msg TEXT NOT NULL, ticker TEXT, city TEXT, extra JSONB DEFAULT '{}')"),
-                    ("paper_trades", "CREATE TABLE IF NOT EXISTS paper_trades (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), mkt_rank_conf TEXT, gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), model_spread NUMERIC(5,2), edge_ratio NUMERIC(8,3), gap_c INTEGER, spread_c INTEGER, kelly_frac NUMERIC(6,4), yes_bid NUMERIC(6,4), liq_grade TEXT, open_interest INTEGER, volume_24h INTEGER, fillable_a NUMERIC(8,2), is_tail_bet BOOLEAN, any_model_inside BOOLEAN, spread_exceeds_bracket BOOLEAN, book_limited BOOLEAN, settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
-                    ("calibration_snapshots", "CREATE TABLE IF NOT EXISTS calibration_snapshots (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), mkt_rank_conf TEXT, gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), model_spread NUMERIC(5,2), edge_ratio NUMERIC(8,3), gap_c INTEGER, spread_c INTEGER, kelly_frac NUMERIC(6,4), yes_bid NUMERIC(6,4), liq_grade TEXT, open_interest INTEGER, volume_24h INTEGER, fillable_a NUMERIC(8,2), is_tail_bet BOOLEAN, any_model_inside BOOLEAN, spread_exceeds_bracket BOOLEAN, book_limited BOOLEAN, settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
+                    ("paper_trades", "CREATE TABLE IF NOT EXISTS paper_trades (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), kelly_size_uncapped NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), mkt_rank_conf TEXT, gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), model_spread NUMERIC(5,2), edge_ratio NUMERIC(8,3), gap_c INTEGER, spread_c INTEGER, kelly_frac NUMERIC(6,4), yes_bid NUMERIC(6,4), liq_grade TEXT, open_interest INTEGER, volume_24h INTEGER, fillable_a NUMERIC(8,2), is_tail_bet BOOLEAN, any_model_inside BOOLEAN, spread_exceeds_bracket BOOLEAN, book_limited BOOLEAN, settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
+                    ("calibration_snapshots", "CREATE TABLE IF NOT EXISTS calibration_snapshots (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), kelly_size_uncapped NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), mkt_rank_conf TEXT, gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), model_spread NUMERIC(5,2), edge_ratio NUMERIC(8,3), gap_c INTEGER, spread_c INTEGER, kelly_frac NUMERIC(6,4), yes_bid NUMERIC(6,4), liq_grade TEXT, open_interest INTEGER, volume_24h INTEGER, fillable_a NUMERIC(8,2), is_tail_bet BOOLEAN, any_model_inside BOOLEAN, spread_exceeds_bracket BOOLEAN, book_limited BOOLEAN, settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
                 ]
                 for name, sql in tables:
                     try:
@@ -6034,6 +6034,7 @@ class Handler(BaseHTTPRequestHandler):
                     ("any_model_inside",       "BOOLEAN"),
                     ("spread_exceeds_bracket", "BOOLEAN"),
                     ("book_limited",           "BOOLEAN"),
+                    ("kelly_size_uncapped",    "NUMERIC(8,2)"),
                 ]
                 try:
                     conn4 = get_db()
@@ -6300,6 +6301,114 @@ class Handler(BaseHTTPRequestHandler):
                             "note": "negative = we correctly avoided losses by blocking top2"
                         },
                     })
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/debug/book-fetch":
+            # Diagnostic: fetch raw orderbook + run fillable_a computation for a
+            # specific ticker. Used to verify whether fetch_full_orderbook_liq
+            # is returning data and how thin the book actually is at the levels
+            # where edge_ratio still holds.
+            #
+            # Usage: /debug/book-fetch?ticker=KXHIGHTPHX-26JUN09-B103.5
+            # Optional: &mu=102.5&sigma=2.0&lo=103&hi=999
+            #
+            # If lo/hi/mu/sigma are omitted, will pull the latest calibration
+            # snapshot for this ticker and use those values.
+            try:
+                from urllib.parse import urlparse, parse_qs
+                q = parse_qs(urlparse(self.path).query)
+                ticker = (q.get("ticker", [""])[0] or "").strip()
+                if not ticker:
+                    self.send_json({"ok": False, "error": "ticker param required"})
+                    return
+
+                # Pull mu/sigma/lo/hi from latest cal snapshot if not provided
+                mu_q    = q.get("mu", [None])[0]
+                sigma_q = q.get("sigma", [None])[0]
+                lo_q    = q.get("lo", [None])[0]
+                hi_q    = q.get("hi", [None])[0]
+
+                mu = sigma = lo = hi = None
+                snap = None
+                if not all([mu_q, sigma_q]):
+                    conn = get_db()
+                    if conn:
+                        with conn.cursor() as cur:
+                            cur.execute("""
+                                SELECT mu, sigma, lo_temp, hi_temp,
+                                       model_prob, yes_ask, kelly_size, fillable_a,
+                                       book_limited, hours_to_cutoff, grade
+                                FROM calibration_snapshots
+                                WHERE ticker = %s
+                                ORDER BY scan_ts DESC LIMIT 1
+                            """, (ticker,))
+                            r = cur.fetchone()
+                            if r:
+                                mu, sigma, lo, hi = (float(r[0]) if r[0] is not None else None,
+                                                     float(r[1]) if r[1] is not None else None,
+                                                     float(r[2]) if r[2] is not None else None,
+                                                     float(r[3]) if r[3] is not None else None)
+                                snap = {"model_prob": float(r[4]) if r[4] is not None else None,
+                                        "yes_ask":    float(r[5]) if r[5] is not None else None,
+                                        "kelly_size": float(r[6]) if r[6] is not None else None,
+                                        "fillable_a": float(r[7]) if r[7] is not None else None,
+                                        "book_limited":  bool(r[8]) if r[8] is not None else None,
+                                        "hours_to_cutoff": float(r[9]) if r[9] is not None else None,
+                                        "grade":      r[10]}
+                        conn.close()
+                if mu_q    is not None: mu    = float(mu_q)
+                if sigma_q is not None: sigma = float(sigma_q)
+                if lo_q    is not None: lo    = float(lo_q)
+                if hi_q    is not None: hi    = float(hi_q)
+
+                if mu is None or sigma is None:
+                    self.send_json({"ok": False,
+                                    "error": "mu/sigma not found — pass as params or use a ticker that exists in calibration_snapshots",
+                                    "ticker": ticker, "snap": snap})
+                    return
+
+                # Fetch raw orderbook
+                ob_raw = None
+                ob_err = None
+                try:
+                    r = requests.get(
+                        f"{KALSHI_BASE}/markets/{ticker}/orderbook",
+                        headers=kalshi_auth_headers("GET", f"/trade-api/v2/markets/{ticker}/orderbook"),
+                        timeout=8
+                    )
+                    if r.ok:
+                        ob_raw = r.json().get("orderbook", {})
+                    else:
+                        ob_err = f"HTTP {r.status_code}: {r.text[:200]}"
+                except Exception as e:
+                    ob_err = str(e)
+
+                # Run fillable_a computation
+                computed = fetch_full_orderbook_liq(ticker, mu, sigma, lo, hi)
+
+                # Total raw depth (no edge filter) for comparison
+                total_raw_dollars = 0.0
+                if ob_raw and ob_raw.get("yes"):
+                    for px, sz in ob_raw["yes"]:
+                        total_raw_dollars += (px / 100.0) * sz
+
+                self.send_json({
+                    "ok": True,
+                    "ticker": ticker,
+                    "inputs": {"mu": mu, "sigma": sigma, "lo": lo, "hi": hi},
+                    "latest_db_snapshot": snap,
+                    "orderbook_raw": ob_raw,
+                    "orderbook_error": ob_err,
+                    "total_raw_dollars_yes_side": round(total_raw_dollars, 2),
+                    "fillable_a_computed": computed,
+                    "interpretation": {
+                        "note": "fillable_a is the dollar volume of YES contracts where edge_ratio >= 0.12 AND prob >= 0.50 at the offered price. As price rises, edge shrinks and levels drop out of grade A.",
+                        "diagnosis": ("Empty orderbook — market likely not actively quoted." if not ob_raw or not ob_raw.get("yes")
+                                      else "Book exists but fillable_a is 0 — top level prob/edge fails A-grade gate." if computed and computed.get("fillable_a_dollars", 0) == 0
+                                      else "Working as designed.")
+                    }
+                })
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
@@ -6618,11 +6727,11 @@ class Handler(BaseHTTPRequestHandler):
                              "n":                 r[1],
                              "n_book_limited":    r[2],
                              "pct_book_limited":  round(100.0 * r[2] / r[1], 1) if r[1] else 0,
-                             "avg_fillable_a":    float(r[3]) if r[3] else None,
-                             "median_fillable_a": float(r[4]) if r[4] else None,
-                             "p25_fillable_a":    float(r[5]) if r[5] else None,
-                             "p75_fillable_a":    float(r[6]) if r[6] else None,
-                             "avg_kelly_size":    float(r[7]) if r[7] else None,
+                             "avg_fillable_a":    float(r[3]) if r[3] is not None else None,
+                             "median_fillable_a": float(r[4]) if r[4] is not None else None,
+                             "p25_fillable_a":    float(r[5]) if r[5] is not None else None,
+                             "p75_fillable_a":    float(r[6]) if r[6] is not None else None,
+                             "avg_kelly_size":    float(r[7]) if r[7] is not None else None,
                              "n_headroom_2x":     r[8],
                              "n_headroom_3x":     r[9],
                              "pct_headroom_2x":   round(100.0 * r[8] / r[1], 1) if r[1] else 0,
@@ -7098,6 +7207,8 @@ def _paper_trade_log(city_key, fc, markets):
                     m.get("any_model_inside"),
                     m.get("spread_exceeds_bracket"),
                     m.get("book_limited"),
+                    # Raw Kelly demand (pre-book-cap) — diagnoses how often book caps us
+                    m.get("kelly_size_uncapped"),
                 )
 
                 _cols = """city, nws_station, target_date, horizon, ticker,
@@ -7107,8 +7218,9 @@ def _paper_trade_log(city_key, fc, markets):
                          gfs_high, ecmwf_high, model_spread,
                          edge_ratio, gap_c, spread_c, kelly_frac,
                          yes_bid, liq_grade, open_interest, volume_24h, fillable_a,
-                         is_tail_bet, any_model_inside, spread_exceeds_bracket, book_limited"""
-                _vals = ",".join(["%s"] * 33)
+                         is_tail_bet, any_model_inside, spread_exceeds_bracket, book_limited,
+                         kelly_size_uncapped"""
+                _vals = ",".join(["%s"] * 34)
 
                 # paper_trades — A-grade only (bet simulation)
                 if m.get("grade") == "A":
