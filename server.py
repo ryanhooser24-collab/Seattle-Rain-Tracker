@@ -6316,7 +6316,6 @@ class Handler(BaseHTTPRequestHandler):
             # If lo/hi/mu/sigma are omitted, will pull the latest calibration
             # snapshot for this ticker and use those values.
             try:
-                from urllib.parse import urlparse, parse_qs
                 q = parse_qs(urlparse(self.path).query)
                 ticker = (q.get("ticker", [""])[0] or "").strip()
                 if not ticker:
