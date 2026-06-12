@@ -6299,7 +6299,7 @@ class Handler(BaseHTTPRequestHandler):
                         "top2_blocked": {
                             "n_trades_blocked": blocked[0] if blocked else 0,
                             "avoided_pnl":      float(blocked[1]) if blocked and blocked[1] else 0,
-                            "note": "negative = we correctly avoided losses by blocking top2"
+                            "note": "avoided_pnl = PnL blocked trades WOULD have made. Positive = blocking cost us luck-dollars; block still justified by negative EV/$ expectation."
                         },
                     })
             except Exception as e:
