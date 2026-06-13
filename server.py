@@ -405,56 +405,13 @@ def fetch_temp_forecast(city_key, horizon="d1"):
         if not results:
             return {"ok": False, "error": "; ".join(errors)}
 
-        # Bias correction: HTC-bucket bias from calibration_snapshots.
-        # Buckets: >18hr, 12-18hr, 6-12hr, <6hr — bias shrinks closer to settlement
-        # as the model ingests more observations. Falls back to combined, then 0.0.
-        # Minimum 10 settled rows required globally to activate any bias.
-        bias_cache  = _TEMP_BIAS_CACHE.get(city_key, {})
-        bias_n      = bias_cache.get("bias_n", 0)
-        htc_buckets = bias_cache.get("htc_buckets", {})  # {bucket_label: bias_val}
-        htc_ns      = bias_cache.get("htc_ns", {})       # {bucket_label: n}
-
-        # Determine which HTC bucket this scan falls in using hours_to_cutoff.
-        # hours_to_cutoff is not available at forecast time (it's per-market),
-        # so we use horizon as a proxy: d1 ≈ >18hr, d0 ≈ 6-12hr.
-        # The scan capture hour is known at trade time — bias applied per-market below.
-        # For the forecast mu, we apply the bucket matching the current UTC hour offset.
-        import datetime as _dt
-        _now_utc = _dt.datetime.utcnow()
-        _cfg_tz  = cfg.get("tz", "America/Chicago")
-        try:
-            import pytz as _pytz
-            _local_now = _dt.datetime.utcnow().replace(tzinfo=_pytz.utc).astimezone(_pytz.timezone(_cfg_tz))
-            _cutoff_local = _local_now.replace(hour=6, minute=0, second=0, microsecond=0)
-            if _local_now.hour >= 6:
-                _cutoff_local += _dt.timedelta(days=1)
-            _est_htc = round((_cutoff_local - _local_now).total_seconds() / 3600, 1)
-        except Exception:
-            _est_htc = 20.0 if horizon == "d1" else 10.0
-
-        if _est_htc > 18:
-            _htc_bucket = ">18hr"
-        elif _est_htc > 12:
-            _htc_bucket = "12-18hr"
-        elif _est_htc > 6:
-            _htc_bucket = "6-12hr"
-        else:
-            _htc_bucket = "<6hr"
-
-        _bucket_n    = htc_ns.get(_htc_bucket, 0)
-        _bucket_bias = htc_buckets.get(_htc_bucket, None)
-
-        if _bucket_n >= 10 and _bucket_bias is not None:
-            _active_bias = _bucket_bias
-        elif bias_n >= 10:
-            _active_bias = bias_cache.get("gfs_bias", 0.0)
-        else:
-            _active_bias = 0.0
-
-        gfs_bias_high   = _active_bias
-        ecmwf_bias_high = _active_bias
-        blend_bias_high = _active_bias
-        gfs_bias_low    = 0.0   # low σ not yet separately calibrated
+        # Bias correction disabled — insufficient settled trade data to calibrate reliably.
+        # Re-enable once 30+ settled trades per city are available.
+        bias_cache = _TEMP_BIAS_CACHE.get(city_key, {})
+        gfs_bias_high   = 0.0
+        ecmwf_bias_high = 0.0
+        blend_bias_high = 0.0
+        gfs_bias_low    = 0.0
         ecmwf_bias_low  = 0.0
 
         gfs_raw    = results.get("gfs",   {})
@@ -909,14 +866,18 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
             # Fall back to blended mu with spread-inflated sigma
             prob = bracket_prob(lo, hi, mu, sigma)
 
-        gap_c     = round((prob - ask) * 100)
+        # Account for 2% Kalshi taker fee on winning contracts
+        # Effective probability = prob * 0.98 (fee reduces payout from $1 to $0.98)
+        prob_after_fee = round(prob * 0.98, 4)
+        
+        gap_c     = round((prob_after_fee - ask) * 100)
         net_gap_c = max(0, gap_c - spr)
         edge_ratio = round(gap_c / sigma, 3) if sigma > 0 else 0.0
 
         # Kelly: f = (p*b - q) / b where b = (1-ask)/ask (payout ratio)
         if ask > 0 and ask < 1:
             b        = (1 - ask) / ask
-            kelly    = (prob * b - (1 - prob)) / b
+            kelly    = (prob_after_fee * b - (1 - prob_after_fee)) / b
             kelly_h  = max(0.0, round(kelly * 0.5, 3))   # half-Kelly
             kelly_sz = round(kelly_h * 100, 2)             # $ per $100 bankroll unit
         else:
@@ -1037,7 +998,13 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
                     grade = {"A": "B", "B": "C", "C": "skip"}.get(grade, grade)
                     m["skip_reason"] = m.get("skip_reason","") + " open_gt_insufficient_clearance"
 
+        # Construct series_id for correlation analysis (all brackets in same
+        # market series share this id; e.g. all Chicago 2026-06-13 d1 high brackets).
+        series_id = f"{forecast.get('city','')}-{forecast.get('target_date','')}-{forecast.get('horizon','d1')}-{market_type}"
+
         m.update({
+            "side":              "yes",
+            "series_id":         series_id,
             "model_prob":        prob,
             "mu":                mu,
             "sigma":             sigma,
@@ -1065,8 +1032,90 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
         })
         analyzed.append(m)
 
+        # ── Score NO-side counterpart for calibration data ──────────────────
+        # For every bracket (regardless of YES grade), score the NO side
+        # (settlement falls outside this bracket). NO bets are not executed in
+        # Tier 1 — only YES side — but logging both sides gives validation data:
+        #   1. Is NO-side edge real? (group by side, measure EV/$)
+        #   2. Do both sides share forecast bias?
+        #   3. Are correlated NOs in same series winning together? (use series_id)
+        no_ask = m.get("no_ask", 0) or 0.0
+        no_bid = m.get("no_bid", 0) or 0.0
+
+        # Skip NO scoring only if NO-side price is missing or degenerate.
+        # Note: we do NOT gate on YES grade — high-prob model on bracket A
+        # naturally produces high NO edge on brackets B, C, D…
+        if no_ask > 0.02 and no_ask < 0.98:
+            spr_no = round((no_ask - no_bid) * 100)
+
+            # NO probability = settlement falls outside [lo, hi]
+            prob_no = round(1.0 - prob, 4)
+            prob_no_after_fee = round(prob_no * 0.98, 4)
+
+            gap_c_no = round((prob_no_after_fee - no_ask) * 100)
+            net_gap_c_no = max(0, gap_c_no - spr_no)
+            edge_ratio_no = round(gap_c_no / sigma, 3) if sigma > 0 else 0.0
+
+            # Kelly for NO side with fee-adjusted probability
+            if no_ask > 0 and no_ask < 1:
+                b_no = (1 - no_ask) / no_ask
+                kelly_no = (prob_no_after_fee * b_no - (1 - prob_no_after_fee)) / b_no
+                kelly_h_no = max(0.0, round(kelly_no * 0.5, 3))
+                kelly_sz_no = round(kelly_h_no * 100, 2)
+            else:
+                kelly_h_no = kelly_sz_no = 0.0
+
+            # NO-side tail bet: bracket sits above model center (model says shortfall)
+            is_tail_bet_no = (lo is not None and lo >= mu) or (hi is None and lo is not None and lo > mu)
+
+            # NO-side grading — IDENTICAL thresholds to YES (Ryan's directive: same rules)
+            if net_gap_c_no <= 0:
+                grade_no = "skip"
+            elif prob_no < 0.20:
+                grade_no = "skip"
+            elif is_tail_bet_no and prob_no < 0.35:
+                grade_no = "skip"
+            elif edge_ratio_no >= 0.12 and prob_no >= 0.50 and net_gap_c_no >= 8:
+                grade_no = "A"
+            elif edge_ratio_no >= 0.07 and prob_no >= 0.35 and net_gap_c_no >= 5:
+                grade_no = "B"
+            elif edge_ratio_no >= 0.04 and prob_no >= 0.25:
+                grade_no = "C"
+            else:
+                grade_no = "skip"
+
+            # Build NO-side dict (carry over identifiers but overwrite edge metrics)
+            m_no = {k: v for k, v in m.items() if k not in (
+                "side", "model_prob", "gap_c", "net_gap_c", "spread_c",
+                "kelly_frac", "kelly_size", "kelly_size_uncapped", "edge_ratio",
+                "grade", "actionable", "yes_ask", "yes_bid", "ask_size",
+                "is_tail_bet", "book_limited", "fillable_a", "mkt_rank_conf"
+            )}
+            m_no.update({
+                "side":              "no",
+                "series_id":         series_id,
+                "model_prob":        prob_no,
+                "yes_ask":           no_ask,   # NO ask stored here for compatibility
+                "yes_bid":           no_bid,
+                "ask_size":          m.get("no_ask_size", 0),
+                "gap_c":             gap_c_no,
+                "net_gap_c":         net_gap_c_no,
+                "spread_c":          spr_no,
+                "kelly_frac":        kelly_h_no,
+                "kelly_size":        kelly_sz_no,
+                "kelly_size_uncapped": kelly_sz_no,
+                "edge_ratio":        edge_ratio_no,
+                "is_tail_bet":       is_tail_bet_no,
+                "book_limited":      False,    # not computed for NO side yet
+                "fillable_a":        0.0,      # not computed for NO side yet
+                "grade":             grade_no,
+                "actionable":        grade_no in ("A", "B"),
+            })
+            analyzed.append(m_no)
+
     # ── Market rank confirmation ──────────────────────────────────────────────
-    # Rank all brackets by market price (yes_ask) descending.
+    # Rank all brackets by market price (yes_ask) descending, within each side.
+    # Tier 1: only rank YES side. NO-side ranking deferred to Tier 2.
     # Market's #1 bracket = highest yes_ask = market's most confident outcome.
     #
     # Grade adjustment rules (activated based on observed loss pattern):
@@ -1084,7 +1133,11 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
     _grade_up   = {"A": "A", "B": "A", "C": "B", "skip": "skip"}
     _grade_down = {"A": "B", "B": "C", "C": "skip", "skip": "skip"}
 
-    _tradeable_asks = [x for x in analyzed if x.get("yes_ask", 0) > 0.02]
+    # Separate YES and NO side brackets for ranking
+    analyzed_yes = [x for x in analyzed if x.get("side") == "yes"]
+    analyzed_no = [x for x in analyzed if x.get("side") == "no"]
+
+    _tradeable_asks = [x for x in analyzed_yes if x.get("yes_ask", 0) > 0.02]
     _is_tail_series = len(_tradeable_asks) <= 1
 
     if not _is_tail_series:
@@ -1094,7 +1147,7 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
     else:
         _top1_key = _top2_key = None
 
-    for m in analyzed:
+    for m in analyzed_yes:
         if m.get("grade") == "skip":
             m["mkt_rank_conf"] = "skip"
             continue
@@ -1114,6 +1167,10 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
             m["grade"] = _grade_down[m["grade"]]
         # Re-sync actionable after grade change
         m["actionable"] = m["grade"] in ("A", "B")
+
+    # NO-side ranking deferred to Tier 2
+    for m in analyzed_no:
+        m["mkt_rank_conf"] = "no_ranking_deferred"
 
     # Sort: A first, then by gap_c descending
     grade_order = {"A": 0, "B": 1, "C": 2, "skip": 3}
@@ -1223,8 +1280,10 @@ def detect_combo_signals(all_markets, forecast):
             combined_cost = cost_a + cost_b  # total spend per $1 payout on winner
 
             # Combined edge: model probability of combined range vs total cost
-            # If combined_prob = 0.97 and combined_cost = 0.20, edge = +77¢
-            combined_gap_c = round((combined_prob - combined_cost) * 100)
+            # Account for 2% Kalshi fee on the combined payout
+            # If combined_prob = 0.97 and combined_cost = 0.20, edge = +77.06¢ before fee → +75.48¢ after
+            combined_prob_after_fee = round(combined_prob * 0.98, 4)
+            combined_gap_c = round((combined_prob_after_fee - combined_cost) * 100)
 
             # Spread cost: use worst spread of the two brackets
             spr_a = max(0, round((a.get("yes_ask",0) - a.get("yes_bid",0)) * 100))
@@ -1237,10 +1296,10 @@ def detect_combo_signals(all_markets, forecast):
 
             # Kelly sizing for combo: treat as single bet
             # combined_cost is the total outlay per $1 payout
-            # EV = combined_prob * (1 - combined_cost) - (1 - combined_prob) * combined_cost
+            # EV = combined_prob_after_fee * (1 - combined_cost) - (1 - combined_prob_after_fee) * combined_cost
             if 0 < combined_cost < 1:
                 b_odds  = (1 - combined_cost) / combined_cost
-                kelly   = (combined_prob * b_odds - (1 - combined_prob)) / b_odds
+                kelly   = (combined_prob_after_fee * b_odds - (1 - combined_prob_after_fee)) / b_odds
                 kelly_h = max(0.0, round(kelly * 0.5, 3))
                 kelly_sz = round(kelly_h * 100, 2)
             else:
@@ -1593,24 +1652,6 @@ _AT_CONFIG = {
     "min_volume":     200,
     "scan_interval":  300,   # seconds between scans
     "min_fill_dollars": 5.0, # skip execution if Kelly budget < this
-    # Rank confidence multipliers — applied to kelly_budget at execution time
-    # Based on EV/dollar analysis: tail_only=+0.97, top1=+0.13, combo=+0.02, top2=-0.40
-    "rank_conf_mult": {
-        "tail_only": 1.5,   # highest EV/dollar — size up
-        "combo":     1.0,   # neutral
-        "top1":      1.0,   # neutral
-        "top2":      0.0,   # blocked — negative EV/dollar
-    },
-    # HTC (hours-to-cutoff) kelly multipliers — based on EV/dollar from htc_edge analysis.
-    # The model's gap_c is flat (~35-40c) across all windows. What changes is avg_mkt_prob:
-    # the market reprices during 12-18hr, making contracts expensive without win rate improving.
-    # This creates a U-shaped EV curve: >18hr and <6hr are profitable, middle is the dead zone.
-    "htc_mult": {
-        "lt6":   1.25,  # <6hr  — EV +$0.21/dollar, high confidence, size up
-        "lt12":  0.5,   # 6-12hr — EV -$0.08/dollar, dead zone, size down
-        "lt18":  0.5,   # 12-18hr — EV -$0.08/dollar, dead zone (n=72, most confident bucket)
-        "gt18":  1.5,   # >18hr — EV +$0.35/dollar, cheap contracts, largest edge window
-    },
 }
 
 
@@ -1849,11 +1890,10 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
                f"net_edge={signal.get('combined_net_edge_c')}¢",
                city=city_key)
         # Split Kelly budget evenly across both legs
-        _combo_city_mult = AUTO_TRADER_CITY_KELLY_MULT.get(signal.get("city_key",""), 1.0)
         combo_budget = min(
             signal.get("kelly_size", 0.0) or 0.0,
             cfg.get("max_per_ticker", 75.0)
-        ) * (cfg.get("bankroll_unit", 100.0) / 100.0) * (cfg.get("kelly_mult", 0.5) / 0.5) * _combo_city_mult
+        ) * (cfg.get("bankroll_unit", 100.0) / 100.0) * (cfg.get("kelly_mult", 0.5) / 0.5)
         leg_budget = round(combo_budget / 2, 2)
         signal["kelly_size"] = leg_budget
 
@@ -1889,50 +1929,10 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
     # Scale by config bankroll_unit / 100 to respect current settings.
     scan_kelly_sz  = signal.get("kelly_size", 0.0) or 0.0
     # Rescale if bankroll_unit differs from default $100
-    bankroll_scale   = cfg.get("bankroll_unit", 100.0) / 100.0
+    bankroll_scale = cfg.get("bankroll_unit", 100.0) / 100.0
     kelly_mult_scale = cfg.get("kelly_mult", 0.5) / 0.5  # scale vs default 0.5x
-    kelly_budget     = round(scan_kelly_sz * bankroll_scale * kelly_mult_scale, 2)
-    kelly_budget     = min(kelly_budget, cfg.get("max_per_ticker", 75.0))
-
-    # ── Rank confidence multiplier ──────────────────────────────────────────
-    rank_conf      = signal.get("mkt_rank_conf", "")
-    rc_mults       = cfg.get("rank_conf_mult", {})
-    rc_mult        = rc_mults.get(rank_conf, 1.0)
-    if rc_mult == 0.0:
-        at_log("SKIP", f"{ticker} rank_conf={rank_conf} blocked (kelly_mult=0) — negative EV",
-               ticker=ticker, city=city_key)
-        return 0
-    kelly_budget = round(kelly_budget * rc_mult, 2)
-
-    # ── HTC (hours-to-cutoff) multiplier ───────────────────────────────────
-    htc        = signal.get("hours_to_cutoff") or 0.0
-    htc_mults  = cfg.get("htc_mult", {})
-    if htc < 6:
-        htc_mult = htc_mults.get("lt6",  1.0)
-        htc_label = "<6hr"
-    elif htc < 12:
-        htc_mult = htc_mults.get("lt12", 1.0)
-        htc_label = "6-12hr"
-    elif htc < 18:
-        htc_mult = htc_mults.get("lt18", 1.0)
-        htc_label = "12-18hr"
-    else:
-        htc_mult = htc_mults.get("gt18", 1.0)
-        htc_label = ">18hr"
-    kelly_budget = round(kelly_budget * htc_mult, 2)
-
-    # ── City-level soft-flag Kelly multiplier ──────────────────────────────
-    city_mult = AUTO_TRADER_CITY_KELLY_MULT.get(city_key, 1.0)
-    if city_mult != 1.0:
-        at_log("INFO", f"{ticker} city={city_key} soft-flagged — kelly x{city_mult}",
-               ticker=ticker, city=city_key)
-    kelly_budget = round(kelly_budget * city_mult, 2)
-
-    at_log("INFO",
-           f"{ticker} kelly adj: rank_conf={rank_conf}(x{rc_mult}) "
-           f"htc={htc_label}(x{htc_mult}) city_mult={city_mult} "
-           f"→ budget=${kelly_budget:.2f}",
-           ticker=ticker, city=city_key)
+    kelly_budget   = round(scan_kelly_sz * bankroll_scale * kelly_mult_scale, 2)
+    kelly_budget   = min(kelly_budget, cfg.get("max_per_ticker", 75.0))
 
     # Min fill check — if Kelly budget is below threshold, skip entirely
     min_fill = cfg.get("min_fill_dollars", 5.0)
@@ -2117,6 +2117,9 @@ def run_auto_trader_cycle(force=False):
                 for signal in all_markets:
                     g = signal.get("grade", "skip")
                     if g == "skip" or not signal.get("actionable"):
+                        continue
+                    # Tier 1: only execute YES-side signals (NO-side calibration deferred)
+                    if signal.get("side") == "no":
                         continue
 
                     # Only filter on grade — the execution loop handles
@@ -3695,26 +3698,33 @@ def ensure_tables():
                     -- Settlement fields (filled in later)
                     settled_temp   NUMERIC(5,1),
                     settled_correct BOOLEAN,
-                    settled_ts     TIMESTAMPTZ
+                    settled_ts     TIMESTAMPTZ,
+                    side           TEXT DEFAULT 'yes',
+                    series_id      TEXT
                 );
             """)
+            # Idempotent ALTERs for live databases (works whether table is new or pre-existing)
+            cur.execute("ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS side TEXT DEFAULT 'yes'")
+            cur.execute("ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS series_id TEXT")
+            cur.execute("UPDATE paper_trades SET side = 'yes' WHERE side IS NULL")
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS paper_trades_target_date_idx
                     ON paper_trades (target_date DESC);
             """)
-            # Deduplicate existing rows before creating unique index
-            # Keep the row with the latest scan_ts per (ticker, target_date)
+            # Deduplicate existing rows before creating unique index on (ticker, target_date, side)
             cur.execute("""
                 DELETE FROM paper_trades
                 WHERE id NOT IN (
-                    SELECT DISTINCT ON (ticker, target_date) id
+                    SELECT DISTINCT ON (ticker, target_date, side) id
                     FROM paper_trades
-                    ORDER BY ticker, target_date, scan_ts DESC
+                    ORDER BY ticker, target_date, side, scan_ts DESC
                 );
             """)
+            # Drop old (ticker, target_date) unique index and create new (ticker, target_date, side)
+            cur.execute("DROP INDEX IF EXISTS paper_trades_ticker_date_idx")
             cur.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS paper_trades_ticker_date_idx
-                    ON paper_trades (ticker, target_date);
+                CREATE UNIQUE INDEX IF NOT EXISTS paper_trades_ticker_date_side_idx
+                    ON paper_trades (ticker, target_date, side);
             """)
             # calibration_snapshots — all grades, all signals
             # Used to compute rolling 30-day per-city forecast bias.
@@ -3762,16 +3772,32 @@ def ensure_tables():
                     book_limited        BOOLEAN,   -- kelly capped by book depth
                     settled_temp   NUMERIC(5,1),   -- NWS CLI actual
                     settled_correct BOOLEAN,
-                    settled_ts     TIMESTAMPTZ
+                    settled_ts     TIMESTAMPTZ,
+                    side           TEXT DEFAULT 'yes',
+                    series_id      TEXT
                 );
             """)
+            # Idempotent ALTERs for live databases
+            cur.execute("ALTER TABLE calibration_snapshots ADD COLUMN IF NOT EXISTS side TEXT DEFAULT 'yes'")
+            cur.execute("ALTER TABLE calibration_snapshots ADD COLUMN IF NOT EXISTS series_id TEXT")
+            cur.execute("UPDATE calibration_snapshots SET side = 'yes' WHERE side IS NULL")
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS calibration_snapshots_city_date_idx
                     ON calibration_snapshots (city, target_date DESC);
             """)
+            # Deduplicate, then unique index on (ticker, target_date, side)
             cur.execute("""
-                CREATE UNIQUE INDEX IF NOT EXISTS calibration_snapshots_ticker_date_idx
-                    ON calibration_snapshots (ticker, target_date);
+                DELETE FROM calibration_snapshots
+                WHERE id NOT IN (
+                    SELECT DISTINCT ON (ticker, target_date, side) id
+                    FROM calibration_snapshots
+                    ORDER BY ticker, target_date, side, scan_ts DESC
+                );
+            """)
+            cur.execute("DROP INDEX IF EXISTS calibration_snapshots_ticker_date_idx")
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS calibration_snapshots_ticker_date_side_idx
+                    ON calibration_snapshots (ticker, target_date, side);
             """)
             # price_history — continuous price/forecast snapshots every scan cycle
             # Used to measure lag between model forecast shifts and market repricing.
@@ -5243,64 +5269,38 @@ class Handler(BaseHTTPRequestHandler):
                     σ_d1 = round(sum(rmse_vals) / len(rmse_vals), 2) if rmse_vals else cfg["σ_d1"]
                     σ_d0 = round(σ_d1 * 0.70, 2)
 
-                    # ── Bias source: HTC-bucket bias from calibration_snapshots ──
-                    # Four buckets by hours_to_cutoff: >18hr, 12-18hr, 6-12hr, <6hr.
-                    # Bias shrinks as we approach settlement — captures model convergence.
-                    # Global (cross-city) bucket bias used until per-city N is sufficient.
-                    # Minimum 10 settled rows to activate any bias correction.
-                    BIAS_MIN_TRADES  = 10
-                    live_gfs_bias    = 0.0
-                    live_ecmwf_bias  = 0.0
-                    live_n           = 0
-                    bias_source      = "disabled"
-                    htc_buckets      = {}   # bucket_label -> bias_val
-                    htc_ns           = {}   # bucket_label -> n
+                    # ── Bias source selection ─────────────────────────────
+                    # Prefer calibration_snapshots (real trade data, rolling 30d)
+                    # over archive API (unreliable — model overwrites prior runs).
+                    # Bias only applied when >= 30 settled rows in last 30 days.
+                    BIAS_MIN_TRADES = 30
+                    live_gfs_bias   = 0.0
+                    live_ecmwf_bias = 0.0
+                    live_n          = 0
+                    bias_source     = "disabled"
 
                     conn_cal = get_db()
                     if conn_cal:
                         try:
                             with conn_cal.cursor() as cur_cal:
-                                # Overall combined bias (fallback)
                                 cur_cal.execute("""
-                                    SELECT COUNT(*), AVG(mu - settled_temp)
+                                    SELECT
+                                        COUNT(*) AS n,
+                                        AVG(mu - settled_temp) AS raw_bias
                                     FROM calibration_snapshots
                                     WHERE city = %s
                                       AND settled_temp IS NOT NULL
-                                      AND scan_ts >= NOW() - INTERVAL '60 days'
+                                      AND scan_ts >= NOW() - INTERVAL '30 days'
                                 """, (city_key,))
                                 row = cur_cal.fetchone()
                                 if row and row[0] >= BIAS_MIN_TRADES and row[1] is not None:
-                                    live_n          = int(row[0])
+                                    live_n        = int(row[0])
+                                    # mu is the raw (unbiased) model center.
+                                    # raw_bias = avg(mu - actual): positive means model runs warm.
+                                    # We store as gfs_bias/ecmwf_bias since both use same mu.
                                     live_gfs_bias   = round(float(row[1]), 2)
                                     live_ecmwf_bias = round(float(row[1]), 2)
                                     bias_source     = f"calibration_snapshots (n={live_n})"
-
-                                # HTC-bucket bias — bias as a function of hours to cutoff
-                                cur_cal.execute("""
-                                    SELECT
-                                        CASE
-                                            WHEN hours_to_cutoff > 18 THEN '>18hr'
-                                            WHEN hours_to_cutoff > 12 THEN '12-18hr'
-                                            WHEN hours_to_cutoff > 6  THEN '6-12hr'
-                                            ELSE '<6hr'
-                                        END AS htc_bucket,
-                                        COUNT(*)                  AS n,
-                                        AVG(mu - settled_temp)    AS bias
-                                    FROM calibration_snapshots
-                                    WHERE city = %s
-                                      AND settled_temp IS NOT NULL
-                                      AND hours_to_cutoff IS NOT NULL
-                                      AND scan_ts >= NOW() - INTERVAL '60 days'
-                                    GROUP BY 1
-                                    ORDER BY 1
-                                """, (city_key,))
-                                for brow in cur_cal.fetchall():
-                                    blabel, bn, bbias = brow[0], int(brow[1]), float(brow[2]) if brow[2] else 0.0
-                                    htc_ns[blabel]      = bn
-                                    if bn >= BIAS_MIN_TRADES:
-                                        htc_buckets[blabel] = round(bbias, 2)
-                                        if not bias_source.startswith("calibration"):
-                                            bias_source = f"htc_buckets (n={live_n})"
                         except Exception:
                             pass
                         finally:
@@ -5309,8 +5309,6 @@ class Handler(BaseHTTPRequestHandler):
                     _TEMP_BIAS_CACHE[city_key] = {
                         "gfs_bias":    live_gfs_bias,
                         "ecmwf_bias":  live_ecmwf_bias,
-                        "htc_buckets": htc_buckets,  # {'>18hr':bias, '12-18hr':bias, ...}
-                        "htc_ns":      htc_ns,        # {'>18hr':n, ...}
                         "gfs_rmse":    gfs_rmse,
                         "ecmwf_rmse":  ecmwf_rmse,
                         "best_model":  best_model,
@@ -5328,15 +5326,13 @@ class Handler(BaseHTTPRequestHandler):
                         "n_days":      len(errors_gfs),
                         "gfs_bias":    live_gfs_bias,
                         "ecmwf_bias":  live_ecmwf_bias,
-                        "htc_buckets": htc_buckets,
-                        "htc_ns":      htc_ns,
                         "gfs_rmse":    gfs_rmse,
                         "ecmwf_rmse":  ecmwf_rmse,
                         "best_model":  best_model,
                         "σ_d1":        σ_d1,       "σ_d0":       σ_d0,
                         "bias_n":      live_n,
                         "bias_source": bias_source,
-                        "bias_active": live_n >= BIAS_MIN_TRADES,
+                        "bias_active": live_n >= 30,
                     }
 
                 except Exception as e:
@@ -5932,8 +5928,8 @@ class Handler(BaseHTTPRequestHandler):
                     ("model_forecasts", "CREATE TABLE IF NOT EXISTS model_forecasts (id SERIAL PRIMARY KEY, city TEXT NOT NULL, nws_station TEXT NOT NULL DEFAULT '', target_date DATE NOT NULL, actual_high NUMERIC(5,1), gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), nbm_high NUMERIC(5,1), graphcast_high NUMERIC(5,1), gem_high NUMERIC(5,1), icon_high NUMERIC(5,1), spread_gfs_ecmwf NUMERIC(5,2), UNIQUE(city, target_date))"),
                     ("auto_trader_config", "CREATE TABLE IF NOT EXISTS auto_trader_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW())"),
                     ("auto_trader_log", "CREATE TABLE IF NOT EXISTS auto_trader_log (id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT NOW(), level TEXT NOT NULL, msg TEXT NOT NULL, ticker TEXT, city TEXT, extra JSONB DEFAULT '{}')"),
-                    ("paper_trades", "CREATE TABLE IF NOT EXISTS paper_trades (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), kelly_size_uncapped NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), mkt_rank_conf TEXT, gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), model_spread NUMERIC(5,2), edge_ratio NUMERIC(8,3), gap_c INTEGER, spread_c INTEGER, kelly_frac NUMERIC(6,4), yes_bid NUMERIC(6,4), liq_grade TEXT, open_interest INTEGER, volume_24h INTEGER, fillable_a NUMERIC(8,2), ask_size INTEGER, is_tail_bet BOOLEAN, any_model_inside BOOLEAN, spread_exceeds_bracket BOOLEAN, book_limited BOOLEAN, settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
-                    ("calibration_snapshots", "CREATE TABLE IF NOT EXISTS calibration_snapshots (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), kelly_size_uncapped NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), mkt_rank_conf TEXT, gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), model_spread NUMERIC(5,2), edge_ratio NUMERIC(8,3), gap_c INTEGER, spread_c INTEGER, kelly_frac NUMERIC(6,4), yes_bid NUMERIC(6,4), liq_grade TEXT, open_interest INTEGER, volume_24h INTEGER, fillable_a NUMERIC(8,2), ask_size INTEGER, is_tail_bet BOOLEAN, any_model_inside BOOLEAN, spread_exceeds_bracket BOOLEAN, book_limited BOOLEAN, settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
+                    ("paper_trades", "CREATE TABLE IF NOT EXISTS paper_trades (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), mkt_rank_conf TEXT, gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), model_spread NUMERIC(5,2), edge_ratio NUMERIC(8,3), gap_c INTEGER, spread_c INTEGER, kelly_frac NUMERIC(6,4), yes_bid NUMERIC(6,4), liq_grade TEXT, open_interest INTEGER, volume_24h INTEGER, fillable_a NUMERIC(8,2), is_tail_bet BOOLEAN, any_model_inside BOOLEAN, spread_exceeds_bracket BOOLEAN, book_limited BOOLEAN, side TEXT DEFAULT 'yes', series_id TEXT, settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
+                    ("calibration_snapshots", "CREATE TABLE IF NOT EXISTS calibration_snapshots (id BIGSERIAL PRIMARY KEY, scan_ts TIMESTAMPTZ DEFAULT NOW(), city TEXT NOT NULL, nws_station TEXT, target_date DATE NOT NULL, horizon TEXT, ticker TEXT NOT NULL, bracket_label TEXT, lo_temp NUMERIC(5,1), hi_temp NUMERIC(5,1), grade TEXT, model_prob NUMERIC(6,4), yes_ask NUMERIC(6,4), mu NUMERIC(6,2), sigma NUMERIC(6,3), net_gap_c INTEGER, kelly_size NUMERIC(8,2), hours_to_cutoff NUMERIC(5,1), mkt_rank_conf TEXT, gfs_high NUMERIC(5,1), ecmwf_high NUMERIC(5,1), model_spread NUMERIC(5,2), edge_ratio NUMERIC(8,3), gap_c INTEGER, spread_c INTEGER, kelly_frac NUMERIC(6,4), yes_bid NUMERIC(6,4), liq_grade TEXT, open_interest INTEGER, volume_24h INTEGER, fillable_a NUMERIC(8,2), is_tail_bet BOOLEAN, any_model_inside BOOLEAN, spread_exceeds_bracket BOOLEAN, book_limited BOOLEAN, side TEXT DEFAULT 'yes', series_id TEXT, settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ)"),
                 ]
                 for name, sql in tables:
                     try:
@@ -5946,7 +5942,23 @@ class Handler(BaseHTTPRequestHandler):
                         results[name] = str(e)
                 conn.close()
                 all_ok = all(v == "ok" for v in results.values())
-                # Run migrations: deduplicate paper_trades and create unique index
+                # Migration: add side + series_id columns to existing tables
+                # (idempotent — ADD COLUMN IF NOT EXISTS supported on PostgreSQL 9.6+)
+                try:
+                    conn_alter = get_db()
+                    if conn_alter:
+                        with conn_alter.cursor() as cur:
+                            for tbl in ("paper_trades", "calibration_snapshots"):
+                                cur.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS side TEXT DEFAULT 'yes'")
+                                cur.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS series_id TEXT")
+                                # Backfill existing rows with side='yes' (no-op if already set)
+                                cur.execute(f"UPDATE {tbl} SET side = 'yes' WHERE side IS NULL")
+                        conn_alter.commit()
+                        conn_alter.close()
+                        results["side_series_columns"] = "ok"
+                except Exception as e:
+                    results["side_series_columns"] = str(e)
+                # Run migrations: deduplicate paper_trades and create unique index on (ticker, target_date, side)
                 try:
                     conn2 = get_db()
                     if conn2:
@@ -5954,28 +5966,39 @@ class Handler(BaseHTTPRequestHandler):
                             cur.execute("""
                                 DELETE FROM paper_trades
                                 WHERE id NOT IN (
-                                    SELECT DISTINCT ON (ticker, target_date) id
+                                    SELECT DISTINCT ON (ticker, target_date, side) id
                                     FROM paper_trades
-                                    ORDER BY ticker, target_date, scan_ts DESC
+                                    ORDER BY ticker, target_date, side, scan_ts DESC
                                 )
                             """)
+                            # Drop old (ticker, target_date) index if present, create new (ticker, target_date, side)
+                            cur.execute("DROP INDEX IF EXISTS paper_trades_ticker_date_idx")
                             cur.execute("""
-                                CREATE UNIQUE INDEX IF NOT EXISTS paper_trades_ticker_date_idx
-                                ON paper_trades (ticker, target_date)
+                                CREATE UNIQUE INDEX IF NOT EXISTS paper_trades_ticker_date_side_idx
+                                ON paper_trades (ticker, target_date, side)
                             """)
                         conn2.commit()
                         conn2.close()
                         results["paper_trades_dedup"] = "ok"
                 except Exception as e:
                     results["paper_trades_dedup"] = str(e)
-                # Create unique index on calibration_snapshots
+                # Create unique index on calibration_snapshots (ticker, target_date, side)
                 try:
                     conn3 = get_db()
                     if conn3:
                         with conn3.cursor() as cur:
                             cur.execute("""
-                                CREATE UNIQUE INDEX IF NOT EXISTS calibration_snapshots_ticker_date_idx
-                                ON calibration_snapshots (ticker, target_date)
+                                DELETE FROM calibration_snapshots
+                                WHERE id NOT IN (
+                                    SELECT DISTINCT ON (ticker, target_date, side) id
+                                    FROM calibration_snapshots
+                                    ORDER BY ticker, target_date, side, scan_ts DESC
+                                )
+                            """)
+                            cur.execute("DROP INDEX IF EXISTS calibration_snapshots_ticker_date_idx")
+                            cur.execute("""
+                                CREATE UNIQUE INDEX IF NOT EXISTS calibration_snapshots_ticker_date_side_idx
+                                ON calibration_snapshots (ticker, target_date, side)
                             """)
                         conn3.commit()
                         conn3.close()
@@ -6034,8 +6057,6 @@ class Handler(BaseHTTPRequestHandler):
                     ("any_model_inside",       "BOOLEAN"),
                     ("spread_exceeds_bracket", "BOOLEAN"),
                     ("book_limited",           "BOOLEAN"),
-                    ("kelly_size_uncapped",    "NUMERIC(8,2)"),
-                    ("ask_size",               "INTEGER"),
                 ]
                 try:
                     conn4 = get_db()
@@ -6053,468 +6074,6 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as e:
                     results["schema_migration"] = str(e)
                 self.send_json({"ok": all_ok, "tables": results})
-
-        elif path == "/debug/backtest":
-            # Pseudo-backtest: applies current auto-trader rules to all settled
-            # calibration_snapshots rows and reports simulated PnL.
-            # WARNING: in-sample only — same data used to derive rules.
-            # Use for logic validation and rule impact quantification only.
-            # True OOS backtest requires 300+ settled rows (Tier 2).
-            #
-            # Rules applied:
-            #   rank_conf_mult: tail_only=1.5, combo=1.0, top1=1.0, top2=0.0 (blocked)
-            #   htc_mult:       gt18=1.5, lt18=0.5, lt12=0.5, lt6=1.25
-            #   city_mult:      atlanta=0.5, miami=0.5, all others=1.0
-            #   phoenix:        reinstated (removed from blacklist)
-            #   grade filter:   A only
-            try:
-                conn = get_db()
-                if not conn:
-                    self.send_json({"ok": False, "error": "No DB"})
-                else:
-                    with conn.cursor() as cur:
-
-                        # Full trade-level backtest with all multipliers applied
-                        cur.execute("""
-                            WITH rules AS (
-                                SELECT
-                                    id, city, ticker, grade, mkt_rank_conf,
-                                    hours_to_cutoff, yes_ask, kelly_size,
-                                    settled_correct, horizon, scan_ts,
-
-                                    -- rank_conf multiplier
-                                    CASE mkt_rank_conf
-                                        WHEN 'tail_only' THEN 1.5
-                                        WHEN 'combo'     THEN 1.0
-                                        WHEN 'top1'      THEN 1.0
-                                        WHEN 'top2'      THEN 0.0
-                                        ELSE 1.0
-                                    END AS rc_mult,
-
-                                    -- HTC multiplier
-                                    CASE
-                                        WHEN hours_to_cutoff < 6  THEN 1.25
-                                        WHEN hours_to_cutoff < 12 THEN 0.5
-                                        WHEN hours_to_cutoff < 18 THEN 0.5
-                                        ELSE 1.5
-                                    END AS htc_mult,
-
-                                    -- City multiplier
-                                    CASE city
-                                        WHEN 'atlanta' THEN 0.5
-                                        WHEN 'miami'   THEN 0.5
-                                        ELSE 1.0
-                                    END AS city_mult
-
-                                FROM calibration_snapshots
-                                WHERE grade = 'A'
-                                  AND settled_correct IS NOT NULL
-                                  AND yes_ask IS NOT NULL AND yes_ask > 0
-                                  AND kelly_size IS NOT NULL
-                            ),
-                            sized AS (
-                                SELECT *,
-                                    -- combined multiplier (top2 blocked via rc_mult=0)
-                                    ROUND((kelly_size * rc_mult * htc_mult * city_mult)::numeric, 2)
-                                        AS adj_kelly,
-                                    -- baseline (no rules)
-                                    kelly_size AS base_kelly
-                                FROM rules
-                                WHERE rc_mult > 0  -- drop top2
-                            ),
-                            pnl AS (
-                                SELECT *,
-                                    -- adjusted PnL
-                                    CASE WHEN settled_correct
-                                        THEN adj_kelly * (1.0 - yes_ask) / yes_ask
-                                        ELSE -adj_kelly
-                                    END AS adj_pnl,
-                                    -- baseline PnL (no rules, all trades)
-                                    CASE WHEN settled_correct
-                                        THEN base_kelly * (1.0 - yes_ask) / yes_ask
-                                        ELSE -base_kelly
-                                    END AS base_pnl
-                                FROM sized
-                            )
-
-                            SELECT
-                                -- Overall summary
-                                COUNT(*)                                           AS n_trades,
-                                ROUND(SUM(base_pnl)::numeric, 2)                  AS baseline_pnl,
-                                ROUND(SUM(adj_pnl)::numeric, 2)                   AS adjusted_pnl,
-                                ROUND((SUM(adj_pnl) - SUM(base_pnl))::numeric, 2) AS pnl_delta,
-                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) AS win_rate,
-                                ROUND(AVG(adj_kelly)::numeric, 2)                 AS avg_adj_kelly,
-                                ROUND(SUM(adj_kelly)::numeric, 2)                 AS total_deployed
-                            FROM pnl
-                        """)
-                        summary_row = cur.fetchone()
-                        summary = {
-                            "n_trades":      summary_row[0],
-                            "baseline_pnl":  float(summary_row[1]) if summary_row[1] else 0,
-                            "adjusted_pnl":  float(summary_row[2]) if summary_row[2] else 0,
-                            "pnl_delta":     float(summary_row[3]) if summary_row[3] else 0,
-                            "win_rate":      float(summary_row[4]) if summary_row[4] else 0,
-                            "avg_adj_kelly": float(summary_row[5]) if summary_row[5] else 0,
-                            "total_deployed":float(summary_row[6]) if summary_row[6] else 0,
-                        }
-
-                        # Per-city breakdown
-                        cur.execute("""
-                            WITH rules AS (
-                                SELECT city, mkt_rank_conf, hours_to_cutoff,
-                                       yes_ask, kelly_size, settled_correct,
-                                       CASE mkt_rank_conf
-                                           WHEN 'tail_only' THEN 1.5
-                                           WHEN 'top2'      THEN 0.0
-                                           ELSE 1.0 END AS rc_mult,
-                                       CASE
-                                           WHEN hours_to_cutoff < 6  THEN 1.25
-                                           WHEN hours_to_cutoff < 12 THEN 0.5
-                                           WHEN hours_to_cutoff < 18 THEN 0.5
-                                           ELSE 1.5 END AS htc_mult,
-                                       CASE city
-                                           WHEN 'atlanta' THEN 0.5
-                                           WHEN 'miami'   THEN 0.5
-                                           ELSE 1.0 END AS city_mult
-                                FROM calibration_snapshots
-                                WHERE grade = 'A'
-                                  AND settled_correct IS NOT NULL
-                                  AND yes_ask IS NOT NULL AND yes_ask > 0
-                                  AND kelly_size IS NOT NULL
-                            ),
-                            sized AS (
-                                SELECT *,
-                                    ROUND((kelly_size * rc_mult * htc_mult * city_mult)::numeric, 2) AS adj_kelly
-                                FROM rules WHERE rc_mult > 0
-                            )
-                            SELECT
-                                city,
-                                COUNT(*)                                           AS n,
-                                ROUND(SUM(CASE WHEN settled_correct
-                                    THEN kelly_size*(1.0-yes_ask)/yes_ask
-                                    ELSE -kelly_size END)::numeric,2)              AS baseline_pnl,
-                                ROUND(SUM(CASE WHEN settled_correct
-                                    THEN adj_kelly*(1.0-yes_ask)/yes_ask
-                                    ELSE -adj_kelly END)::numeric,2)               AS adjusted_pnl,
-                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric,3) AS win_rate,
-                                ROUND(AVG(adj_kelly)::numeric,2)                   AS avg_adj_kelly
-                            FROM sized
-                            GROUP BY city
-                            ORDER BY adjusted_pnl DESC
-                        """)
-                        city_rows = cur.fetchall()
-                        by_city = [
-                            {"city": r[0], "n": r[1],
-                             "baseline_pnl": float(r[2]) if r[2] else 0,
-                             "adjusted_pnl": float(r[3]) if r[3] else 0,
-                             "pnl_delta":    round(float(r[3] or 0) - float(r[2] or 0), 2),
-                             "win_rate":     float(r[4]) if r[4] else 0,
-                             "avg_adj_kelly":float(r[5]) if r[5] else 0}
-                            for r in city_rows
-                        ]
-
-                        # Per HTC bucket
-                        cur.execute("""
-                            WITH rules AS (
-                                SELECT hours_to_cutoff, yes_ask, kelly_size,
-                                       settled_correct, mkt_rank_conf, city,
-                                       CASE mkt_rank_conf
-                                           WHEN 'tail_only' THEN 1.5
-                                           WHEN 'top2'      THEN 0.0
-                                           ELSE 1.0 END AS rc_mult,
-                                       CASE
-                                           WHEN hours_to_cutoff < 6  THEN 1.25
-                                           WHEN hours_to_cutoff < 12 THEN 0.5
-                                           WHEN hours_to_cutoff < 18 THEN 0.5
-                                           ELSE 1.5 END AS htc_mult,
-                                       CASE city
-                                           WHEN 'atlanta' THEN 0.5
-                                           WHEN 'miami'   THEN 0.5
-                                           ELSE 1.0 END AS city_mult,
-                                       CASE
-                                           WHEN hours_to_cutoff < 6  THEN '<6hr'
-                                           WHEN hours_to_cutoff < 12 THEN '6-12hr'
-                                           WHEN hours_to_cutoff < 18 THEN '12-18hr'
-                                           ELSE '>18hr' END AS bucket
-                                FROM calibration_snapshots
-                                WHERE grade = 'A'
-                                  AND settled_correct IS NOT NULL
-                                  AND yes_ask IS NOT NULL AND yes_ask > 0
-                                  AND kelly_size IS NOT NULL
-                            ),
-                            sized AS (
-                                SELECT *,
-                                    ROUND((kelly_size * rc_mult * htc_mult * city_mult)::numeric,2) AS adj_kelly
-                                FROM rules WHERE rc_mult > 0
-                            )
-                            SELECT bucket,
-                                COUNT(*)                                           AS n,
-                                ROUND(SUM(CASE WHEN settled_correct
-                                    THEN kelly_size*(1.0-yes_ask)/yes_ask
-                                    ELSE -kelly_size END)::numeric,2)              AS baseline_pnl,
-                                ROUND(SUM(CASE WHEN settled_correct
-                                    THEN adj_kelly*(1.0-yes_ask)/yes_ask
-                                    ELSE -adj_kelly END)::numeric,2)               AS adjusted_pnl,
-                                ROUND(AVG(adj_kelly)::numeric,2)                   AS avg_adj_kelly,
-                                htc_mult
-                            FROM sized
-                            GROUP BY bucket, htc_mult
-                            ORDER BY MIN(hours_to_cutoff) DESC
-                        """)
-                        htc_rows = cur.fetchall()
-                        by_htc = [
-                            {"bucket":        r[0], "n": r[1],
-                             "baseline_pnl":  float(r[2]) if r[2] else 0,
-                             "adjusted_pnl":  float(r[3]) if r[3] else 0,
-                             "pnl_delta":     round(float(r[3] or 0) - float(r[2] or 0), 2),
-                             "avg_adj_kelly": float(r[4]) if r[4] else 0,
-                             "htc_mult":      float(r[5]) if r[5] else 1.0}
-                            for r in htc_rows
-                        ]
-
-                        # Trades blocked by top2 rule
-                        cur.execute("""
-                            SELECT COUNT(*),
-                                   ROUND(SUM(CASE WHEN settled_correct
-                                       THEN kelly_size*(1.0-yes_ask)/yes_ask
-                                       ELSE -kelly_size END)::numeric,2) AS would_have_been_pnl
-                            FROM calibration_snapshots
-                            WHERE grade = 'A'
-                              AND mkt_rank_conf = 'top2'
-                              AND settled_correct IS NOT NULL
-                              AND yes_ask IS NOT NULL AND yes_ask > 0
-                              AND kelly_size IS NOT NULL
-                        """)
-                        blocked = cur.fetchone()
-
-                    conn.close()
-                    self.send_json({
-                        "ok": True,
-                        "warning": "In-sample pseudo-backtest — rules derived from same data. "
-                                   "Expect optimistic results. OOS backtest requires 300+ settled rows.",
-                        "summary": summary,
-                        "by_city": by_city,
-                        "by_htc_bucket": by_htc,
-                        "top2_blocked": {
-                            "n_trades_blocked": blocked[0] if blocked else 0,
-                            "avoided_pnl":      float(blocked[1]) if blocked and blocked[1] else 0,
-                            "note": "avoided_pnl = PnL blocked trades WOULD have made. Positive = blocking cost us luck-dollars; block still justified by negative EV/$ expectation."
-                        },
-                    })
-            except Exception as e:
-                self.send_json({"ok": False, "error": str(e)})
-
-        elif path == "/debug/book-fetch":
-            # Diagnostic: fetch raw orderbook + run fillable_a computation for a
-            # specific ticker. Used to verify whether fetch_full_orderbook_liq
-            # is returning data and how thin the book actually is at the levels
-            # where edge_ratio still holds.
-            #
-            # Usage: /debug/book-fetch?ticker=KXHIGHTPHX-26JUN09-B103.5
-            # Optional: &mu=102.5&sigma=2.0&lo=103&hi=999
-            #
-            # If lo/hi/mu/sigma are omitted, will pull the latest calibration
-            # snapshot for this ticker and use those values.
-            try:
-                q = parse_qs(urlparse(self.path).query)
-                ticker = (q.get("ticker", [""])[0] or "").strip()
-                if not ticker:
-                    self.send_json({"ok": False, "error": "ticker param required"})
-                    return
-
-                # Pull mu/sigma/lo/hi from latest cal snapshot if not provided
-                mu_q    = q.get("mu", [None])[0]
-                sigma_q = q.get("sigma", [None])[0]
-                lo_q    = q.get("lo", [None])[0]
-                hi_q    = q.get("hi", [None])[0]
-
-                mu = sigma = lo = hi = None
-                snap = None
-                if not all([mu_q, sigma_q]):
-                    conn = get_db()
-                    if conn:
-                        with conn.cursor() as cur:
-                            cur.execute("""
-                                SELECT mu, sigma, lo_temp, hi_temp,
-                                       model_prob, yes_ask, kelly_size, fillable_a,
-                                       book_limited, hours_to_cutoff, grade
-                                FROM calibration_snapshots
-                                WHERE ticker = %s
-                                ORDER BY scan_ts DESC LIMIT 1
-                            """, (ticker,))
-                            r = cur.fetchone()
-                            if r:
-                                mu, sigma, lo, hi = (float(r[0]) if r[0] is not None else None,
-                                                     float(r[1]) if r[1] is not None else None,
-                                                     float(r[2]) if r[2] is not None else None,
-                                                     float(r[3]) if r[3] is not None else None)
-                                snap = {"model_prob": float(r[4]) if r[4] is not None else None,
-                                        "yes_ask":    float(r[5]) if r[5] is not None else None,
-                                        "kelly_size": float(r[6]) if r[6] is not None else None,
-                                        "fillable_a": float(r[7]) if r[7] is not None else None,
-                                        "book_limited":  bool(r[8]) if r[8] is not None else None,
-                                        "hours_to_cutoff": float(r[9]) if r[9] is not None else None,
-                                        "grade":      r[10]}
-                        conn.close()
-                if mu_q    is not None: mu    = float(mu_q)
-                if sigma_q is not None: sigma = float(sigma_q)
-                if lo_q    is not None: lo    = float(lo_q)
-                if hi_q    is not None: hi    = float(hi_q)
-
-                if mu is None or sigma is None:
-                    self.send_json({"ok": False,
-                                    "error": "mu/sigma not found — pass as params or use a ticker that exists in calibration_snapshots",
-                                    "ticker": ticker, "snap": snap})
-                    return
-
-                # Fetch raw orderbook
-                ob_raw = None
-                ob_err = None
-                try:
-                    r = requests.get(
-                        f"{KALSHI_BASE}/markets/{ticker}/orderbook",
-                        headers=kalshi_auth_headers("GET", f"/trade-api/v2/markets/{ticker}/orderbook"),
-                        timeout=8
-                    )
-                    if r.ok:
-                        ob_raw = r.json().get("orderbook", {})
-                    else:
-                        ob_err = f"HTTP {r.status_code}: {r.text[:200]}"
-                except Exception as e:
-                    ob_err = str(e)
-
-                # Run fillable_a computation
-                computed = fetch_full_orderbook_liq(ticker, mu, sigma, lo, hi)
-
-                # Total raw depth (no edge filter) for comparison
-                total_raw_dollars = 0.0
-                if ob_raw and ob_raw.get("yes"):
-                    for px, sz in ob_raw["yes"]:
-                        total_raw_dollars += (px / 100.0) * sz
-
-                self.send_json({
-                    "ok": True,
-                    "ticker": ticker,
-                    "inputs": {"mu": mu, "sigma": sigma, "lo": lo, "hi": hi},
-                    "latest_db_snapshot": snap,
-                    "orderbook_raw": ob_raw,
-                    "orderbook_error": ob_err,
-                    "total_raw_dollars_yes_side": round(total_raw_dollars, 2),
-                    "fillable_a_computed": computed,
-                    "interpretation": {
-                        "note": "fillable_a is the dollar volume of YES contracts where edge_ratio >= 0.12 AND prob >= 0.50 at the offered price. As price rises, edge shrinks and levels drop out of grade A.",
-                        "diagnosis": ("Empty orderbook — market likely not actively quoted." if not ob_raw or not ob_raw.get("yes")
-                                      else "Book exists but fillable_a is 0 — top level prob/edge fails A-grade gate." if computed and computed.get("fillable_a_dollars", 0) == 0
-                                      else "Working as designed.")
-                    }
-                })
-            except Exception as e:
-                self.send_json({"ok": False, "error": str(e)})
-
-        elif path == "/debug/cap-sweep":
-            # Tests multiple cap configurations against settled data to quantify
-            # whether raising per-fill / per-ticker limits would improve PnL.
-            # Applies the SAME multiplier rules as /debug/backtest, then caps
-            # adj_kelly at various max_per_ticker levels. Per-fill capping is
-            # approximated by capping total ticker deployment (close enough for
-            # the single-fill paper rows we have).
-            # Also reports half-Kelly multiplier sweep (0.5 / 0.65 / 0.75 / 1.0).
-            try:
-                conn = get_db()
-                if not conn:
-                    self.send_json({"ok": False, "error": "No DB"})
-                else:
-                    with conn.cursor() as cur:
-                        # Pull row-level adjusted kelly + outcome once, sweep in Python
-                        cur.execute("""
-                            SELECT
-                                city, hours_to_cutoff, yes_ask, kelly_size, settled_correct,
-                                CASE mkt_rank_conf
-                                    WHEN 'tail_only' THEN 1.5
-                                    WHEN 'top2'      THEN 0.0
-                                    ELSE 1.0 END AS rc_mult,
-                                CASE
-                                    WHEN hours_to_cutoff < 6  THEN 1.25
-                                    WHEN hours_to_cutoff < 12 THEN 0.5
-                                    WHEN hours_to_cutoff < 18 THEN 0.5
-                                    ELSE 1.5 END AS htc_mult,
-                                CASE city
-                                    WHEN 'atlanta' THEN 0.5
-                                    WHEN 'miami'   THEN 0.5
-                                    ELSE 1.0 END AS city_mult
-                            FROM calibration_snapshots
-                            WHERE grade = 'A'
-                              AND settled_correct IS NOT NULL
-                              AND yes_ask IS NOT NULL AND yes_ask > 0
-                              AND kelly_size IS NOT NULL
-                        """)
-                        rows = cur.fetchall()
-                    conn.close()
-
-                    # Build adjusted kelly per row (pre-cap)
-                    trades = []
-                    for r in rows:
-                        city, htc, ask, ksz, won = r[0], r[1], float(r[2]), float(r[3]), r[4]
-                        rc, hm, cm = float(r[5]), float(r[6]), float(r[7])
-                        if rc == 0.0:
-                            continue  # top2 blocked
-                        adj = ksz * rc * hm * cm
-                        trades.append({"adj": adj, "ask": ask, "won": won})
-
-                    def sim(cap_ticker, kelly_scale=1.0):
-                        # kelly_scale rescales the base 0.5 half-Kelly: 1.0 = current 0.5x,
-                        # 1.3 ≈ 0.65 Kelly, 1.5 ≈ 0.75 Kelly, 2.0 = full Kelly
-                        pnl = 0.0
-                        deployed = 0.0
-                        capped_count = 0
-                        for t in trades:
-                            size = t["adj"] * kelly_scale
-                            if size > cap_ticker:
-                                size = cap_ticker
-                                capped_count += 1
-                            deployed += size
-                            if t["won"]:
-                                pnl += size * (1.0 - t["ask"]) / t["ask"]
-                            else:
-                                pnl -= size
-                        roi = round(100 * pnl / deployed, 2) if deployed > 0 else None
-                        return {"pnl": round(pnl, 2), "deployed": round(deployed, 2),
-                                "roi_pct": roi, "trades_capped": capped_count}
-
-                    # Cap sweep at current half-Kelly (0.5)
-                    cap_levels = [50, 75, 100, 150, 250, 99999]
-                    cap_sweep = {f"max_ticker_${c if c < 99999 else 'inf'}": sim(c, 1.0)
-                                 for c in cap_levels}
-
-                    # Kelly multiplier sweep at uncapped (to isolate Kelly effect)
-                    kelly_sweep = {
-                        "half_kelly_0.50x":    sim(99999, 1.0),
-                        "0.65_kelly_1.30x":    sim(99999, 1.30),
-                        "0.75_kelly_1.50x":    sim(99999, 1.50),
-                        "full_kelly_2.00x":    sim(99999, 2.0),
-                    }
-
-                    # Realistic: cap at $75 (current) vs raised, at half-Kelly
-                    self.send_json({
-                        "ok": True,
-                        "n_trades": len(trades),
-                        "warning": "In-sample. Higher Kelly = higher variance and ruin risk. "
-                                   "ROI per deployed dollar is the comparable metric, not raw PnL.",
-                        "current_config": {"max_per_ticker": 75, "kelly_mult": 0.5,
-                                           "result": sim(75, 1.0)},
-                        "cap_sweep_at_half_kelly": cap_sweep,
-                        "kelly_mult_sweep_uncapped": kelly_sweep,
-                        "interpretation": {
-                            "cap_question": "If trades_capped > 0 and PnL keeps rising as cap "
-                                            "rises, the cap is binding on +EV trades — raising it "
-                                            "helps. If PnL plateaus, cap is not the constraint.",
-                            "kelly_question": "Higher Kelly multiplies both PnL and variance. ROI% "
-                                              "stays ~flat (same edge); only absolute PnL and risk grow."
-                        }
-                    })
-            except Exception as e:
-                self.send_json({"ok": False, "error": str(e)})
 
         elif path == "/debug/cal-log":
             # Returns last scan result for calibration_snapshots debugging
@@ -6535,17 +6094,7 @@ class Handler(BaseHTTPRequestHandler):
 
                         # Count all rows
                         total = 0
-                        grade_counts     = {}
-                        settled_by_grade = {}
-                        wins_by_grade    = {}
-                        settled_by_city  = []
-                        win_by_horizon   = {}
-                        win_by_rank_conf = {}
-                        htc_bias_curve   = []
-                        htc_edge         = []
-                        ev_by_city       = []
-                        ev_by_rank_conf  = []
-                        ev_by_horizon    = []
+                        grade_counts = {}
                         if table_exists:
                             cur.execute("SELECT COUNT(*) FROM calibration_snapshots")
                             total = cur.fetchone()[0]
@@ -6555,349 +6104,6 @@ class Handler(BaseHTTPRequestHandler):
                                 GROUP BY grade
                             """)
                             grade_counts = {r[0]: r[1] for r in cur.fetchall()}
-
-                            # Settled counts + win rate by grade
-                            cur.execute("""
-                                SELECT grade,
-                                       COUNT(*) FILTER (WHERE settled_correct IS NOT NULL) AS settled,
-                                       COUNT(*) FILTER (WHERE settled_correct = TRUE)      AS wins
-                                FROM calibration_snapshots
-                                WHERE grade IN ('A','B','C')
-                                GROUP BY grade ORDER BY grade
-                            """)
-                            for r in cur.fetchall():
-                                settled_by_grade[r[0]] = r[1]
-                                wins_by_grade[r[0]]    = r[2]
-
-                            # Settled per city (A+B) for Tier 1 gating
-                            cur.execute("""
-                                SELECT city,
-                                       COUNT(*) FILTER (WHERE settled_correct IS NOT NULL) AS settled,
-                                       COUNT(*) FILTER (WHERE settled_correct = TRUE)      AS wins
-                                FROM calibration_snapshots
-                                WHERE grade IN ('A','B')
-                                GROUP BY city ORDER BY settled DESC
-                            """)
-                            settled_by_city = [
-                                {"city": r[0], "settled": r[1], "wins": r[2],
-                                 "win_rate": round(r[2]/r[1], 3) if r[1] > 0 else None}
-                                for r in cur.fetchall()
-                            ]
-
-                        total_settled_ab = sum(settled_by_grade.get(g, 0) for g in ("A","B"))
-                        total_wins_ab    = sum(wins_by_grade.get(g, 0)    for g in ("A","B"))
-                        tier1_ready      = total_settled_ab >= 150
-
-                        # Win rate by horizon — A grade only
-                        cur.execute("""
-                            SELECT horizon,
-                                   COUNT(*) FILTER (WHERE settled_correct IS NOT NULL),
-                                   COUNT(*) FILTER (WHERE settled_correct = TRUE)
-                            FROM calibration_snapshots
-                            WHERE grade = 'A' AND horizon IN ('d0','d1')
-                            GROUP BY horizon
-                        """)
-                        win_by_horizon = {
-                            r[0]: {"settled": r[1], "wins": r[2],
-                                   "win_rate": round(r[2]/r[1], 3) if r[1] > 0 else None}
-                            for r in cur.fetchall()
-                        }
-
-                        # Win rate by mkt_rank_conf — A grade only
-                        cur.execute("""
-                            SELECT mkt_rank_conf,
-                                   COUNT(*) FILTER (WHERE settled_correct IS NOT NULL),
-                                   COUNT(*) FILTER (WHERE settled_correct = TRUE)
-                            FROM calibration_snapshots
-                            WHERE grade = 'A' AND mkt_rank_conf IS NOT NULL
-                            GROUP BY mkt_rank_conf ORDER BY 2 DESC
-                        """)
-                        win_by_rank_conf = {
-                            r[0]: {"settled": r[1], "wins": r[2],
-                                   "win_rate": round(r[2]/r[1], 3) if r[1] > 0 else None}
-                            for r in cur.fetchall()
-                        }
-
-                        # HTC-bucket bias curve (all grades, settled only)
-                        cur.execute("""
-                            SELECT
-                                CASE
-                                    WHEN hours_to_cutoff > 18 THEN '>18hr'
-                                    WHEN hours_to_cutoff > 12 THEN '12-18hr'
-                                    WHEN hours_to_cutoff > 6  THEN '6-12hr'
-                                    ELSE '<6hr'
-                                END AS bucket,
-                                COUNT(*)               AS n,
-                                ROUND(AVG(mu - settled_temp)::numeric, 2) AS avg_bias,
-                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) AS win_rate
-                            FROM calibration_snapshots
-                            WHERE settled_temp IS NOT NULL
-                              AND hours_to_cutoff IS NOT NULL
-                              AND grade IN ('A','B')
-                            GROUP BY 1 ORDER BY MIN(hours_to_cutoff) DESC
-                        """)
-                        htc_bias_curve = [
-                            {"bucket": r[0], "n": r[1],
-                             "avg_bias": float(r[2]) if r[2] else None,
-                             "win_rate": float(r[3]) if r[3] else None}
-                            for r in cur.fetchall()
-                        ]
-
-                        # HTC edge analysis — market mispricing vs model per time bucket
-                        # Key question: at each HTC window, is model_prob > yes_ask by enough
-                        # to justify betting? net_gap_c = (model_prob - yes_ask)*100
-                        # avg_model_prob vs avg_yes_ask shows directional market vs model gap.
-                        # ev_per_dollar_htc accounts for actual payout odds, not just win rate.
-                        cur.execute("""
-                            SELECT
-                                CASE
-                                    WHEN hours_to_cutoff > 18 THEN '>18hr'
-                                    WHEN hours_to_cutoff > 12 THEN '12-18hr'
-                                    WHEN hours_to_cutoff > 6  THEN '6-12hr'
-                                    ELSE '<6hr'
-                                END AS bucket,
-                                COUNT(*)                                           AS n,
-                                ROUND(AVG(net_gap_c)::numeric, 1)                  AS avg_net_gap_c,
-                                ROUND(AVG(model_prob)::numeric, 4)                 AS avg_model_prob,
-                                ROUND(AVG(yes_ask)::numeric, 4)                    AS avg_mkt_prob,
-                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) AS win_rate,
-                                ROUND(SUM(CASE
-                                    WHEN settled_correct = TRUE
-                                        THEN kelly_size * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
-                                    WHEN settled_correct = FALSE
-                                        THEN -kelly_size
-                                    ELSE 0 END)::numeric, 2)                       AS sim_pnl,
-                                ROUND(AVG(CASE
-                                    WHEN settled_correct IS NOT NULL
-                                        THEN CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END
-                                             * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
-                                             - CASE WHEN NOT settled_correct THEN 1.0 ELSE 0.0 END
-                                        ELSE NULL END)::numeric, 4)                AS ev_per_dollar
-                            FROM calibration_snapshots
-                            WHERE settled_correct IS NOT NULL
-                              AND hours_to_cutoff IS NOT NULL
-                              AND yes_ask IS NOT NULL AND yes_ask > 0
-                              AND kelly_size IS NOT NULL
-                              AND grade IN ('A','B')
-                            GROUP BY 1 ORDER BY MIN(hours_to_cutoff) DESC
-                        """)
-                        htc_edge = [
-                            {"bucket":        r[0],
-                             "n":             r[1],
-                             "avg_net_gap_c": float(r[2]) if r[2] else None,
-                             "avg_model_prob":float(r[3]) if r[3] else None,
-                             "avg_mkt_prob":  float(r[4]) if r[4] else None,
-                             "model_vs_mkt":  round(float(r[3]) - float(r[4]), 4) if r[3] and r[4] else None,
-                             "win_rate":      float(r[5]) if r[5] else None,
-                             "sim_pnl":       float(r[6]) if r[6] else None,
-                             "ev_per_dollar": float(r[7]) if r[7] else None}
-                            for r in cur.fetchall()
-                        ]
-
-                        # ── BOOK DEPTH ANALYSIS ─────────────────────────────────
-                        # Per HTC bucket: distribution of fillable_a, pct book-limited,
-                        # and headroom counts. Answers: how often is Kelly capped by
-                        # book depth, and how much room exists if we raise Kelly mult?
-                        cur.execute("""
-                            SELECT
-                                CASE
-                                    WHEN hours_to_cutoff > 18 THEN '>18hr'
-                                    WHEN hours_to_cutoff > 12 THEN '12-18hr'
-                                    WHEN hours_to_cutoff > 6  THEN '6-12hr'
-                                    ELSE '<6hr'
-                                END AS bucket,
-                                COUNT(*)                                                       AS n,
-                                COUNT(*) FILTER (WHERE book_limited = TRUE)                    AS n_book_limited,
-                                ROUND(AVG(fillable_a)::numeric, 2)                             AS avg_fillable_a,
-                                ROUND(percentile_cont(0.5) WITHIN GROUP (ORDER BY fillable_a)::numeric, 2) AS median_fillable_a,
-                                ROUND(percentile_cont(0.25) WITHIN GROUP (ORDER BY fillable_a)::numeric, 2) AS p25_fillable_a,
-                                ROUND(percentile_cont(0.75) WITHIN GROUP (ORDER BY fillable_a)::numeric, 2) AS p75_fillable_a,
-                                ROUND(AVG(kelly_size)::numeric, 2)                             AS avg_kelly_size,
-                                COUNT(*) FILTER (WHERE fillable_a >= kelly_size * 2)           AS n_headroom_2x,
-                                COUNT(*) FILTER (WHERE fillable_a >= kelly_size * 3)           AS n_headroom_3x
-                            FROM calibration_snapshots
-                            WHERE grade IN ('A','B')
-                              AND hours_to_cutoff IS NOT NULL
-                              AND fillable_a IS NOT NULL
-                              AND kelly_size IS NOT NULL AND kelly_size > 0
-                            GROUP BY 1 ORDER BY MIN(hours_to_cutoff) DESC
-                        """)
-                        book_depth_by_htc = [
-                            {"bucket":            r[0],
-                             "n":                 r[1],
-                             "n_book_limited":    r[2],
-                             "pct_book_limited":  round(100.0 * r[2] / r[1], 1) if r[1] else 0,
-                             "avg_fillable_a":    float(r[3]) if r[3] is not None else None,
-                             "median_fillable_a": float(r[4]) if r[4] is not None else None,
-                             "p25_fillable_a":    float(r[5]) if r[5] is not None else None,
-                             "p75_fillable_a":    float(r[6]) if r[6] is not None else None,
-                             "avg_kelly_size":    float(r[7]) if r[7] is not None else None,
-                             "n_headroom_2x":     r[8],
-                             "n_headroom_3x":     r[9],
-                             "pct_headroom_2x":   round(100.0 * r[8] / r[1], 1) if r[1] else 0,
-                             "pct_headroom_3x":   round(100.0 * r[9] / r[1], 1) if r[1] else 0}
-                            for r in cur.fetchall()
-                        ]
-
-                        # EV split by book_limited flag, per HTC bucket
-                        # Critical question: are book-limited trades HIGHER EV than
-                        # unconstrained ones? If yes, raising Kelly captures real money.
-                        # If lower, the book cap was protecting us from bad trades.
-                        cur.execute("""
-                            SELECT
-                                CASE
-                                    WHEN hours_to_cutoff > 18 THEN '>18hr'
-                                    WHEN hours_to_cutoff > 12 THEN '12-18hr'
-                                    WHEN hours_to_cutoff > 6  THEN '6-12hr'
-                                    ELSE '<6hr'
-                                END AS bucket,
-                                book_limited,
-                                COUNT(*) AS n,
-                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) AS win_rate,
-                                ROUND(AVG(CASE
-                                    WHEN settled_correct IS NOT NULL
-                                        THEN CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END
-                                             * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
-                                             - CASE WHEN NOT settled_correct THEN 1.0 ELSE 0.0 END
-                                        ELSE NULL END)::numeric, 4) AS ev_per_dollar,
-                                ROUND(SUM(CASE
-                                    WHEN settled_correct = TRUE
-                                        THEN kelly_size * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
-                                    WHEN settled_correct = FALSE
-                                        THEN -kelly_size
-                                    ELSE 0 END)::numeric, 2) AS sim_pnl
-                            FROM calibration_snapshots
-                            WHERE grade IN ('A','B')
-                              AND settled_correct IS NOT NULL
-                              AND hours_to_cutoff IS NOT NULL
-                              AND yes_ask IS NOT NULL AND yes_ask > 0
-                              AND kelly_size IS NOT NULL
-                              AND book_limited IS NOT NULL
-                            GROUP BY 1, 2
-                            ORDER BY 1, 2
-                        """)
-                        ev_by_book_limited = [
-                            {"bucket":        r[0],
-                             "book_limited":  r[1],
-                             "n":             r[2],
-                             "win_rate":      float(r[3]) if r[3] else None,
-                             "ev_per_dollar": float(r[4]) if r[4] else None,
-                             "sim_pnl":       float(r[5]) if r[5] else None}
-                            for r in cur.fetchall()
-                        ]
-
-
-                        # EV analysis — simulated PnL per city (grade A only)
-                        # payout per $1 risked on a YES = (1 - yes_ask) / yes_ask
-                        # EV per trade = win * payout - loss * 1
-                        cur.execute("""
-                            SELECT
-                                city,
-                                COUNT(*) FILTER (WHERE settled_correct IS NOT NULL) AS n,
-                                ROUND(AVG(yes_ask)::numeric, 4)                    AS avg_ask,
-                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) AS win_rate,
-                                ROUND(SUM(CASE
-                                    WHEN settled_correct = TRUE
-                                        THEN kelly_size * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
-                                    WHEN settled_correct = FALSE
-                                        THEN -kelly_size
-                                    ELSE 0 END)::numeric, 2)                       AS sim_pnl,
-                                ROUND(AVG(CASE
-                                    WHEN settled_correct IS NOT NULL
-                                        THEN CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END
-                                             * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
-                                             - CASE WHEN NOT settled_correct THEN 1.0 ELSE 0.0 END
-                                        ELSE NULL END)::numeric, 4)                AS ev_per_dollar
-                            FROM calibration_snapshots
-                            WHERE grade = 'A'
-                              AND settled_correct IS NOT NULL
-                              AND yes_ask IS NOT NULL AND yes_ask > 0
-                              AND kelly_size IS NOT NULL
-                            GROUP BY city
-                            ORDER BY sim_pnl DESC
-                        """)
-                        ev_by_city = [
-                            {"city": r[0], "n": r[1],
-                             "avg_ask": float(r[2]) if r[2] else None,
-                             "win_rate": float(r[3]) if r[3] else None,
-                             "sim_pnl": float(r[4]) if r[4] else None,
-                             "ev_per_dollar": float(r[5]) if r[5] else None,
-                             "implied_breakeven_wr": round(float(r[2]), 4) if r[2] else None}
-                            for r in cur.fetchall()
-                        ]
-
-                        # EV by rank_conf (grade A)
-                        cur.execute("""
-                            SELECT
-                                mkt_rank_conf,
-                                COUNT(*) FILTER (WHERE settled_correct IS NOT NULL) AS n,
-                                ROUND(AVG(yes_ask)::numeric, 4)                    AS avg_ask,
-                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) AS win_rate,
-                                ROUND(SUM(CASE
-                                    WHEN settled_correct = TRUE
-                                        THEN kelly_size * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
-                                    WHEN settled_correct = FALSE
-                                        THEN -kelly_size
-                                    ELSE 0 END)::numeric, 2)                       AS sim_pnl,
-                                ROUND(AVG(CASE
-                                    WHEN settled_correct IS NOT NULL
-                                        THEN CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END
-                                             * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
-                                             - CASE WHEN NOT settled_correct THEN 1.0 ELSE 0.0 END
-                                        ELSE NULL END)::numeric, 4)                AS ev_per_dollar
-                            FROM calibration_snapshots
-                            WHERE grade = 'A'
-                              AND settled_correct IS NOT NULL
-                              AND yes_ask IS NOT NULL AND yes_ask > 0
-                              AND kelly_size IS NOT NULL
-                              AND mkt_rank_conf IS NOT NULL
-                            GROUP BY mkt_rank_conf
-                            ORDER BY sim_pnl DESC
-                        """)
-                        ev_by_rank_conf = [
-                            {"rank_conf": r[0], "n": r[1],
-                             "avg_ask": float(r[2]) if r[2] else None,
-                             "win_rate": float(r[3]) if r[3] else None,
-                             "sim_pnl": float(r[4]) if r[4] else None,
-                             "ev_per_dollar": float(r[5]) if r[5] else None}
-                            for r in cur.fetchall()
-                        ]
-
-                        # EV by horizon (grade A)
-                        cur.execute("""
-                            SELECT
-                                horizon,
-                                COUNT(*) FILTER (WHERE settled_correct IS NOT NULL) AS n,
-                                ROUND(AVG(yes_ask)::numeric, 4)                    AS avg_ask,
-                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) AS win_rate,
-                                ROUND(SUM(CASE
-                                    WHEN settled_correct = TRUE
-                                        THEN kelly_size * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
-                                    WHEN settled_correct = FALSE
-                                        THEN -kelly_size
-                                    ELSE 0 END)::numeric, 2)                       AS sim_pnl,
-                                ROUND(AVG(CASE
-                                    WHEN settled_correct IS NOT NULL
-                                        THEN CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END
-                                             * (1.0 - yes_ask) / NULLIF(yes_ask, 0)
-                                             - CASE WHEN NOT settled_correct THEN 1.0 ELSE 0.0 END
-                                        ELSE NULL END)::numeric, 4)                AS ev_per_dollar
-                            FROM calibration_snapshots
-                            WHERE grade = 'A'
-                              AND settled_correct IS NOT NULL
-                              AND yes_ask IS NOT NULL AND yes_ask > 0
-                              AND kelly_size IS NOT NULL
-                            GROUP BY horizon
-                            ORDER BY sim_pnl DESC
-                        """)
-                        ev_by_horizon = [
-                            {"horizon": r[0], "n": r[1],
-                             "avg_ask": float(r[2]) if r[2] else None,
-                             "win_rate": float(r[3]) if r[3] else None,
-                             "sim_pnl": float(r[4]) if r[4] else None,
-                             "ev_per_dollar": float(r[5]) if r[5] else None}
-                            for r in cur.fetchall()
-                        ]
 
                         # Last scan markets sample
                         cur.execute("""
@@ -6915,155 +6121,10 @@ class Handler(BaseHTTPRequestHandler):
                         "table_exists": table_exists,
                         "total_rows": total,
                         "grade_counts": grade_counts,
-                        "tier1": {
-                            "ready": tier1_ready,
-                            "settled_ab": total_settled_ab,
-                            "wins_ab":    total_wins_ab,
-                            "win_rate_ab": round(total_wins_ab/total_settled_ab, 3)
-                                           if total_settled_ab > 0 else None,
-                            "needed": max(0, 150 - total_settled_ab),
-                        },
-                        "settled_by_grade": settled_by_grade,
-                        "wins_by_grade":    wins_by_grade,
-                        "settled_by_city":  settled_by_city,
-                        "win_by_horizon":   win_by_horizon,
-                        "win_by_rank_conf": win_by_rank_conf,
-                        "htc_bias_curve":   htc_bias_curve,
-                        "htc_edge":         htc_edge,
-                        "book_depth_by_htc":  book_depth_by_htc,
-                        "ev_by_book_limited": ev_by_book_limited,
-                        "ev_by_city":       ev_by_city,
-                        "ev_by_rank_conf":  ev_by_rank_conf,
-                        "ev_by_horizon":    ev_by_horizon,
                         "recent_paper_trades": recent,
                     })
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
-
-        elif path == "/debug/low-vol":
-            # Compares LOW vs HIGH temp market liquidity across all cities.
-            # Pulls live volume_24h, open_interest, spread, ask depth.
-            # Used to assess whether low markets are efficient (tight, deep)
-            # or inefficient (wide, thin) — informs whether building a low
-            # forecast model would yield exploitable edge.
-            import concurrent.futures as _cf
-
-            def _fetch_series_stats(city_key, series, mtype, label):
-                if not series:
-                    return {"city": city_key, "label": label, "type": mtype,
-                            "series": None, "n": 0, "vol_24h": 0, "oi": 0,
-                            "avg_spread_c": None, "ask_depth_total": 0,
-                            "note": "no series configured"}
-                try:
-                    p   = "/trade-api/v2/markets"
-                    url = f"{KALSHI_BASE}/markets"
-                    params  = {"series_ticker": series, "status": "open", "limit": 50}
-                    headers = kalshi_auth_headers("GET", p)
-                    r = requests.get(url, params=params, headers=headers, timeout=8)
-                    r.raise_for_status()
-                    raw = r.json().get("markets", [])
-                    if not raw:
-                        return {"city": city_key, "label": label, "type": mtype,
-                                "series": series, "n": 0, "vol_24h": 0, "oi": 0,
-                                "avg_spread_c": None, "ask_depth_total": 0,
-                                "note": "no open markets"}
-                    vol = sum((m.get("volume_24h_fp")    or 0) for m in raw)
-                    oi  = sum((m.get("open_interest_fp") or 0) for m in raw)
-                    depth = sum((m.get("yes_ask_size_fp") or 0) for m in raw)
-                    spreads = []
-                    for m in raw:
-                        ya = m.get("yes_ask_dollars")
-                        yb = m.get("yes_bid_dollars")
-                        if ya is not None and yb is not None and ya > 0:
-                            # Kalshi prices are dollars (0–1); convert spread to cents
-                            spreads.append((ya - yb) * 100)
-                    avg_spr = round(sum(spreads)/len(spreads), 1) if spreads else None
-                    return {"city": city_key, "label": label, "type": mtype,
-                            "series": series, "n": len(raw), "vol_24h": vol,
-                            "oi": oi, "avg_spread_c": avg_spr,
-                            "ask_depth_total": depth}
-                except Exception as e:
-                    return {"city": city_key, "label": label, "type": mtype,
-                            "series": series, "n": -1, "vol_24h": 0, "oi": 0,
-                            "avg_spread_c": None, "ask_depth_total": 0,
-                            "error": str(e)[:100]}
-
-            jobs = []
-            for ck, cfg in TEMP_CITIES.items():
-                jobs.append((ck, cfg.get("kalshi_high"), "high", cfg.get("label", ck)))
-                jobs.append((ck, cfg.get("kalshi_low"),  "low",  cfg.get("label", ck)))
-
-            results = []
-            with _cf.ThreadPoolExecutor(max_workers=8) as ex:
-                futs = [ex.submit(_fetch_series_stats, *j) for j in jobs]
-                for f in futs:
-                    try:
-                        results.append(f.result(timeout=12))
-                    except Exception as e:
-                        results.append({"error": str(e)[:100]})
-
-            # Build paired comparison per city
-            by_city = {}
-            for r in results:
-                ck = r.get("city")
-                if not ck: continue
-                by_city.setdefault(ck, {"label": r.get("label")})
-                by_city[ck][r["type"]] = r
-
-            paired = []
-            tot_low_vol = tot_high_vol = 0
-            tot_low_oi  = tot_high_oi  = 0
-            for ck, d in by_city.items():
-                hi  = d.get("high", {})
-                lo  = d.get("low",  {})
-                hv  = hi.get("vol_24h", 0) or 0
-                lv  = lo.get("vol_24h", 0) or 0
-                hoi = hi.get("oi", 0)      or 0
-                loi = lo.get("oi", 0)      or 0
-                tot_high_vol += hv;  tot_low_vol += lv
-                tot_high_oi  += hoi; tot_low_oi  += loi
-                vol_ratio = round(lv / hv, 3) if hv > 0 else None
-                oi_ratio  = round(loi / hoi, 3) if hoi > 0 else None
-                paired.append({
-                    "city": ck,
-                    "label": d.get("label"),
-                    "high_series": hi.get("series"),
-                    "low_series":  lo.get("series"),
-                    "high_brackets": hi.get("n"),
-                    "low_brackets":  lo.get("n"),
-                    "high_vol_24h": hv,
-                    "low_vol_24h":  lv,
-                    "high_oi":      hoi,
-                    "low_oi":       loi,
-                    "high_avg_spread_c": hi.get("avg_spread_c"),
-                    "low_avg_spread_c":  lo.get("avg_spread_c"),
-                    "high_ask_depth": hi.get("ask_depth_total", 0),
-                    "low_ask_depth":  lo.get("ask_depth_total", 0),
-                    "vol_ratio_low_to_high": vol_ratio,
-                    "oi_ratio_low_to_high":  oi_ratio,
-                    "low_configured": lo.get("series") is not None,
-                    "low_error":      lo.get("error"),
-                })
-            paired.sort(key=lambda x: -(x["low_vol_24h"] or 0))
-
-            self.send_json({
-                "ok": True,
-                "summary": {
-                    "total_high_vol_24h": tot_high_vol,
-                    "total_low_vol_24h":  tot_low_vol,
-                    "total_high_oi":      tot_high_oi,
-                    "total_low_oi":       tot_low_oi,
-                    "low_vs_high_vol_pct": round(100 * tot_low_vol / tot_high_vol, 1)
-                                           if tot_high_vol > 0 else None,
-                    "low_vs_high_oi_pct":  round(100 * tot_low_oi / tot_high_oi, 1)
-                                           if tot_high_oi > 0 else None,
-                    "cities_with_low_series": sum(1 for p in paired if p["low_configured"]),
-                    "cities_total": len(paired),
-                },
-                "cities": paired,
-                "note": "Higher low/high vol ratio = more equal interest. "
-                        "Wider spreads in low markets = more potential edge for a calibrated model.",
-            })
 
         elif path == "/health":
             self.send_json({"ok": True, "message": "Server running"})
@@ -7202,15 +6263,14 @@ def _paper_trade_log(city_key, fc, markets):
                     m.get("open_interest"),
                     m.get("volume_24h"),
                     m.get("fillable_a"),
-                    # Top-of-book size at scan — proxy for real depth (Kalshi /orderbook is unreliable)
-                    m.get("ask_size"),
                     # Structural flags
                     m.get("is_tail_bet"),
                     m.get("any_model_inside"),
                     m.get("spread_exceeds_bracket"),
                     m.get("book_limited"),
-                    # Raw Kelly demand (pre-book-cap) — diagnoses how often book caps us
-                    m.get("kelly_size_uncapped"),
+                    # Side (YES or NO) and series_id for correlation analysis
+                    m.get("side", "yes"),
+                    m.get("series_id"),
                 )
 
                 _cols = """city, nws_station, target_date, horizon, ticker,
@@ -7219,24 +6279,24 @@ def _paper_trade_log(city_key, fc, markets):
                          kelly_size, hours_to_cutoff, mkt_rank_conf,
                          gfs_high, ecmwf_high, model_spread,
                          edge_ratio, gap_c, spread_c, kelly_frac,
-                         yes_bid, liq_grade, open_interest, volume_24h, fillable_a, ask_size,
+                         yes_bid, liq_grade, open_interest, volume_24h, fillable_a,
                          is_tail_bet, any_model_inside, spread_exceeds_bracket, book_limited,
-                         kelly_size_uncapped"""
+                         side, series_id"""
                 _vals = ",".join(["%s"] * 35)
 
-                # paper_trades — A-grade only (bet simulation)
+                # paper_trades — A-grade only (bet simulation) — both YES and NO sides
                 if m.get("grade") == "A":
                     cur.execute(f"""
                         INSERT INTO paper_trades ({_cols})
                         VALUES ({_vals})
-                        ON CONFLICT (ticker, target_date) DO NOTHING
+                        ON CONFLICT (ticker, target_date, side) DO NOTHING
                     """, row)
 
-                # calibration_snapshots — all grades (bias + market rank calibration)
+                # calibration_snapshots — all grades (bias + market rank calibration) — both sides
                 cur.execute(f"""
                     INSERT INTO calibration_snapshots ({_cols})
                     VALUES ({_vals})
-                    ON CONFLICT (ticker, target_date) DO NOTHING
+                    ON CONFLICT (ticker, target_date, side) DO NOTHING
                 """, row)
 
         conn.commit()
@@ -7254,16 +6314,33 @@ def _paper_trade_settle():
         conn = get_db()
         if not conn: return
 
+        # YES side wins when settled_temp falls inside [lo, hi].
+        # NO side wins when settled_temp falls OUTSIDE [lo, hi] (the inverse).
+        # COALESCE handles the legacy case where side column is NULL (defaults to 'yes').
         settle_sql = """
             SET
                 settled_temp    = ts.settled_temp,
                 settled_correct = CASE
-                    WHEN {tbl}.lo_temp IS NULL AND {tbl}.hi_temp IS NOT NULL
-                        THEN ts.settled_temp <= {tbl}.hi_temp
-                    WHEN {tbl}.hi_temp IS NULL AND {tbl}.lo_temp IS NOT NULL
-                        THEN ts.settled_temp >= {tbl}.lo_temp
-                    ELSE ts.settled_temp >= {tbl}.lo_temp
-                     AND ts.settled_temp <= {tbl}.hi_temp
+                    WHEN COALESCE({tbl}.side, 'yes') = 'no' THEN
+                        -- NO side: correct when temp falls OUTSIDE the bracket
+                        CASE
+                            WHEN {tbl}.lo_temp IS NULL AND {tbl}.hi_temp IS NOT NULL
+                                THEN ts.settled_temp >  {tbl}.hi_temp
+                            WHEN {tbl}.hi_temp IS NULL AND {tbl}.lo_temp IS NOT NULL
+                                THEN ts.settled_temp <  {tbl}.lo_temp
+                            ELSE ts.settled_temp <  {tbl}.lo_temp
+                              OR ts.settled_temp >  {tbl}.hi_temp
+                        END
+                    ELSE
+                        -- YES side: correct when temp falls INSIDE the bracket
+                        CASE
+                            WHEN {tbl}.lo_temp IS NULL AND {tbl}.hi_temp IS NOT NULL
+                                THEN ts.settled_temp <= {tbl}.hi_temp
+                            WHEN {tbl}.hi_temp IS NULL AND {tbl}.lo_temp IS NOT NULL
+                                THEN ts.settled_temp >= {tbl}.lo_temp
+                            ELSE ts.settled_temp >= {tbl}.lo_temp
+                             AND ts.settled_temp <= {tbl}.hi_temp
+                        END
                 END,
                 settled_ts = NOW()
             FROM (
