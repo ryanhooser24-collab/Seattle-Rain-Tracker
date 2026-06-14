@@ -6075,6 +6075,82 @@ class Handler(BaseHTTPRequestHandler):
                     results["schema_migration"] = str(e)
                 self.send_json({"ok": all_ok, "tables": results})
 
+        elif path == "/debug/no-side-check":
+            # GET endpoint to verify NO-side calibration is flowing. No auth needed —
+            # read-only aggregate data over the last 10 minutes.
+            try:
+                conn = get_db()
+                if not conn:
+                    self.send_json({"ok": False, "error": "No DB"})
+                else:
+                    with conn.cursor() as cur:
+                        # Schema check — confirm side + series_id columns exist
+                        cur.execute("""
+                            SELECT column_name FROM information_schema.columns
+                            WHERE table_name = 'calibration_snapshots'
+                              AND column_name IN ('side', 'series_id')
+                            ORDER BY column_name
+                        """)
+                        schema_cols = [r[0] for r in cur.fetchall()]
+
+                        # Breakdown by side + grade for last 10 minutes
+                        cur.execute("""
+                            SELECT side, grade, COUNT(*) as n
+                            FROM calibration_snapshots
+                            WHERE scan_ts > NOW() - INTERVAL '10 minutes'
+                            GROUP BY side, grade
+                            ORDER BY side, grade
+                        """)
+                        recent_breakdown = [
+                            {"side": r[0], "grade": r[1], "n": r[2]}
+                            for r in cur.fetchall()
+                        ]
+
+                        # All-time NO-side totals for reference
+                        cur.execute("""
+                            SELECT side, COUNT(*) as n
+                            FROM calibration_snapshots
+                            GROUP BY side
+                            ORDER BY side
+                        """)
+                        alltime_by_side = [
+                            {"side": r[0], "n": r[1]}
+                            for r in cur.fetchall()
+                        ]
+
+                        # Sample of recent NO rows with edge (last 10 min)
+                        cur.execute("""
+                            SELECT city, ticker, side, grade, model_prob, yes_ask,
+                                   gap_c, net_gap_c, series_id
+                            FROM calibration_snapshots
+                            WHERE scan_ts > NOW() - INTERVAL '10 minutes'
+                              AND side = 'no'
+                              AND grade IN ('A', 'B')
+                            ORDER BY net_gap_c DESC
+                            LIMIT 10
+                        """)
+                        actionable_no = [
+                            {"city": r[0], "ticker": r[1], "side": r[2],
+                             "grade": r[3],
+                             "model_prob": float(r[4]) if r[4] else None,
+                             "no_ask": float(r[5]) if r[5] else None,
+                             "gap_c": r[6], "net_gap_c": r[7],
+                             "series_id": r[8]}
+                            for r in cur.fetchall()
+                        ]
+
+                    conn.close()
+                    self.send_json({
+                        "ok": True,
+                        "schema_columns_present": schema_cols,  # should be ['series_id','side']
+                        "schema_ok": set(schema_cols) == {"side", "series_id"},
+                        "recent_10min_breakdown": recent_breakdown,
+                        "alltime_by_side": alltime_by_side,
+                        "actionable_no_signals_recent": actionable_no,
+                    })
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
         elif path == "/debug/cal-log":
             # Returns last scan result for calibration_snapshots debugging
             try:
