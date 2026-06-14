@@ -6075,6 +6075,113 @@ class Handler(BaseHTTPRequestHandler):
                     results["schema_migration"] = str(e)
                 self.send_json({"ok": all_ok, "tables": results})
 
+        elif path == "/debug/schema":
+            # GET endpoint — returns column list for paper_trades and calibration_snapshots.
+            # Used to diagnose migration state.
+            try:
+                conn = get_db()
+                if not conn:
+                    self.send_json({"ok": False, "error": "No DB"})
+                else:
+                    out = {}
+                    with conn.cursor() as cur:
+                        for tbl in ("calibration_snapshots", "paper_trades"):
+                            cur.execute("""
+                                SELECT column_name, data_type
+                                FROM information_schema.columns
+                                WHERE table_name = %s
+                                ORDER BY ordinal_position
+                            """, (tbl,))
+                            out[tbl] = [{"col": r[0], "type": r[1]} for r in cur.fetchall()]
+
+                        # Index list
+                        cur.execute("""
+                            SELECT tablename, indexname, indexdef
+                            FROM pg_indexes
+                            WHERE tablename IN ('calibration_snapshots', 'paper_trades')
+                            ORDER BY tablename, indexname
+                        """)
+                        out["indexes"] = [
+                            {"table": r[0], "name": r[1], "def": r[2]}
+                            for r in cur.fetchall()
+                        ]
+                    conn.close()
+                    self.send_json({"ok": True, "schema": out})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/admin/fix-side-columns":
+            # GET endpoint that runs the side/series_id migration WITHOUT a wrapping
+            # transaction. Each statement runs independently and reports its own status.
+            # Safe to call repeatedly — all operations are idempotent.
+            results = {}
+            for tbl in ("calibration_snapshots", "paper_trades"):
+                # 1. Add side column
+                try:
+                    conn = get_db()
+                    if conn:
+                        conn.autocommit = True
+                        with conn.cursor() as cur:
+                            cur.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS side TEXT DEFAULT 'yes'")
+                        conn.close()
+                        results[f"{tbl}_add_side"] = "ok"
+                except Exception as e:
+                    results[f"{tbl}_add_side"] = f"ERROR: {e}"
+
+                # 2. Add series_id column
+                try:
+                    conn = get_db()
+                    if conn:
+                        conn.autocommit = True
+                        with conn.cursor() as cur:
+                            cur.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS series_id TEXT")
+                        conn.close()
+                        results[f"{tbl}_add_series_id"] = "ok"
+                except Exception as e:
+                    results[f"{tbl}_add_series_id"] = f"ERROR: {e}"
+
+                # 3. Backfill side='yes' on existing rows
+                try:
+                    conn = get_db()
+                    if conn:
+                        conn.autocommit = True
+                        with conn.cursor() as cur:
+                            cur.execute(f"UPDATE {tbl} SET side = 'yes' WHERE side IS NULL")
+                        conn.close()
+                        results[f"{tbl}_backfill_side"] = "ok"
+                except Exception as e:
+                    results[f"{tbl}_backfill_side"] = f"ERROR: {e}"
+
+                # 4. Drop old unique index (ticker, target_date)
+                try:
+                    conn = get_db()
+                    if conn:
+                        conn.autocommit = True
+                        with conn.cursor() as cur:
+                            cur.execute(f"DROP INDEX IF EXISTS {tbl}_ticker_date_idx")
+                        conn.close()
+                        results[f"{tbl}_drop_old_idx"] = "ok"
+                except Exception as e:
+                    results[f"{tbl}_drop_old_idx"] = f"ERROR: {e}"
+
+                # 5. Create new unique index (ticker, target_date, side)
+                try:
+                    conn = get_db()
+                    if conn:
+                        conn.autocommit = True
+                        with conn.cursor() as cur:
+                            cur.execute(f"""
+                                CREATE UNIQUE INDEX IF NOT EXISTS {tbl}_ticker_date_side_idx
+                                ON {tbl} (ticker, target_date, side)
+                            """)
+                        conn.close()
+                        results[f"{tbl}_create_new_idx"] = "ok"
+                except Exception as e:
+                    results[f"{tbl}_create_new_idx"] = f"ERROR: {e}"
+
+            all_ok = all(v == "ok" for v in results.values())
+            self.send_json({"ok": all_ok, "results": results})
+
         elif path == "/debug/no-side-check":
             # GET endpoint to verify NO-side calibration is flowing. No auth needed —
             # read-only aggregate data over the last 10 minutes.
