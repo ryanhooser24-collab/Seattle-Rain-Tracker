@@ -6089,7 +6089,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     out = {}
                     with conn.cursor() as cur:
-                        for tbl in ("calibration_snapshots", "paper_trades"):
+                        for tbl in ("calibration_snapshots", "paper_trades", "price_history"):
                             cur.execute("""
                                 SELECT column_name, data_type
                                 FROM information_schema.columns
@@ -6102,7 +6102,7 @@ class Handler(BaseHTTPRequestHandler):
                         cur.execute("""
                             SELECT tablename, indexname, indexdef
                             FROM pg_indexes
-                            WHERE tablename IN ('calibration_snapshots', 'paper_trades')
+                            WHERE tablename IN ('calibration_snapshots', 'paper_trades', 'price_history')
                             ORDER BY tablename, indexname
                         """)
                         out["indexes"] = [
@@ -6286,6 +6286,82 @@ class Handler(BaseHTTPRequestHandler):
 
             all_ok = not any(isinstance(v, str) and v.startswith("ERROR") for v in results.values())
             self.send_json({"ok": all_ok, "results": results})
+
+        elif path == "/debug/price-history":
+            # GET — monitor price_history accumulation and HTC coverage.
+            # Confirms hourly sampling near cutoff is working.
+            try:
+                conn = get_db()
+                if not conn:
+                    self.send_json({"ok": False, "error": "No DB"})
+                else:
+                    with conn.cursor() as cur:
+                        # Total rows + rows with HTC populated
+                        cur.execute("""
+                            SELECT COUNT(*),
+                                   COUNT(hours_to_cutoff),
+                                   COUNT(*) FILTER (WHERE scan_ts > NOW() - INTERVAL '24 hours')
+                            FROM price_history
+                        """)
+                        total, with_htc, last_24h = cur.fetchone()
+
+                        # HTC bucket distribution for rows in last 24h
+                        cur.execute("""
+                            SELECT
+                              CASE
+                                WHEN hours_to_cutoff IS NULL THEN 'null'
+                                WHEN hours_to_cutoff <= 6  THEN '0-6'
+                                WHEN hours_to_cutoff <= 12 THEN '6-12'
+                                WHEN hours_to_cutoff <= 18 THEN '12-18'
+                                WHEN hours_to_cutoff <= 24 THEN '18-24'
+                                ELSE '24+'
+                              END as htc_bucket,
+                              COUNT(*) as n
+                            FROM price_history
+                            WHERE scan_ts > NOW() - INTERVAL '24 hours'
+                            GROUP BY htc_bucket
+                            ORDER BY htc_bucket
+                        """)
+                        htc_dist = [{"bucket": r[0], "n": r[1]} for r in cur.fetchall()]
+
+                        # Sample: a single ticker's price path over time (most-sampled recent ticker)
+                        cur.execute("""
+                            SELECT ticker FROM price_history
+                            WHERE scan_ts > NOW() - INTERVAL '24 hours'
+                              AND hours_to_cutoff IS NOT NULL AND hours_to_cutoff <= 18
+                            GROUP BY ticker
+                            ORDER BY COUNT(*) DESC
+                            LIMIT 1
+                        """)
+                        row = cur.fetchone()
+                        sample_path = []
+                        if row:
+                            tk = row[0]
+                            cur.execute("""
+                                SELECT scan_ts, hours_to_cutoff, yes_ask, model_prob, net_gap_c
+                                FROM price_history
+                                WHERE ticker = %s
+                                ORDER BY scan_ts
+                            """, (tk,))
+                            sample_path = [
+                                {"ts": str(r[0]), "htc": float(r[1]) if r[1] is not None else None,
+                                 "yes_ask": float(r[2]) if r[2] is not None else None,
+                                 "model_prob": float(r[3]) if r[3] is not None else None,
+                                 "net_gap_c": r[4]}
+                                for r in cur.fetchall()
+                            ]
+                            sample_path = {"ticker": tk, "path": sample_path}
+                    conn.close()
+                    self.send_json({
+                        "ok": True,
+                        "total_rows": total,
+                        "rows_with_htc": with_htc,
+                        "rows_last_24h": last_24h,
+                        "htc_distribution_24h": htc_dist,
+                        "sample_price_path": sample_path,
+                    })
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
 
         elif path == "/debug/no-side-check":
             # GET endpoint to verify NO-side calibration is flowing. No auth needed —
