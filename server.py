@@ -6287,6 +6287,41 @@ class Handler(BaseHTTPRequestHandler):
             all_ok = not any(isinstance(v, str) and v.startswith("ERROR") for v in results.values())
             self.send_json({"ok": all_ok, "results": results})
 
+        elif path == "/admin/fix-price-history-htc":
+            # Standalone migration: add hours_to_cutoff to price_history with
+            # autocommit so it can't be rolled back by an unrelated failure in
+            # ensure_tables(). Idempotent — safe to call repeatedly.
+            results = {}
+            try:
+                conn = get_db()
+                if conn:
+                    conn.autocommit = True
+                    with conn.cursor() as cur:
+                        cur.execute("ALTER TABLE price_history ADD COLUMN IF NOT EXISTS hours_to_cutoff NUMERIC(5,1)")
+                    conn.close()
+                    results["add_hours_to_cutoff"] = "ok"
+                else:
+                    results["add_hours_to_cutoff"] = "ERROR: no DB"
+            except Exception as e:
+                results["add_hours_to_cutoff"] = f"ERROR: {e}"
+
+            # Confirm it now exists
+            try:
+                conn = get_db()
+                if conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT column_name FROM information_schema.columns
+                            WHERE table_name = 'price_history' AND column_name = 'hours_to_cutoff'
+                        """)
+                        results["column_present"] = bool(cur.fetchone())
+                    conn.close()
+            except Exception as e:
+                results["column_present"] = f"ERROR: {e}"
+
+            all_ok = results.get("add_hours_to_cutoff") == "ok" and results.get("column_present") is True
+            self.send_json({"ok": all_ok, "results": results})
+
         elif path == "/debug/price-history":
             # GET — monitor price_history accumulation and HTC coverage.
             # Confirms hourly sampling near cutoff is working.
