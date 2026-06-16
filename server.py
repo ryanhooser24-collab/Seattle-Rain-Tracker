@@ -3826,9 +3826,11 @@ def ensure_tables():
                     -- Derived
                     model_prob      NUMERIC(6,4),
                     net_gap_c       INTEGER,
-                    grade           TEXT
+                    grade           TEXT,
+                    hours_to_cutoff NUMERIC(5,1)     -- hours until 6 AM local cutoff at scan time
                 );
             """)
+            cur.execute("ALTER TABLE price_history ADD COLUMN IF NOT EXISTS hours_to_cutoff NUMERIC(5,1)")
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS price_history_ticker_ts_idx
                     ON price_history (ticker, scan_ts DESC);
@@ -6021,9 +6023,11 @@ class Handler(BaseHTTPRequestHandler):
                                     volume_24h INTEGER, open_interest INTEGER,
                                     mu NUMERIC(6,2), gfs_high NUMERIC(5,1),
                                     ecmwf_high NUMERIC(5,1), sigma NUMERIC(6,3),
-                                    model_prob NUMERIC(6,4), net_gap_c INTEGER, grade TEXT
+                                    model_prob NUMERIC(6,4), net_gap_c INTEGER, grade TEXT,
+                                    hours_to_cutoff NUMERIC(5,1)
                                 )
                             """)
+                            cur.execute("ALTER TABLE price_history ADD COLUMN IF NOT EXISTS hours_to_cutoff NUMERIC(5,1)")
                             cur.execute("""
                                 CREATE INDEX IF NOT EXISTS price_history_ticker_ts_idx
                                 ON price_history (ticker, scan_ts DESC)
@@ -6419,23 +6423,59 @@ class Handler(BaseHTTPRequestHandler):
 
 
 _SCAN_THREAD        = None
-_SCAN_INTERVAL_SECS = 4 * 3600   # scan every 4 hours
+_SCAN_INTERVAL_SECS = 1 * 3600   # base tick: every 1 hour
+_FULL_SCAN_EVERY_N  = 4          # full cycle (far-out brackets + calibration) every 4 ticks
+_FAST_TICK_HTC_MAX  = 24.0       # on fast ticks, only scan cities within this many hrs of cutoff
+_FINE_LOG_HTC_MAX   = 18.0       # log to price_history every tick when HTC <= this; else only full ticks
+
+
+def _estimate_htc(city_key, horizon):
+    """
+    Cheap hours-to-cutoff estimate WITHOUT a forecast API call. Used by the
+    scheduler to decide which cities to scan on fast (hourly) ticks.
+
+    Mirrors fetch_temp_forecast target-date logic exactly:
+      d0 → today (local), d1 → tomorrow (local); cutoff = 6 AM local on target.
+    Returns hours (float) or None if it can't be computed.
+    """
+    try:
+        import pytz as _pytz
+        from datetime import datetime as _dt, timedelta as _td
+        cfg = TEMP_CITIES.get(city_key, {})
+        tz_name = cfg.get("tz", "America/Chicago")
+        local_tz = _pytz.timezone(tz_name)
+        now_local = _dt.utcnow().replace(tzinfo=_pytz.utc).astimezone(local_tz)
+        tgt = (now_local.date() if horizon == "d0"
+               else (now_local + _td(days=1)).date())
+        cutoff_local = local_tz.localize(_dt(tgt.year, tgt.month, tgt.day, 6, 0, 0))
+        return round((cutoff_local - now_local).total_seconds() / 3600, 1)
+    except Exception:
+        return None
 
 
 def _background_scan_scheduler():
     """
-    Background thread — runs scan_temp_city for all cities every 4 hours.
-    Writes ALL brackets (all grades) to temp_snapshots for calibration.
-    Completely independent of the auto-trader.
+    Background thread — tiered sampling for convergence analysis.
+      • Base tick: every 1 hour.
+      • Full cycle (every 4th tick = ~4hr): scan ALL cities, log all brackets to
+        price_history, run calibration + paper-trade logging + settlement.
+      • Fast ticks (the other 3): scan only cities within ~24hr of cutoff, log only
+        near-cutoff brackets (HTC ≤ 18) to price_history. No calibration writes
+        (those dedup per-day anyway).
+    This gives ~1hr price resolution in the final 18hr window (where convergence
+    happens) while keeping API load and row volume controlled far from cutoff.
     """
     import time as _t
-    print("  📊 Background scan scheduler started")
+    print("  📊 Background scan scheduler started (1hr tick, full cycle every 4hr)")
     _t.sleep(120)  # stagger 2 min after startup
+    tick = 0
     while True:
         try:
-            _run_background_scan()
+            is_full = (tick % _FULL_SCAN_EVERY_N == 0)
+            _run_background_scan(full=is_full)
         except Exception as e:
             print(f"  ⚠️  Background scan error: {e}")
+        tick += 1
         _t.sleep(_SCAN_INTERVAL_SECS)
 
 
@@ -6473,6 +6513,7 @@ def _price_history_log(city_key, fc, markets):
                 m.get("model_prob"),
                 m.get("net_gap_c"),
                 m.get("grade"),
+                m.get("hours_to_cutoff"),
             ))
         if not rows: return
         with conn.cursor() as cur:
@@ -6481,8 +6522,8 @@ def _price_history_log(city_key, fc, markets):
                 (city, target_date, horizon, ticker, bracket_label,
                  lo_temp, hi_temp, yes_ask, yes_bid, volume_24h,
                  open_interest, mu, gfs_high, ecmwf_high, sigma,
-                 model_prob, net_gap_c, grade)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                 model_prob, net_gap_c, grade, hours_to_cutoff)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, rows)
         conn.commit()
         conn.close()
@@ -6647,30 +6688,54 @@ def _paper_trade_settle():
         pass
 
 
-def _run_background_scan():
+def _run_background_scan(full=True):
+    """
+    full=True  → scan all cities, log everything, run calibration + settlement.
+    full=False → fast tick: only scan cities within ~24hr of cutoff, log only
+                 near-cutoff brackets (HTC ≤ 18) to price_history, skip calibration.
+    """
     import time as _t
     start = _t.time()
     total = 0
+    skipped = 0
     for horizon in ["d0", "d1"]:
         for city_key in TEMP_CITIES:
+            # Fast-tick pre-filter: skip far-from-cutoff cities to save API load.
+            # Errs toward inclusion (24hr buffer above the 18hr fine-log threshold).
+            if not full:
+                est = _estimate_htc(city_key, horizon)
+                if est is not None and est > _FAST_TICK_HTC_MAX:
+                    skipped += 1
+                    continue
             try:
                 result = scan_temp_city(city_key, horizon)
                 if result.get("ok"):
                     fc = result.get("forecast", {})
                     all_mkts = result.get("high_markets", []) + result.get("low_markets", [])
-                    # Price history — log ALL brackets every scan for time series analysis
-                    _price_history_log(city_key, fc, all_mkts)
-                    # Calibration — log all grades for bias/market rank analysis
-                    _paper_trade_log(city_key, fc, all_mkts)
-                    # Log combo signals as A-grade paper trades if applicable
-                    for combo in result.get("combo_signals", []):
-                        if combo.get("grade") in ("A", "B"):
-                            _paper_trade_log(city_key, fc, [combo])
+                    # Price history logging:
+                    #   full tick → all brackets
+                    #   fast tick → only near-cutoff brackets (HTC ≤ 18)
+                    if full:
+                        ph_mkts = all_mkts
+                    else:
+                        ph_mkts = [m for m in all_mkts
+                                   if (m.get("hours_to_cutoff") is not None
+                                       and m.get("hours_to_cutoff") <= _FINE_LOG_HTC_MAX)]
+                    _price_history_log(city_key, fc, ph_mkts)
+                    # Calibration + paper trades only on full ticks.
+                    # (calibration_snapshots dedups per-day via ON CONFLICT anyway.)
+                    if full:
+                        _paper_trade_log(city_key, fc, all_mkts)
+                        for combo in result.get("combo_signals", []):
+                            if combo.get("grade") in ("A", "B"):
+                                _paper_trade_log(city_key, fc, [combo])
                 total += 1
             except Exception:
                 pass
-    _paper_trade_settle()
-    print(f"  📊 Background scan: {total} cities in {round(_t.time()-start,1)}s")
+    if full:
+        _paper_trade_settle()
+    tag = "full" if full else "fast"
+    print(f"  📊 Background scan ({tag}): {total} scanned, {skipped} skipped in {round(_t.time()-start,1)}s")
 
 
 def start_background_scan_scheduler():
