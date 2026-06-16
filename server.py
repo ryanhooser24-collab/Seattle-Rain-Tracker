@@ -6182,6 +6182,107 @@ class Handler(BaseHTTPRequestHandler):
             all_ok = all(v == "ok" for v in results.values())
             self.send_json({"ok": all_ok, "results": results})
 
+        elif path == "/admin/backfill-fees":
+            # One-shot migration: retroactively apply 2% Kalshi fee adjustment
+            # to historical calibration_snapshots and paper_trades rows.
+            #
+            # Formula: gap_c_new = round((model_prob * 0.98 - yes_ask) * 100)
+            #          net_gap_c_new = max(0, gap_c_new - spread_c)
+            #
+            # Safe to run multiple times — each run computes from current model_prob
+            # and yes_ask, not from the previous gap_c. But each call DOES rewrite
+            # the values, so calling it more than once is just wasted work.
+            #
+            # Adds a `fees_backfilled` boolean column to track which rows have
+            # already been corrected. Already-backfilled rows are skipped on
+            # subsequent calls.
+            results = {}
+            try:
+                # Add a tracking column so we know which rows have been migrated
+                conn = get_db()
+                if conn:
+                    conn.autocommit = True
+                    with conn.cursor() as cur:
+                        for tbl in ("calibration_snapshots", "paper_trades"):
+                            cur.execute(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS fees_backfilled BOOLEAN DEFAULT FALSE")
+                    conn.close()
+                    results["add_tracking_column"] = "ok"
+            except Exception as e:
+                results["add_tracking_column"] = f"ERROR: {e}"
+                self.send_json({"ok": False, "results": results})
+                return
+
+            # Backfill each table
+            for tbl in ("calibration_snapshots", "paper_trades"):
+                # First, count what we're about to update
+                try:
+                    conn = get_db()
+                    if conn:
+                        with conn.cursor() as cur:
+                            cur.execute(f"""
+                                SELECT COUNT(*) FROM {tbl}
+                                WHERE fees_backfilled = FALSE
+                                  AND model_prob IS NOT NULL
+                                  AND yes_ask IS NOT NULL
+                            """)
+                            rows_to_update = cur.fetchone()[0]
+                            results[f"{tbl}_rows_pending"] = rows_to_update
+                        conn.close()
+                except Exception as e:
+                    results[f"{tbl}_rows_pending"] = f"ERROR: {e}"
+                    continue
+
+                # Run the update — recompute gap_c and net_gap_c with 0.98 multiplier
+                try:
+                    conn = get_db()
+                    if conn:
+                        conn.autocommit = True
+                        with conn.cursor() as cur:
+                            cur.execute(f"""
+                                UPDATE {tbl}
+                                SET gap_c     = ROUND((model_prob * 0.98 - yes_ask) * 100),
+                                    net_gap_c = GREATEST(0, ROUND((model_prob * 0.98 - yes_ask) * 100) - COALESCE(spread_c, 0)),
+                                    fees_backfilled = TRUE
+                                WHERE fees_backfilled = FALSE
+                                  AND model_prob IS NOT NULL
+                                  AND yes_ask IS NOT NULL
+                            """)
+                            updated = cur.rowcount
+                            results[f"{tbl}_rows_updated"] = updated
+                        conn.close()
+                except Exception as e:
+                    results[f"{tbl}_rows_updated"] = f"ERROR: {e}"
+
+            # Sanity check — sample 5 rows showing before/after-style snapshot.
+            # Since UPDATE happened in-place, this just shows current state.
+            try:
+                conn = get_db()
+                if conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT city, ticker, model_prob, yes_ask, gap_c, net_gap_c, grade, fees_backfilled
+                            FROM calibration_snapshots
+                            WHERE fees_backfilled = TRUE
+                              AND grade IN ('A', 'B')
+                            ORDER BY scan_ts DESC
+                            LIMIT 5
+                        """)
+                        sample = [
+                            {"city": r[0], "ticker": r[1],
+                             "model_prob": float(r[2]) if r[2] else None,
+                             "yes_ask": float(r[3]) if r[3] else None,
+                             "gap_c": r[4], "net_gap_c": r[5],
+                             "grade": r[6], "fees_backfilled": r[7]}
+                            for r in cur.fetchall()
+                        ]
+                        results["sample_corrected_rows"] = sample
+                    conn.close()
+            except Exception as e:
+                results["sample_corrected_rows"] = f"ERROR: {e}"
+
+            all_ok = not any(isinstance(v, str) and v.startswith("ERROR") for v in results.values())
+            self.send_json({"ok": all_ok, "results": results})
+
         elif path == "/debug/no-side-check":
             # GET endpoint to verify NO-side calibration is flowing. No auth needed —
             # read-only aggregate data over the last 10 minutes.
