@@ -1376,22 +1376,56 @@ def scan_temp_city(city_key, horizon="d1"):
 
     import concurrent.futures as _cf
     try:
-        ex = _cf.ThreadPoolExecutor(max_workers=2)
+        ex = _cf.ThreadPoolExecutor(max_workers=3)
         try:
             f_fc   = ex.submit(fetch_temp_forecast, city_key, horizon)
             f_high = ex.submit(fetch_temp_kalshi_markets, city_key, "high")
-            # LOW markets suppressed — overnight low timing is ambiguous until
-            # we build hourly-based low forecast. PIN: add LOW back when ready.
+            # LOW markets: SCORING suppressed (overnight low timing ambiguous until
+            # hourly-based low forecast exists — PIN), but PRICE-ONLY capture enabled
+            # so market efficiency/liquidity data accumulates for a future low build.
+            # Fetch once per city (d1 pass only) — the series fetch returns all open
+            # dates anyway, so fetching on both horizons would double-log rows.
+            f_low = (ex.submit(fetch_temp_kalshi_markets, city_key, "low")
+                     if (horizon == "d1" and cfg.get("kalshi_low")) else None)
             try: fc   = f_fc.result(timeout=12)
             except Exception as e: fc = {"ok": False, "error": str(e)}
             try: high = f_high.result(timeout=8)
             except Exception as e: high = {"ok": False, "markets": [], "error": str(e)}
+            low_raw = []
+            if f_low is not None:
+                try:
+                    _low_res = f_low.result(timeout=8)
+                    low_raw = _low_res.get("markets", []) if _low_res.get("ok") else []
+                except Exception:
+                    low_raw = []
             low = {"ok": False, "markets": [], "suppressed": True}
         finally:
             ex.shutdown(wait=False)
 
         if not fc.get("ok"):
             return {"ok": False, "city": city_key, "label": cfg["label"], "error": fc.get("error", "forecast failed")}
+
+        # Build price-only rows for LOW brackets — raw market data, NO scoring:
+        # no model_prob, no grade, no kelly. These exist purely for price_history
+        # so we can later analyze low-market efficiency before building a low model.
+        # target_date comes from each ticker (series fetch spans multiple dates).
+        low_price_rows = []
+        for _lm in low_raw:
+            if not _lm.get("ticker") or not _lm.get("ticker_date"):
+                continue
+            low_price_rows.append({
+                "ticker":        _lm.get("ticker"),
+                "bracket_label": _lm.get("bracket_label"),
+                "lo_temp":       _lm.get("lo_temp"),
+                "hi_temp":       _lm.get("hi_temp"),
+                "yes_ask":       _lm.get("yes_ask"),
+                "yes_bid":       _lm.get("yes_bid"),
+                "volume_24h":    _lm.get("volume_24h"),
+                "open_interest": _lm.get("open_interest"),
+                "target_date":   _lm.get("ticker_date"),
+                "market_type":   "low",
+                # Intentionally no model_prob / grade / net_gap_c — unscored.
+            })
 
         # Score brackets — HIGH only. LOW suppressed (PIN: add back with hourly low forecast)
         high_markets = analyze_temp_brackets(high.get("markets", []), fc, "high") if high.get("ok") else []
@@ -1422,6 +1456,7 @@ def scan_temp_city(city_key, horizon="d1"):
             "low_markets":    low_markets,
             "combo_signals":  combo_signals,
             "low_suppressed": horizon == "d1",
+            "low_price_rows": low_price_rows,
             "best_edge_c":    best_edge,
             "best_grade":     best_grade,
             "actionable_count": len(all_actionable),
@@ -6288,38 +6323,59 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": all_ok, "results": results})
 
         elif path == "/admin/fix-price-history-htc":
-            # Standalone migration: add hours_to_cutoff to price_history with
-            # autocommit so it can't be rolled back by an unrelated failure in
-            # ensure_tables(). Idempotent — safe to call repeatedly.
+            # Standalone migration: add hours_to_cutoff + market_type to
+            # price_history with autocommit so it can't be rolled back by an
+            # unrelated failure in ensure_tables(). Idempotent — safe to repeat.
             results = {}
+            for col_name, ddl in (
+                ("hours_to_cutoff", "ALTER TABLE price_history ADD COLUMN IF NOT EXISTS hours_to_cutoff NUMERIC(5,1)"),
+                ("market_type",     "ALTER TABLE price_history ADD COLUMN IF NOT EXISTS market_type TEXT DEFAULT 'high'"),
+            ):
+                try:
+                    conn = get_db()
+                    if conn:
+                        conn.autocommit = True
+                        with conn.cursor() as cur:
+                            cur.execute(ddl)
+                        conn.close()
+                        results[f"add_{col_name}"] = "ok"
+                    else:
+                        results[f"add_{col_name}"] = "ERROR: no DB"
+                except Exception as e:
+                    results[f"add_{col_name}"] = f"ERROR: {e}"
+
+            # Backfill market_type='high' on pre-existing rows (all history is high)
             try:
                 conn = get_db()
                 if conn:
                     conn.autocommit = True
                     with conn.cursor() as cur:
-                        cur.execute("ALTER TABLE price_history ADD COLUMN IF NOT EXISTS hours_to_cutoff NUMERIC(5,1)")
+                        cur.execute("UPDATE price_history SET market_type = 'high' WHERE market_type IS NULL")
                     conn.close()
-                    results["add_hours_to_cutoff"] = "ok"
-                else:
-                    results["add_hours_to_cutoff"] = "ERROR: no DB"
+                    results["backfill_market_type"] = "ok"
             except Exception as e:
-                results["add_hours_to_cutoff"] = f"ERROR: {e}"
+                results["backfill_market_type"] = f"ERROR: {e}"
 
-            # Confirm it now exists
+            # Confirm both columns exist
             try:
                 conn = get_db()
                 if conn:
                     with conn.cursor() as cur:
                         cur.execute("""
                             SELECT column_name FROM information_schema.columns
-                            WHERE table_name = 'price_history' AND column_name = 'hours_to_cutoff'
+                            WHERE table_name = 'price_history'
+                              AND column_name IN ('hours_to_cutoff', 'market_type')
                         """)
-                        results["column_present"] = bool(cur.fetchone())
+                        found = [r[0] for r in cur.fetchall()]
+                        results["columns_present"] = found
                     conn.close()
             except Exception as e:
-                results["column_present"] = f"ERROR: {e}"
+                results["columns_present"] = f"ERROR: {e}"
 
-            all_ok = results.get("add_hours_to_cutoff") == "ok" and results.get("column_present") is True
+            all_ok = (results.get("add_hours_to_cutoff") == "ok"
+                      and results.get("add_market_type") == "ok"
+                      and isinstance(results.get("columns_present"), list)
+                      and set(results["columns_present"]) == {"hours_to_cutoff", "market_type"})
             self.send_json({"ok": all_ok, "results": results})
 
         elif path == "/debug/price-history":
@@ -6339,6 +6395,17 @@ class Handler(BaseHTTPRequestHandler):
                             FROM price_history
                         """)
                         total, with_htc, last_24h = cur.fetchone()
+
+                        # Low-market capture status (price-only rows)
+                        cur.execute("""
+                            SELECT COUNT(*),
+                                   COUNT(*) FILTER (WHERE scan_ts > NOW() - INTERVAL '24 hours'),
+                                   COUNT(DISTINCT city),
+                                   COALESCE(SUM(volume_24h) FILTER (WHERE scan_ts > NOW() - INTERVAL '24 hours'), 0)
+                            FROM price_history
+                            WHERE market_type = 'low'
+                        """)
+                        low_total, low_24h, low_cities, low_vol = cur.fetchone()
 
                         # HTC bucket distribution for rows in last 24h
                         cur.execute("""
@@ -6392,6 +6459,12 @@ class Handler(BaseHTTPRequestHandler):
                         "total_rows": total,
                         "rows_with_htc": with_htc,
                         "rows_last_24h": last_24h,
+                        "low_capture": {
+                            "total_rows": low_total,
+                            "rows_last_24h": low_24h,
+                            "cities": low_cities,
+                            "volume_24h_sum": int(low_vol),
+                        },
                         "htc_distribution_24h": htc_dist,
                         "sample_price_path": sample_path,
                     })
@@ -6605,9 +6678,11 @@ def _price_history_log(city_key, fc, markets):
         rows = []
         for m in markets:
             if not m.get("ticker"): continue
+            _mtype = m.get("market_type", "high")
+            _is_low = _mtype == "low"
             rows.append((
                 city_key,
-                fc.get("target_date"),
+                m.get("target_date") or fc.get("target_date"),
                 fc.get("horizon"),
                 m["ticker"],
                 m.get("bracket_label"),
@@ -6617,14 +6692,17 @@ def _price_history_log(city_key, fc, markets):
                 m.get("yes_bid"),
                 m.get("volume_24h"),
                 m.get("open_interest"),
-                m.get("mu") or fc.get("best_high"),
-                fc.get("gfs_high"),
-                fc.get("ecmwf_high"),
-                m.get("sigma") or fc.get("sigma"),
+                # Forecast fields are HIGH-model values — meaningless for low
+                # brackets, so null them on low rows to avoid polluting analysis.
+                None if _is_low else (m.get("mu") or fc.get("best_high")),
+                None if _is_low else fc.get("gfs_high"),
+                None if _is_low else fc.get("ecmwf_high"),
+                None if _is_low else (m.get("sigma") or fc.get("sigma")),
                 m.get("model_prob"),
                 m.get("net_gap_c"),
                 m.get("grade"),
                 m.get("hours_to_cutoff"),
+                _mtype,
             ))
         if not rows: return
         with conn.cursor() as cur:
@@ -6633,8 +6711,8 @@ def _price_history_log(city_key, fc, markets):
                 (city, target_date, horizon, ticker, bracket_label,
                  lo_temp, hi_temp, yes_ask, yes_bid, volume_24h,
                  open_interest, mu, gfs_high, ecmwf_high, sigma,
-                 model_prob, net_gap_c, grade, hours_to_cutoff)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                 model_prob, net_gap_c, grade, hours_to_cutoff, market_type)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, rows)
         conn.commit()
         conn.close()
@@ -6833,6 +6911,10 @@ def _run_background_scan(full=True):
                                    if (m.get("hours_to_cutoff") is not None
                                        and m.get("hours_to_cutoff") <= _FINE_LOG_HTC_MAX)]
                     _price_history_log(city_key, fc, ph_mkts)
+                    # LOW market price-only capture — full ticks only (4hr cadence
+                    # is enough for efficiency/liquidity analysis; no scoring).
+                    if full and result.get("low_price_rows"):
+                        _price_history_log(city_key, fc, result["low_price_rows"])
                     # Calibration + paper trades only on full ticks.
                     # (calibration_snapshots dedups per-day via ON CONFLICT anyway.)
                     if full:
