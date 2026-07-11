@@ -365,6 +365,8 @@ def _load_model_calibration(force=False):
                     WHERE settled_temp IS NOT NULL AND mu IS NOT NULL
                       AND sigma IS NOT NULL AND sigma > 0
                       AND COALESCE(side, 'yes') = 'yes'
+                      AND COALESCE(is_combo, FALSE) = FALSE
+                      AND ticker NOT LIKE 'COMBO:%'
                       AND scan_ts > NOW() - INTERVAL '60 days'
                     ORDER BY city, target_date, horizon, scan_ts DESC
                 )
