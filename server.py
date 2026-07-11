@@ -6330,6 +6330,7 @@ class Handler(BaseHTTPRequestHandler):
             for col_name, ddl in (
                 ("hours_to_cutoff", "ALTER TABLE price_history ADD COLUMN IF NOT EXISTS hours_to_cutoff NUMERIC(5,1)"),
                 ("market_type",     "ALTER TABLE price_history ADD COLUMN IF NOT EXISTS market_type TEXT DEFAULT 'high'"),
+                ("side",            "ALTER TABLE price_history ADD COLUMN IF NOT EXISTS side TEXT"),
             ):
                 try:
                     conn = get_db()
@@ -6356,7 +6357,9 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 results["backfill_market_type"] = f"ERROR: {e}"
 
-            # Confirm both columns exist
+            # NOTE: side is deliberately NOT backfilled — pre-fix rows contain
+            # unmarked YES/NO pairs, so NULL = "pre-fix, side ambiguous".
+            # Confirm all columns exist
             try:
                 conn = get_db()
                 if conn:
@@ -6364,7 +6367,7 @@ class Handler(BaseHTTPRequestHandler):
                         cur.execute("""
                             SELECT column_name FROM information_schema.columns
                             WHERE table_name = 'price_history'
-                              AND column_name IN ('hours_to_cutoff', 'market_type')
+                              AND column_name IN ('hours_to_cutoff', 'market_type', 'side')
                         """)
                         found = [r[0] for r in cur.fetchall()]
                         results["columns_present"] = found
@@ -6374,8 +6377,9 @@ class Handler(BaseHTTPRequestHandler):
 
             all_ok = (results.get("add_hours_to_cutoff") == "ok"
                       and results.get("add_market_type") == "ok"
+                      and results.get("add_side") == "ok"
                       and isinstance(results.get("columns_present"), list)
-                      and set(results["columns_present"]) == {"hours_to_cutoff", "market_type"})
+                      and set(results["columns_present"]) == {"hours_to_cutoff", "market_type", "side"})
             self.send_json({"ok": all_ok, "results": results})
 
         elif path == "/debug/price-history":
@@ -6439,10 +6443,15 @@ class Handler(BaseHTTPRequestHandler):
                         sample_path = []
                         if row:
                             tk = row[0]
+                            # Post-fix rows: side='yes' + non-negative HTC gives one
+                            # clean series. Pre-fix rows (side NULL) are excluded —
+                            # they contain unmarked YES/NO pairs and cross-date junk.
                             cur.execute("""
                                 SELECT scan_ts, hours_to_cutoff, yes_ask, model_prob, net_gap_c
                                 FROM price_history
                                 WHERE ticker = %s
+                                  AND side = 'yes'
+                                  AND hours_to_cutoff >= 0
                                 ORDER BY scan_ts
                             """, (tk,))
                             sample_path = [
@@ -6680,9 +6689,20 @@ def _price_history_log(city_key, fc, markets):
             if not m.get("ticker"): continue
             _mtype = m.get("market_type", "high")
             _is_low = _mtype == "low"
+            _row_date = m.get("target_date") or fc.get("target_date")
+            # Cross-date guard (HIGH rows only): the Kalshi series fetch returns
+            # ALL open dates, but HTC and model_prob are computed for THIS scan's
+            # target date. A JUL11 bracket logged during a JUL10-d0 pass gets
+            # negative HTC and null model_prob — junk interleaved into the price
+            # path. Skip any high bracket whose ticker date isn't this scan's date.
+            # (Low rows are exempt: they carry per-row dates by design, unscored.)
+            if not _is_low:
+                _td = m.get("ticker_date")
+                if _td and str(_td) != str(_row_date):
+                    continue
             rows.append((
                 city_key,
-                m.get("target_date") or fc.get("target_date"),
+                _row_date,
                 fc.get("horizon"),
                 m["ticker"],
                 m.get("bracket_label"),
@@ -6703,6 +6723,7 @@ def _price_history_log(city_key, fc, markets):
                 m.get("grade"),
                 m.get("hours_to_cutoff"),
                 _mtype,
+                m.get("side", "yes"),
             ))
         if not rows: return
         with conn.cursor() as cur:
@@ -6711,8 +6732,8 @@ def _price_history_log(city_key, fc, markets):
                 (city, target_date, horizon, ticker, bracket_label,
                  lo_temp, hi_temp, yes_ask, yes_bid, volume_24h,
                  open_interest, mu, gfs_high, ecmwf_high, sigma,
-                 model_prob, net_gap_c, grade, hours_to_cutoff, market_type)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                 model_prob, net_gap_c, grade, hours_to_cutoff, market_type, side)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, rows)
         conn.commit()
         conn.close()
