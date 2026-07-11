@@ -6556,6 +6556,49 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
+        elif path == "/admin/export-settled":
+            # CSV export of ALL settled calibration rows (every grade, every side).
+            # This is the dataset for the offline parameter sweep: re-scoring every
+            # bracket under alternative sigmas/thresholds/rules against real outcomes.
+            # Download in browser, upload to analysis.
+            try:
+                conn = get_db()
+                if not conn:
+                    self.send_json({"ok": False, "error": "No DB"})
+                else:
+                    cols = ["scan_ts", "city", "target_date", "horizon", "ticker",
+                            "bracket_label", "lo_temp", "hi_temp", "grade", "side",
+                            "model_prob", "yes_ask", "yes_bid", "spread_c",
+                            "mu", "sigma", "gap_c", "net_gap_c", "edge_ratio",
+                            "kelly_frac", "kelly_size", "hours_to_cutoff",
+                            "mkt_rank_conf", "gfs_high", "ecmwf_high", "model_spread",
+                            "is_tail_bet", "book_limited", "is_combo",
+                            "volume_24h", "open_interest",
+                            "settled_temp", "settled_correct"]
+                    with conn.cursor() as cur:
+                        cur.execute(f"""
+                            SELECT {', '.join(cols)}
+                            FROM calibration_snapshots
+                            WHERE settled_temp IS NOT NULL
+                            ORDER BY scan_ts
+                        """)
+                        import io, csv as _csv
+                        buf = io.StringIO()
+                        w = _csv.writer(buf)
+                        w.writerow(cols)
+                        for r in cur.fetchall():
+                            w.writerow(["" if v is None else v for v in r])
+                    conn.close()
+                    body = buf.getvalue().encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/csv")
+                    self.send_header("Content-Disposition", "attachment; filename=settled_calibration.csv")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
         elif path == "/debug/results":
             # Full paper-trade analysis in one GET call. No auth needed — read-only.
             # Returns everything needed to evaluate model edge and live-trading readiness:
@@ -6899,6 +6942,106 @@ def _price_history_log(city_key, fc, markets):
         print(f"  ⚠️  _price_history_log error: {e}")
 
 
+_BOOK_TABLE_READY = False
+
+def _book_snapshot_log(city_key, fc, signals, max_fetches=12):
+    """
+    Capture full orderbook depth for actionable signals — the dataset needed to
+    backtest walk-the-book sizing (multiple fill levels beyond top-of-book).
+
+    Stores the RAW orderbook JSON (both 'yes' and 'no' arrays) deliberately —
+    no interpretation at capture time. Kalshi /orderbook shows resting limit
+    orders only (market-maker quotes appear only in /markets BBO), so this
+    depth is a CONSERVATIVE LOWER BOUND on true fillable size. The BBO fields
+    from the scan are stored alongside for comparison.
+
+    Only fetches for actionable (A/B) signals, capped at max_fetches per call
+    to respect Kalshi rate limits.
+    """
+    global _BOOK_TABLE_READY
+    try:
+        conn = get_db()
+        if not conn: return
+        # Lazy table creation with autocommit — immune to the ensure_tables()
+        # single-transaction rollback problem.
+        if not _BOOK_TABLE_READY:
+            try:
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS book_snapshots (
+                            id BIGSERIAL PRIMARY KEY,
+                            scan_ts TIMESTAMPTZ DEFAULT NOW(),
+                            city TEXT NOT NULL,
+                            ticker TEXT NOT NULL,
+                            target_date DATE,
+                            side TEXT,
+                            grade TEXT,
+                            model_prob NUMERIC(6,4),
+                            mu NUMERIC(6,2),
+                            sigma NUMERIC(6,3),
+                            net_gap_c INTEGER,
+                            hours_to_cutoff NUMERIC(5,1),
+                            bbo_yes_ask NUMERIC(6,4),
+                            bbo_yes_bid NUMERIC(6,4),
+                            bbo_ask_size INTEGER,
+                            orderbook_json TEXT
+                        )
+                    """)
+                    cur.execute("""
+                        CREATE INDEX IF NOT EXISTS book_snapshots_ticker_ts_idx
+                        ON book_snapshots (ticker, scan_ts DESC)
+                    """)
+                conn.autocommit = False
+                _BOOK_TABLE_READY = True
+            except Exception as e:
+                print(f"  ⚠️  book_snapshots table create failed: {e}")
+                conn.close()
+                return
+
+        fetched = 0
+        rows = []
+        for m in signals:
+            if fetched >= max_fetches: break
+            if not m.get("ticker") or m.get("grade") not in ("A", "B"): continue
+            ticker = m["ticker"]
+            if ticker.startswith("COMBO:"): continue  # combos have no single book
+            try:
+                r = requests.get(
+                    f"{KALSHI_BASE}/markets/{ticker}/orderbook",
+                    headers=kalshi_auth_headers("GET", f"/trade-api/v2/markets/{ticker}/orderbook"),
+                    timeout=6
+                )
+                fetched += 1
+                if not r.ok: continue
+                ob = r.json().get("orderbook", {})
+                rows.append((
+                    city_key, ticker,
+                    m.get("target_date") or fc.get("target_date"),
+                    m.get("side", "yes"), m.get("grade"),
+                    m.get("model_prob"), m.get("mu"), m.get("sigma"),
+                    m.get("net_gap_c"), m.get("hours_to_cutoff"),
+                    m.get("yes_ask"), m.get("yes_bid"), m.get("ask_size"),
+                    json.dumps(ob),
+                ))
+            except Exception:
+                continue
+
+        if rows:
+            with conn.cursor() as cur:
+                cur.executemany("""
+                    INSERT INTO book_snapshots
+                    (city, ticker, target_date, side, grade, model_prob, mu, sigma,
+                     net_gap_c, hours_to_cutoff, bbo_yes_ask, bbo_yes_bid,
+                     bbo_ask_size, orderbook_json)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                """, rows)
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"  ⚠️  _book_snapshot_log error: {e}")
+
+
 def _paper_trade_log(city_key, fc, markets):
     """
     Log A-grade signals as paper trades (bet tracking) AND log all grades
@@ -7090,6 +7233,14 @@ def _run_background_scan(full=True):
                                    if (m.get("hours_to_cutoff") is not None
                                        and m.get("hours_to_cutoff") <= _FINE_LOG_HTC_MAX)]
                     _price_history_log(city_key, fc, ph_mkts)
+                    # Book depth capture for actionable signals — every tick.
+                    # Walk-the-book backtest data: depth at multiple fill levels.
+                    _actionable = [m for m in all_mkts
+                                   if m.get("grade") in ("A", "B")
+                                   and m.get("hours_to_cutoff") is not None
+                                   and m.get("hours_to_cutoff") >= 0]
+                    if _actionable:
+                        _book_snapshot_log(city_key, fc, _actionable)
                     # LOW market price-only capture — full ticks only (4hr cadence
                     # is enough for efficiency/liquidity analysis; no scoring).
                     if full and result.get("low_price_rows"):
