@@ -6556,6 +6556,164 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
+        elif path == "/debug/results":
+            # Full paper-trade analysis in one GET call. No auth needed — read-only.
+            # Returns everything needed to evaluate model edge and live-trading readiness:
+            #   - Settled counts + EV/$ by grade, HTC bucket, city, side, mkt_rank_conf
+            #   - Unsettled A-grade signals (what model is currently betting)
+            #   - Calibration snapshot counts by grade
+            try:
+                conn = get_db()
+                if not conn:
+                    self.send_json({"ok": False, "error": "No DB"})
+                else:
+                    out = {}
+                    with conn.cursor() as cur:
+
+                        # 1. Overall settled summary
+                        cur.execute("""
+                            SELECT
+                                COUNT(*) as n,
+                                SUM(CASE WHEN settled_correct THEN 1 ELSE 0 END) as wins,
+                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) as win_rate,
+                                ROUND(SUM(CASE WHEN settled_correct
+                                    THEN (1 - yes_ask) ELSE -yes_ask END)::numeric, 2) as total_pnl,
+                                ROUND(SUM(CASE WHEN settled_correct
+                                    THEN (1 - yes_ask) ELSE -yes_ask END)::numeric
+                                    / NULLIF(SUM(yes_ask)::numeric, 0), 3) as ev_per_dollar,
+                                ROUND(AVG(yes_ask)::numeric, 3) as avg_ask,
+                                ROUND(AVG(net_gap_c)::numeric, 1) as avg_net_gap_c
+                            FROM paper_trades
+                            WHERE settled_temp IS NOT NULL
+                        """)
+                        r = cur.fetchone()
+                        out["overall"] = {"n": r[0], "wins": r[1], "win_rate": float(r[2] or 0),
+                                          "total_pnl": float(r[3] or 0), "ev_per_dollar": float(r[4] or 0),
+                                          "avg_ask": float(r[5] or 0), "avg_net_gap_c": float(r[6] or 0)}
+
+                        # 2. By grade + side
+                        cur.execute("""
+                            SELECT grade, COALESCE(side,'yes') as side,
+                                COUNT(*) as n,
+                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) as win_rate,
+                                ROUND(SUM(CASE WHEN settled_correct
+                                    THEN (1 - yes_ask) ELSE -yes_ask END)::numeric
+                                    / NULLIF(SUM(yes_ask)::numeric, 0), 3) as ev_per_dollar,
+                                ROUND(AVG(net_gap_c)::numeric, 1) as avg_net_gap_c
+                            FROM paper_trades
+                            WHERE settled_temp IS NOT NULL
+                            GROUP BY grade, side
+                            ORDER BY grade, side
+                        """)
+                        out["by_grade_side"] = [{"grade": r[0], "side": r[1], "n": r[2],
+                            "win_rate": float(r[3] or 0), "ev_per_dollar": float(r[4] or 0),
+                            "avg_net_gap_c": float(r[5] or 0)} for r in cur.fetchall()]
+
+                        # 3. By HTC bucket (YES side only — NO-side HTC not yet validated)
+                        cur.execute("""
+                            SELECT
+                                CASE
+                                    WHEN hours_to_cutoff > 18  THEN '>18hr'
+                                    WHEN hours_to_cutoff > 12  THEN '12-18hr'
+                                    WHEN hours_to_cutoff > 6   THEN '6-12hr'
+                                    WHEN hours_to_cutoff >= 0  THEN '<6hr'
+                                    ELSE 'unknown'
+                                END as htc_bucket,
+                                COUNT(*) as n,
+                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) as win_rate,
+                                ROUND(SUM(CASE WHEN settled_correct
+                                    THEN (1 - yes_ask) ELSE -yes_ask END)::numeric
+                                    / NULLIF(SUM(yes_ask)::numeric, 0), 3) as ev_per_dollar
+                            FROM paper_trades
+                            WHERE settled_temp IS NOT NULL
+                              AND COALESCE(side, 'yes') = 'yes'
+                            GROUP BY htc_bucket
+                            ORDER BY htc_bucket
+                        """)
+                        out["by_htc_yes"] = [{"bucket": r[0], "n": r[1],
+                            "win_rate": float(r[2] or 0), "ev_per_dollar": float(r[3] or 0)}
+                            for r in cur.fetchall()]
+
+                        # 4. By city (YES settled, sorted by EV/$ descending)
+                        cur.execute("""
+                            SELECT city,
+                                COUNT(*) as n,
+                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) as win_rate,
+                                ROUND(SUM(CASE WHEN settled_correct
+                                    THEN (1 - yes_ask) ELSE -yes_ask END)::numeric
+                                    / NULLIF(SUM(yes_ask)::numeric, 0), 3) as ev_per_dollar,
+                                ROUND(AVG(net_gap_c)::numeric, 1) as avg_net_gap_c
+                            FROM paper_trades
+                            WHERE settled_temp IS NOT NULL
+                              AND COALESCE(side, 'yes') = 'yes'
+                            GROUP BY city
+                            HAVING COUNT(*) >= 3
+                            ORDER BY ev_per_dollar DESC
+                        """)
+                        out["by_city"] = [{"city": r[0], "n": r[1],
+                            "win_rate": float(r[2] or 0), "ev_per_dollar": float(r[3] or 0),
+                            "avg_net_gap_c": float(r[4] or 0)} for r in cur.fetchall()]
+
+                        # 5. By mkt_rank_conf (YES settled)
+                        cur.execute("""
+                            SELECT mkt_rank_conf,
+                                COUNT(*) as n,
+                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3) as win_rate,
+                                ROUND(SUM(CASE WHEN settled_correct
+                                    THEN (1 - yes_ask) ELSE -yes_ask END)::numeric
+                                    / NULLIF(SUM(yes_ask)::numeric, 0), 3) as ev_per_dollar
+                            FROM paper_trades
+                            WHERE settled_temp IS NOT NULL
+                              AND COALESCE(side, 'yes') = 'yes'
+                            GROUP BY mkt_rank_conf
+                            ORDER BY ev_per_dollar DESC
+                        """)
+                        out["by_rank_conf"] = [{"rank": r[0], "n": r[1],
+                            "win_rate": float(r[2] or 0), "ev_per_dollar": float(r[3] or 0)}
+                            for r in cur.fetchall()]
+
+                        # 6. Unsettled A-grade signals (active paper positions)
+                        cur.execute("""
+                            SELECT city, ticker, COALESCE(side,'yes') as side,
+                                   yes_ask, net_gap_c, hours_to_cutoff, mkt_rank_conf, scan_ts
+                            FROM paper_trades
+                            WHERE settled_temp IS NULL
+                              AND grade = 'A'
+                            ORDER BY scan_ts DESC
+                            LIMIT 20
+                        """)
+                        out["active_positions"] = [{"city": r[0], "ticker": r[1], "side": r[2],
+                            "yes_ask": float(r[3] or 0), "net_gap_c": r[4],
+                            "htc": float(r[5]) if r[5] else None,
+                            "rank": r[6], "scan_ts": str(r[7])} for r in cur.fetchall()]
+
+                        # 7. Calibration snapshot summary (all grades, for sample-size check)
+                        cur.execute("""
+                            SELECT grade, COALESCE(side,'yes') as side, COUNT(*) as n
+                            FROM calibration_snapshots
+                            GROUP BY grade, side
+                            ORDER BY side, grade
+                        """)
+                        out["calibration_counts"] = [{"grade": r[0], "side": r[1], "n": r[2]}
+                                                      for r in cur.fetchall()]
+
+                        # 8. Settled count by date (to see accumulation pace)
+                        cur.execute("""
+                            SELECT settled_ts::date as day, COUNT(*) as n
+                            FROM paper_trades
+                            WHERE settled_temp IS NOT NULL
+                            GROUP BY day
+                            ORDER BY day DESC
+                            LIMIT 14
+                        """)
+                        out["settlement_pace"] = [{"day": str(r[0]), "n": r[1]}
+                                                   for r in cur.fetchall()]
+
+                    conn.close()
+                    self.send_json({"ok": True, "results": out})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
         elif path == "/debug/cal-log":
             # Returns last scan result for calibration_snapshots debugging
             try:
