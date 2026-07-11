@@ -196,7 +196,9 @@ CITIES = {
 # from bet placement only. Remove a city once 30+ settled calibration rows exist
 # and bias is confirmed trustworthy.
 AUTO_TRADER_CITY_BLACKLIST = {
-    "phoenix",   # Systematic April cold bias — 3 consecutive losses, models ~2-3°F cold
+    # Emptied 2026-07-11 — per-city bias/sigma calibration supersedes point
+    # blacklisting. Phoenix's "April cold bias" is now handled by the rolling
+    # bias correction (Phoenix was the top EV/$ city at +51% in OOS validation).
 }
 
 TEMP_CITIES = {
@@ -323,6 +325,88 @@ TEMP_CITIES = {
 
 # ── TEMP BIAS CACHE (per-station, populated by /temp/calibrate) ───────────────
 _TEMP_BIAS_CACHE   = {}   # city_key -> {"gfs_bias": float, "ecmwf_bias": float, "σ_d1": float, "σ_d0": float}
+
+# ── MODEL CALIBRATION (per-city bias + sigma factor from settled residuals) ───
+# Validated 2026-07-11 on 4,490 settled YES rows, walk-forward:
+#   corrected model = +47% train / +49% test EV/$ vs +18%/+1% uncorrected.
+# Root causes fixed: sigma ~65% too narrow globally (z-std 1.65), and per-city
+# mu bias (Miami +3.5°F, Houston +2.6, NYC -2.4, etc).
+# Corrections recomputed from calibration_snapshots on a rolling 60-day window
+# with shrinkage toward global (w = n/(n+20)), cached 6h, clamped for safety.
+_MODEL_CAL_CACHE = {"ts": 0.0, "global": None, "cities": {}}
+_MODEL_CAL_TTL   = 6 * 3600
+_MODEL_CAL_BIAS_CLAMP  = 4.0          # max |mu correction| in °F
+_MODEL_CAL_SIGF_CLAMP  = (0.8, 2.5)   # sigma factor bounds
+
+def _load_model_calibration(force=False):
+    """
+    Compute per-city (bias_c, sig_f) from settled calibration residuals.
+    One residual per (city, target_date, horizon), latest snapshot:
+        resid = settled_temp - mu ;  z = resid / sigma
+    bias_c = shrunk mean resid ; sig_f = shrunk std of z.
+    Returns the cache dict {"global": {...}, "cities": {city: {...}}}.
+    Fail-open: on any error returns whatever is cached (identity if nothing).
+    """
+    import time as _t
+    if (not force and _MODEL_CAL_CACHE["global"] is not None
+            and _t.time() - _MODEL_CAL_CACHE["ts"] < _MODEL_CAL_TTL):
+        return _MODEL_CAL_CACHE
+    try:
+        conn = get_db()
+        if not conn:
+            return _MODEL_CAL_CACHE
+        with conn.cursor() as cur:
+            cur.execute("""
+                WITH mkts AS (
+                    SELECT DISTINCT ON (city, target_date, horizon)
+                        city, (settled_temp - mu) AS resid,
+                        (settled_temp - mu) / sigma AS z
+                    FROM calibration_snapshots
+                    WHERE settled_temp IS NOT NULL AND mu IS NOT NULL
+                      AND sigma IS NOT NULL AND sigma > 0
+                      AND COALESCE(side, 'yes') = 'yes'
+                      AND scan_ts > NOW() - INTERVAL '60 days'
+                    ORDER BY city, target_date, horizon, scan_ts DESC
+                )
+                SELECT city, COUNT(*) AS n,
+                       AVG(resid) AS bias,
+                       COALESCE(STDDEV_SAMP(z), 1.0) AS z_std
+                FROM mkts
+                GROUP BY city
+            """)
+            rows = cur.fetchall()
+        conn.close()
+        if not rows:
+            return _MODEL_CAL_CACHE
+
+        ns     = [float(r[1]) for r in rows]
+        biases = [float(r[2] or 0) for r in rows]
+        zstds  = [float(r[3] or 1) for r in rows]
+        n_tot  = sum(ns)
+        g_bias = sum(n * b for n, b in zip(ns, biases)) / n_tot
+        # pooled z-std across cities
+        g_zstd = (sum((n - 1) * (s ** 2) for n, s in zip(ns, zstds))
+                  / max(1.0, sum(n - 1 for n in ns))) ** 0.5
+
+        cities = {}
+        for (city, n, bias, zstd), nn in zip(rows, ns):
+            w = nn / (nn + 20.0)
+            b = w * float(bias or 0) + (1 - w) * g_bias
+            f = w * float(zstd or 1) + (1 - w) * g_zstd
+            b = max(-_MODEL_CAL_BIAS_CLAMP, min(_MODEL_CAL_BIAS_CLAMP, b))
+            f = max(_MODEL_CAL_SIGF_CLAMP[0], min(_MODEL_CAL_SIGF_CLAMP[1], f))
+            cities[city] = {"bias_c": round(b, 2), "sig_f": round(f, 3), "n": int(nn)}
+
+        _MODEL_CAL_CACHE.update({
+            "ts": _t.time(),
+            "global": {"bias_c": round(max(-_MODEL_CAL_BIAS_CLAMP, min(_MODEL_CAL_BIAS_CLAMP, g_bias)), 2),
+                       "sig_f": round(max(_MODEL_CAL_SIGF_CLAMP[0], min(_MODEL_CAL_SIGF_CLAMP[1], g_zstd)), 3),
+                       "n": int(n_tot)},
+            "cities": cities,
+        })
+    except Exception as e:
+        print(f"  ⚠️  model calibration load failed: {e}")
+    return _MODEL_CAL_CACHE
 _TEMP_SNAPSHOT_TTL  = 180   # 3 min cache — keeps markets fresh, avoids stale settled data
 _TEMP_SCAN_CACHE   = {}   # city_key -> {"ts": float, "result": dict}
 
@@ -748,6 +832,17 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
     if spread_hi and spread_hi > 0:
         sigma = round(_sqrt(sigma**2 + (spread_hi / 2)**2), 2)
 
+    # ── Per-city model calibration (validated OOS 2026-07-11) ─────────────
+    # Residuals were measured against the fully-adjusted sigma above, so the
+    # factor applies HERE, after every other sigma adjustment. Bias adds to mu.
+    # HIGH markets only — no settled low data exists to calibrate lows.
+    if market_type == "high" and mu is not None:
+        _cal = _load_model_calibration()
+        _cc = _cal["cities"].get(city_key) or _cal["global"]
+        if _cc:
+            mu    = round(mu + _cc["bias_c"], 2)
+            sigma = round(sigma * _cc["sig_f"], 2)
+
     if mu is None:
         for m in markets:
             m["model_prob"] = None; m["gap_c"] = 0; m["net_gap_c"] = 0
@@ -848,23 +943,14 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
             analyzed.append(m)
             continue
 
-        # Compute probability as weighted average of per-model probabilities.
-        # This correctly handles cases where models straddle the bracket boundary.
-        # Blending forecasts first then computing P() loses that information.
-        # e.g. GFS=54.5°F (below 56°F) and ECMWF=57.3°F (above 56°F) should give
-        # ~50% probability, not 65% from the blended average of 55.9°F.
-        mu_gfs_v   = forecast.get("gfs_high")   if market_type == "high" else forecast.get("gfs_low")
-        mu_ecmwf_v = forecast.get("ecmwf_high") if market_type == "high" else forecast.get("ecmwf_low")
-        sigma_base = forecast.get("sigma", 2.0)
-
-        if mu_gfs_v is not None and mu_ecmwf_v is not None:
-            # Use per-model sigma (base only, no spread inflation — spread IS the disagreement)
-            p_gfs   = bracket_prob(lo, hi, mu_gfs_v,   sigma_base)
-            p_ecmwf = bracket_prob(lo, hi, mu_ecmwf_v, sigma_base)
-            prob    = round((p_gfs + p_ecmwf) / 2, 4)
-        else:
-            # Fall back to blended mu with spread-inflated sigma
-            prob = bracket_prob(lo, hi, mu, sigma)
+        # Probability from the CORRECTED blended model (mu + bias, sigma × factor).
+        # NOTE: this supersedes the previous per-model probability averaging
+        # (GFS/ECMWF straddle handling). The corrected blended path is what was
+        # validated walk-forward on 4,490 settled rows (+49% test EV/$); the
+        # per-model average used raw uncorrected mus and sigma_base, bypassing
+        # calibration entirely. Model disagreement is still captured — spread
+        # inflates sigma in quadrature upstream.
+        prob = bracket_prob(lo, hi, mu, sigma)
 
         # Account for 2% Kalshi taker fee on winning contracts
         # Effective probability = prob * 0.98 (fee reduces payout from $1 to $0.98)
@@ -6553,6 +6639,24 @@ class Handler(BaseHTTPRequestHandler):
                         "alltime_by_side": alltime_by_side,
                         "actionable_no_signals_recent": actionable_no,
                     })
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/admin/recalibrate":
+            # Force recompute of per-city model calibration (bias + sigma factor)
+            # from settled calibration_snapshots and return the live table.
+            # Runs automatically every 6h; this endpoint forces + shows it.
+            try:
+                cal = _load_model_calibration(force=True)
+                self.send_json({
+                    "ok": cal["global"] is not None,
+                    "computed_at": cal["ts"],
+                    "global": cal["global"],
+                    "cities": cal["cities"],
+                    "note": "mu_corrected = mu + bias_c ; sigma_corrected = sigma * sig_f. "
+                            "Shrunk toward global by n/(n+20), 60-day rolling window, "
+                            "clamps: |bias|<=4.0F, sig_f in [0.8, 2.5].",
+                })
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
