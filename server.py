@@ -333,7 +333,7 @@ _TEMP_BIAS_CACHE   = {}   # city_key -> {"gfs_bias": float, "ecmwf_bias": float,
 # mu bias (Miami +3.5°F, Houston +2.6, NYC -2.4, etc).
 # Corrections recomputed from calibration_snapshots on a rolling 60-day window
 # with shrinkage toward global (w = n/(n+20)), cached 6h, clamped for safety.
-_MODEL_CAL_CACHE = {"ts": 0.0, "global": None, "cities": {}}
+_MODEL_CAL_CACHE = {"ts": 0.0, "global": None, "cities": {}, "cities_h": {}, "global_h": {}}
 _MODEL_CAL_TTL   = 6 * 3600
 _MODEL_CAL_BIAS_CLAMP  = 4.0          # max |mu correction| in °F
 _MODEL_CAL_SIGF_CLAMP  = (0.8, 2.5)   # sigma factor bounds
@@ -359,7 +359,7 @@ def _load_model_calibration(force=False):
             cur.execute("""
                 WITH mkts AS (
                     SELECT DISTINCT ON (city, target_date, horizon)
-                        city, (settled_temp - mu) AS resid,
+                        city, horizon, (settled_temp - mu) AS resid,
                         (settled_temp - mu) / sigma AS z
                     FROM calibration_snapshots
                     WHERE settled_temp IS NOT NULL AND mu IS NOT NULL
@@ -370,41 +370,72 @@ def _load_model_calibration(force=False):
                       AND scan_ts > NOW() - INTERVAL '60 days'
                     ORDER BY city, target_date, horizon, scan_ts DESC
                 )
-                SELECT city, COUNT(*) AS n,
+                SELECT city, horizon, COUNT(*) AS n,
                        AVG(resid) AS bias,
                        COALESCE(STDDEV_SAMP(z), 1.0) AS z_std
                 FROM mkts
-                GROUP BY city
+                GROUP BY city, horizon
             """)
             rows = cur.fetchall()
         conn.close()
         if not rows:
             return _MODEL_CAL_CACHE
 
-        ns     = [float(r[1]) for r in rows]
-        biases = [float(r[2] or 0) for r in rows]
-        zstds  = [float(r[3] or 1) for r in rows]
-        n_tot  = sum(ns)
-        g_bias = sum(n * b for n, b in zip(ns, biases)) / n_tot
-        # pooled z-std across cities
-        g_zstd = (sum((n - 1) * (s ** 2) for n, s in zip(ns, zstds))
-                  / max(1.0, sum(n - 1 for n in ns))) ** 0.5
-
-        cities = {}
-        for (city, n, bias, zstd), nn in zip(rows, ns):
-            w = nn / (nn + 20.0)
-            b = w * float(bias or 0) + (1 - w) * g_bias
-            f = w * float(zstd or 1) + (1 - w) * g_zstd
+        def _clamp(b, f):
             b = max(-_MODEL_CAL_BIAS_CLAMP, min(_MODEL_CAL_BIAS_CLAMP, b))
             f = max(_MODEL_CAL_SIGF_CLAMP[0], min(_MODEL_CAL_SIGF_CLAMP[1], f))
-            cities[city] = {"bias_c": round(b, 2), "sig_f": round(f, 3), "n": int(nn)}
+            return round(b, 2), round(f, 3)
 
+        def _pooled(subset):
+            """n-weighted bias + pooled z-std over [(n, bias, zstd), ...]."""
+            ns = [s[0] for s in subset]
+            n_tot = sum(ns)
+            if n_tot == 0: return None
+            gb = sum(n * b for n, b, _ in subset) / n_tot
+            gz = (sum((n - 1) * (z ** 2) for n, _, z in subset)
+                  / max(1.0, sum(n - 1 for n in ns))) ** 0.5
+            return n_tot, gb, gz
+
+        stats = [(str(r[0]), str(r[1] or "d1"), float(r[2]), float(r[3] or 0), float(r[4] or 1))
+                 for r in rows]
+
+        # Global pooled (all cities, all horizons)
+        n_tot, g_bias, g_zstd = _pooled([(n, b, z) for _, _, n, b, z in stats])
+
+        # Per-horizon globals (d0 forecasts are tighter than d1 — split shrink targets)
+        global_h = {}
+        for h in ("d0", "d1"):
+            sub = [(n, b, z) for _, hh, n, b, z in stats if hh == h]
+            if sub:
+                nh, bh, zh = _pooled(sub)
+                bb, ff = _clamp(bh, zh)
+                global_h[h] = {"bias_c": bb, "sig_f": ff, "n": int(nh)}
+
+        # Per (city, horizon): shrunk toward that horizon's global
+        cities_h = {}
+        for city, h, n, b, z in stats:
+            tgt = global_h.get(h) or {"bias_c": g_bias, "sig_f": g_zstd}
+            w = n / (n + 20.0)
+            bb, ff = _clamp(w * b + (1 - w) * tgt["bias_c"],
+                            w * z + (1 - w) * tgt["sig_f"])
+            cities_h[f"{city}|{h}"] = {"bias_c": bb, "sig_f": ff, "n": int(n)}
+
+        # Per-city pooled (fallback when a horizon has no data)
+        cities = {}
+        for city in {s[0] for s in stats}:
+            sub = [(n, b, z) for c, _, n, b, z in stats if c == city]
+            nc, bc, zc = _pooled(sub)
+            w = nc / (nc + 20.0)
+            bb, ff = _clamp(w * bc + (1 - w) * g_bias, w * zc + (1 - w) * g_zstd)
+            cities[city] = {"bias_c": bb, "sig_f": ff, "n": int(nc)}
+
+        gb_c, gf_c = _clamp(g_bias, g_zstd)
         _MODEL_CAL_CACHE.update({
             "ts": _t.time(),
-            "global": {"bias_c": round(max(-_MODEL_CAL_BIAS_CLAMP, min(_MODEL_CAL_BIAS_CLAMP, g_bias)), 2),
-                       "sig_f": round(max(_MODEL_CAL_SIGF_CLAMP[0], min(_MODEL_CAL_SIGF_CLAMP[1], g_zstd)), 3),
-                       "n": int(n_tot)},
+            "global": {"bias_c": gb_c, "sig_f": gf_c, "n": int(n_tot)},
+            "global_h": global_h,
             "cities": cities,
+            "cities_h": cities_h,
         })
     except Exception as e:
         print(f"  ⚠️  model calibration load failed: {e}")
@@ -840,7 +871,11 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
     # HIGH markets only — no settled low data exists to calibrate lows.
     if market_type == "high" and mu is not None:
         _cal = _load_model_calibration()
-        _cc = _cal["cities"].get(city_key) or _cal["global"]
+        _h = forecast.get("horizon", "d1")
+        _cc = (_cal["cities_h"].get(f"{city_key}|{_h}")
+               or _cal["cities"].get(city_key)
+               or _cal["global_h"].get(_h)
+               or _cal["global"])
         if _cc:
             mu    = round(mu + _cc["bias_c"], 2)
             sigma = round(sigma * _cc["sig_f"], 2)
@@ -6654,9 +6689,12 @@ class Handler(BaseHTTPRequestHandler):
                     "ok": cal["global"] is not None,
                     "computed_at": cal["ts"],
                     "global": cal["global"],
+                    "global_by_horizon": cal.get("global_h", {}),
                     "cities": cal["cities"],
-                    "note": "mu_corrected = mu + bias_c ; sigma_corrected = sigma * sig_f. "
-                            "Shrunk toward global by n/(n+20), 60-day rolling window, "
+                    "cities_by_horizon": cal.get("cities_h", {}),
+                    "note": "Lookup chain: (city|horizon) -> city -> horizon-global -> global. "
+                            "mu_corrected = mu + bias_c ; sigma_corrected = sigma * sig_f. "
+                            "Shrunk toward horizon-global by n/(n+20), 60-day rolling window, "
                             "clamps: |bias|<=4.0F, sig_f in [0.8, 2.5].",
                 })
             except Exception as e:
@@ -6857,6 +6895,52 @@ class Handler(BaseHTTPRequestHandler):
                         """)
                         out["settlement_pace"] = [{"day": str(r[0]), "n": r[1]}
                                                    for r in cur.fetchall()]
+
+                        # 9. CORRECTED MODEL FORWARD TEST — YES A-grades scanned
+                        # after the v2 (bias+sigma) deploy. This is the go/no-go
+                        # number for live trading: compare to +48% backtest.
+                        _V2 = "2026-07-12"
+                        cur.execute(f"""
+                            SELECT COUNT(*) as n,
+                                ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0.0 END)::numeric, 3),
+                                ROUND(SUM(CASE WHEN settled_correct
+                                    THEN (0.98 - yes_ask) ELSE -yes_ask END)::numeric, 2),
+                                ROUND(SUM(CASE WHEN settled_correct
+                                    THEN (0.98 - yes_ask) ELSE -yes_ask END)::numeric
+                                    / NULLIF(SUM(yes_ask)::numeric, 0), 3),
+                                ROUND(AVG(yes_ask)::numeric, 3)
+                            FROM paper_trades
+                            WHERE settled_temp IS NOT NULL
+                              AND COALESCE(side,'yes') = 'yes'
+                              AND grade = 'A'
+                              AND scan_ts >= '{_V2}'
+                        """)
+                        r = cur.fetchone()
+                        fwd = {"since": _V2, "n": r[0], "win_rate": float(r[1] or 0),
+                               "pnl_net_fee": float(r[2] or 0), "ev_per_dollar_net": float(r[3] or 0),
+                               "avg_ask": float(r[4] or 0)}
+                        # unsettled still in flight
+                        cur.execute(f"""
+                            SELECT COUNT(*) FROM paper_trades
+                            WHERE settled_temp IS NULL AND COALESCE(side,'yes')='yes'
+                              AND grade='A' AND scan_ts >= '{_V2}'
+                        """)
+                        fwd["unsettled_in_flight"] = cur.fetchone()[0]
+                        out["corrected_model_forward"] = fwd
+
+                        # 10. book_snapshots capture health
+                        try:
+                            cur.execute("""
+                                SELECT COUNT(*),
+                                       COUNT(*) FILTER (WHERE scan_ts > NOW() - INTERVAL '24 hours'),
+                                       COUNT(DISTINCT ticker)
+                                FROM book_snapshots
+                            """)
+                            r = cur.fetchone()
+                            out["book_snapshots"] = {"total": r[0], "last_24h": r[1],
+                                                     "distinct_tickers": r[2]}
+                        except Exception as _be:
+                            out["book_snapshots"] = {"error": str(_be)}
 
                     conn.close()
                     self.send_json({"ok": True, "results": out})
