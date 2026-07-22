@@ -1810,6 +1810,8 @@ _AT_CONFIG = {
     "min_volume":     200,
     "scan_interval":  300,   # seconds between scans
     "min_fill_dollars": 5.0, # skip execution if Kelly budget < this
+    "live_mode":      False, # False = simulate fills (no real orders); True = REAL Kalshi orders
+    "daily_cap_dollars": 25.0, # hard cap on real dollars spent per UTC day
 }
 
 
@@ -1855,6 +1857,69 @@ def at_flush_log_to_db():
         conn.close()
     except Exception:
         pass
+
+
+_LIVE_TABLE_READY = False
+
+def _live_trade_log(ticker, city, side, count, paper_ask_c, order_ask_c, cost,
+                    is_live, order_resp=None, grade=None, net_gap_c=None, htc=None):
+    """
+    Log every fill (real or simulated) with the slippage measurement:
+    slippage_c = order price - paper price (BBO at signal scan time).
+    This is THE dataset live trading exists to produce.
+    """
+    global _LIVE_TABLE_READY
+    try:
+        conn = get_db()
+        if not conn: return
+        if not _LIVE_TABLE_READY:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS live_trades (
+                        id BIGSERIAL PRIMARY KEY,
+                        ts TIMESTAMPTZ DEFAULT NOW(),
+                        ticker TEXT NOT NULL, city TEXT, side TEXT,
+                        count INTEGER, paper_ask_c INTEGER, order_ask_c INTEGER,
+                        slippage_c INTEGER, cost NUMERIC(10,2),
+                        is_live BOOLEAN, grade TEXT, net_gap_c INTEGER,
+                        hours_to_cutoff NUMERIC(5,1), order_resp TEXT,
+                        settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ
+                    )
+                """)
+            conn.autocommit = False
+            _LIVE_TABLE_READY = True
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO live_trades
+                (ticker, city, side, count, paper_ask_c, order_ask_c, slippage_c,
+                 cost, is_live, grade, net_gap_c, hours_to_cutoff, order_resp)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (ticker, city, side, count, paper_ask_c, order_ask_c,
+                  (order_ask_c - paper_ask_c) if (order_ask_c is not None and paper_ask_c is not None) else None,
+                  cost, is_live, grade, net_gap_c, htc,
+                  json.dumps(order_resp) if order_resp else None))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"  ⚠️  _live_trade_log error: {e}")
+
+
+def _live_spend_today():
+    """Real dollars spent today (UTC) — enforces daily_cap_dollars."""
+    try:
+        conn = get_db()
+        if not conn: return 0.0
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COALESCE(SUM(cost), 0) FROM live_trades
+                WHERE is_live = TRUE AND ts::date = CURRENT_DATE
+            """)
+            v = float(cur.fetchone()[0] or 0)
+        conn.close()
+        return v
+    except Exception:
+        return 999999.0  # fail-closed: if we can't read spend, treat cap as hit
 
 
 def at_place_order(ticker, side, count, yes_price_c):
@@ -2147,7 +2212,7 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
             else:
                 prob = _cdf(hi + 0.5) - _cdf(lo - 0.5)
 
-            gap_c      = round((prob - ask) * 100)
+            gap_c      = round((prob * 0.98 - ask) * 100)   # 2% Kalshi fee on payout
             net_gap_c  = max(0, gap_c - round(signal.get("spread_c", 1)))
             edge_ratio = round(net_gap_c / sigma, 3) if sigma > 0 else 0
 
@@ -2182,11 +2247,34 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
         # Convert dollars to contract count
         count = max(1, int(fill_sz / ask))
 
-        # Place the order
-        ok, order, err = at_place_order(ticker, "yes", count, ask_c)
-        if not ok:
-            at_log("ERR", f"Order failed for {ticker}: {err}", ticker=ticker, city=city_key)
-            break
+        # Daily cap check (real dollars only)
+        _is_live = bool(cfg.get("live_mode", False))
+        if _is_live:
+            _spent_today = _live_spend_today()
+            _cap = cfg.get("daily_cap_dollars", 25.0)
+            if _spent_today + (count * ask) > _cap:
+                at_log("SKIP", f"Daily cap: ${_spent_today:.2f} spent, cap ${_cap:.2f} — no more live orders today",
+                       ticker=ticker)
+                break
+
+        # Place the order — REAL only when live_mode; otherwise simulate the fill
+        _paper_ask_c = round(float(signal.get("yes_ask", ask)) * 100)
+        if _is_live:
+            ok, order, err = at_place_order(ticker, "yes", count, ask_c)
+            if not ok:
+                at_log("ERR", f"Order failed for {ticker}: {err}", ticker=ticker, city=city_key)
+                break
+        else:
+            ok, order, err = True, {"simulated": True}, None
+
+        _live_trade_log(ticker, city_key, "yes", count, _paper_ask_c, ask_c,
+                        round(count * ask, 2), _is_live, order_resp=order,
+                        grade=live_grade, net_gap_c=locals().get("net_gap_c", signal.get("net_gap_c")),
+                        htc=signal.get("hours_to_cutoff"))
+        at_log("FILL" if _is_live else "SIM",
+               f"{ticker} {count}x @ {ask_c}¢ (paper {_paper_ask_c}¢, slip {ask_c - _paper_ask_c:+d}¢)"
+               + ("" if _is_live else " [simulated]"),
+               ticker=ticker, city=city_key)
 
         cost = round(count * ask, 2)
         spent_this_ticker += cost
@@ -2343,7 +2431,7 @@ def at_load_config_from_db():
                 # Cast to correct type
                 orig = _AT_CONFIG[key]
                 if isinstance(orig, bool):
-                    _AT_CONFIG[key] = val == "true"
+                    _AT_CONFIG[key] = str(val).lower() in ("true", "1")
                 elif isinstance(orig, int):
                     _AT_CONFIG[key] = int(float(val))
                 elif isinstance(orig, float):
@@ -4933,6 +5021,99 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
+        elif path == "/auto-trader/go-live":
+            # ARM SWITCH — enables engine + REAL orders. Browser-friendly GET.
+            try:
+                _AT_CONFIG["enabled"] = True
+                _AT_CONFIG["live_mode"] = True
+                try:
+                    conn = get_db()
+                    if conn:
+                        conn.autocommit = True
+                        with conn.cursor() as cur:
+                            for k in ("enabled", "live_mode"):
+                                cur.execute("""
+                                    INSERT INTO auto_trader_config (key, value, updated_at)
+                                    VALUES (%s, 'true', NOW())
+                                    ON CONFLICT (key) DO UPDATE SET value='true', updated_at=NOW()
+                                """, (k,))
+                        conn.close()
+                except Exception:
+                    pass
+                start_auto_trader_scheduler()
+                at_log("LIVE", f"GO-LIVE armed — real orders ON, daily cap ${_AT_CONFIG.get('daily_cap_dollars', 25.0)}")
+                self.send_json({"ok": True, "enabled": True, "live_mode": True,
+                                "daily_cap": _AT_CONFIG.get("daily_cap_dollars", 25.0)})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/auto-trader/kill":
+            # KILL SWITCH — immediately disables engine + live mode, persists to DB.
+            try:
+                _AT_CONFIG["enabled"] = False
+                _AT_CONFIG["live_mode"] = False
+                try:
+                    conn = get_db()
+                    if conn:
+                        conn.autocommit = True
+                        with conn.cursor() as cur:
+                            for k in ("enabled", "live_mode"):
+                                cur.execute("""
+                                    INSERT INTO auto_trader_config (key, value, updated_at)
+                                    VALUES (%s, 'false', NOW())
+                                    ON CONFLICT (key) DO UPDATE SET value='false', updated_at=NOW()
+                                """, (k,))
+                        conn.close()
+                except Exception:
+                    pass
+                at_log("KILL", "Kill switch activated — engine and live mode OFF")
+                self.send_json({"ok": True, "enabled": False, "live_mode": False})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/debug/live":
+            # Live trading status: today's spend vs cap, recent fills with slippage.
+            try:
+                conn = get_db()
+                if not conn:
+                    self.send_json({"ok": False, "error": "No DB"})
+                else:
+                    out = {"live_mode": bool(_AT_CONFIG.get("live_mode", False)),
+                           "enabled": bool(_AT_CONFIG.get("enabled", False)),
+                           "daily_cap": _AT_CONFIG.get("daily_cap_dollars", 25.0)}
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT COALESCE(SUM(cost) FILTER (WHERE is_live), 0),
+                                   COUNT(*) FILTER (WHERE is_live),
+                                   COUNT(*) FILTER (WHERE NOT is_live)
+                            FROM live_trades WHERE ts::date = CURRENT_DATE
+                        """)
+                        r = cur.fetchone()
+                        out["spent_today"] = float(r[0]); out["live_fills_today"] = r[1]
+                        out["sim_fills_today"] = r[2]
+                        cur.execute("""
+                            SELECT COUNT(*), ROUND(AVG(slippage_c)::numeric,2),
+                                   ROUND(AVG(ABS(slippage_c))::numeric,2)
+                            FROM live_trades WHERE slippage_c IS NOT NULL
+                        """)
+                        r = cur.fetchone()
+                        out["slippage"] = {"n": r[0], "avg_c": float(r[1] or 0),
+                                           "avg_abs_c": float(r[2] or 0)}
+                        cur.execute("""
+                            SELECT ts, ticker, city, count, paper_ask_c, order_ask_c,
+                                   slippage_c, cost, is_live, grade
+                            FROM live_trades ORDER BY ts DESC LIMIT 25
+                        """)
+                        out["recent_fills"] = [
+                            {"ts": str(r[0]), "ticker": r[1], "city": r[2], "count": r[3],
+                             "paper_c": r[4], "order_c": r[5], "slip_c": r[6],
+                             "cost": float(r[7] or 0), "live": r[8], "grade": r[9]}
+                            for r in cur.fetchall()]
+                    conn.close()
+                    self.send_json({"ok": True, **out})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
         elif path == "/auto-trader/config":
             if self.command == "POST":
                 # Save settings from UI
@@ -7311,7 +7492,7 @@ def _paper_trade_log(city_key, fc, markets):
                 _vals = ",".join(["%s"] * 35)
 
                 # paper_trades — A-grade only (bet simulation) — both YES and NO sides
-                if m.get("grade") == "A":
+                if m.get("grade") == "A" and m.get("side", "yes") == "yes":
                     cur.execute(f"""
                         INSERT INTO paper_trades ({_cols})
                         VALUES ({_vals})
