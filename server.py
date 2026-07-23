@@ -5081,6 +5081,22 @@ class Handler(BaseHTTPRequestHandler):
                     out = {"live_mode": bool(_AT_CONFIG.get("live_mode", False)),
                            "enabled": bool(_AT_CONFIG.get("enabled", False)),
                            "daily_cap": _AT_CONFIG.get("daily_cap_dollars", 25.0)}
+                    # Ensure table exists (lazily created on first fill otherwise)
+                    conn.autocommit = True
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            CREATE TABLE IF NOT EXISTS live_trades (
+                                id BIGSERIAL PRIMARY KEY,
+                                ts TIMESTAMPTZ DEFAULT NOW(),
+                                ticker TEXT NOT NULL, city TEXT, side TEXT,
+                                count INTEGER, paper_ask_c INTEGER, order_ask_c INTEGER,
+                                slippage_c INTEGER, cost NUMERIC(10,2),
+                                is_live BOOLEAN, grade TEXT, net_gap_c INTEGER,
+                                hours_to_cutoff NUMERIC(5,1), order_resp TEXT,
+                                settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ
+                            )
+                        """)
+                    conn.autocommit = False
                     with conn.cursor() as cur:
                         cur.execute("""
                             SELECT COALESCE(SUM(cost) FILTER (WHERE is_live), 0),
