@@ -1812,6 +1812,10 @@ _AT_CONFIG = {
     "min_fill_dollars": 5.0, # skip execution if Kelly budget < this
     "live_mode":      False, # False = simulate fills (no real orders); True = REAL Kalshi orders
     "daily_cap_dollars": 25.0, # hard cap on real dollars spent per UTC day
+    # Cities allowed to trade REAL money. Empty list = all cities.
+    # Applies only when live_mode is True — paper/calibration keeps running on
+    # every city so sample sizes continue to build where the edge is unproven.
+    "live_city_whitelist": [],
 }
 
 
@@ -1862,7 +1866,10 @@ def at_flush_log_to_db():
 _LIVE_TABLE_READY = False
 
 def _live_trade_log(ticker, city, side, count, paper_ask_c, order_ask_c, cost,
-                    is_live, order_resp=None, grade=None, net_gap_c=None, htc=None):
+                    is_live, order_resp=None, grade=None, net_gap_c=None, htc=None,
+                    order_id=None, requested_count=None, filled_count=None,
+                    fill_status=None, avg_fill_price_c=None,
+                    target_date=None, lo_temp=None, hi_temp=None):
     """
     Log every fill (real or simulated) with the slippage measurement:
     slippage_c = order price - paper price (BBO at signal scan time).
@@ -1887,18 +1894,43 @@ def _live_trade_log(ticker, city, side, count, paper_ask_c, order_ask_c, cost,
                         settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ
                     )
                 """)
+                # Patch 1/2 columns — added individually so a pre-existing
+                # table gets upgraded in place. autocommit is ON here, so a
+                # failure on one ALTER cannot roll back the others.
+                for _ddl in (
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS order_id TEXT",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS requested_count INTEGER",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS filled_count INTEGER",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS fill_status TEXT",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS avg_fill_price_c NUMERIC(6,2)",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS target_date TEXT",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS lo_temp NUMERIC(5,1)",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS hi_temp NUMERIC(5,1)",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS pnl NUMERIC(10,2)",
+                    "CREATE INDEX IF NOT EXISTS ix_live_trades_settle "
+                    "ON live_trades (city, target_date) WHERE settled_temp IS NULL",
+                ):
+                    try:
+                        cur.execute(_ddl)
+                    except Exception as _de:
+                        print(f"  live_trades DDL skipped: {_de}")
             conn.autocommit = False
             _LIVE_TABLE_READY = True
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO live_trades
                 (ticker, city, side, count, paper_ask_c, order_ask_c, slippage_c,
-                 cost, is_live, grade, net_gap_c, hours_to_cutoff, order_resp)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                 cost, is_live, grade, net_gap_c, hours_to_cutoff, order_resp,
+                 order_id, requested_count, filled_count, fill_status,
+                 avg_fill_price_c, target_date, lo_temp, hi_temp)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
+                        %s,%s,%s,%s,%s,%s,%s,%s)
             """, (ticker, city, side, count, paper_ask_c, order_ask_c,
                   (order_ask_c - paper_ask_c) if (order_ask_c is not None and paper_ask_c is not None) else None,
                   cost, is_live, grade, net_gap_c, htc,
-                  json.dumps(order_resp) if order_resp else None))
+                  json.dumps(order_resp) if order_resp else None,
+                  order_id, requested_count, filled_count, fill_status,
+                  avg_fill_price_c, target_date, lo_temp, hi_temp))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1911,8 +1943,16 @@ def _live_spend_today():
         conn = get_db()
         if not conn: return 0.0
         with conn.cursor() as cur:
+            # Count actual filled dollars. Falls back to `cost` for rows
+            # written before fill confirmation existed (filled_count NULL).
             cur.execute("""
-                SELECT COALESCE(SUM(cost), 0) FROM live_trades
+                SELECT COALESCE(SUM(
+                    CASE
+                        WHEN filled_count IS NOT NULL AND avg_fill_price_c IS NOT NULL
+                            THEN filled_count * avg_fill_price_c / 100.0
+                        ELSE cost
+                    END
+                ), 0) FROM live_trades
                 WHERE is_live = TRUE AND ts::date = CURRENT_DATE
             """)
             v = float(cur.fetchone()[0] or 0)
@@ -1920,6 +1960,370 @@ def _live_spend_today():
         return v
     except Exception:
         return 999999.0  # fail-closed: if we can't read spend, treat cap as hit
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  PATCH 1 — FILL CONFIRMATION
+#  at_place_order posts a marketable limit order but never verified what
+#  actually filled. A thin ask_size produces a partial fill (or none at all,
+#  if the quote vanishes between scan and send) while the system books the
+#  full size. Everything downstream — daily cap, position count, PnL — then
+#  runs on fiction. These two helpers close that hole.
+# ══════════════════════════════════════════════════════════════════════════
+
+def at_confirm_fill(order_id, ticker, requested_count, attempts=3, delay=1.0):
+    """
+    Ask Kalshi what actually filled for this order.
+
+    Returns (filled_count, avg_price_c, status) where status is one of:
+        filled   — got the whole requested size
+        partial  — got some, remainder still resting
+        unfilled — got nothing
+        unknown  — API did not answer; caller must assume worst case
+
+    Fail-closed by design: on `unknown` we report the FULL requested size as
+    filled so the daily spend cap can never be under-counted by an API blip.
+    Over-reporting spend pauses trading; under-reporting overspends real money.
+    """
+    import time as _t
+
+    if not order_id:
+        return requested_count, None, "unknown"
+
+    for i in range(attempts):
+        # Fills are the ground truth — a fill is a fill regardless of how the
+        # order object happens to be labelled at this instant.
+        try:
+            r = requests.get(
+                f"{KALSHI_BASE}/portfolio/fills",
+                headers=kalshi_auth_headers("GET", "/trade-api/v2/portfolio/fills"),
+                params={"order_id": order_id, "limit": 200}, timeout=10
+            )
+            if r.ok:
+                fills = r.json().get("fills", []) or []
+                total = 0
+                notional_c = 0.0
+                for f in fills:
+                    c = int(f.get("count") or 0)
+                    # yes_price is in cents; fall back to no_price complement
+                    px = f.get("yes_price")
+                    if px is None and f.get("no_price") is not None:
+                        px = 100 - int(f["no_price"])
+                    if c > 0 and px is not None:
+                        total += c
+                        notional_c += c * float(px)
+                if total > 0:
+                    avg_c = round(notional_c / total, 2)
+                    st = "filled" if total >= requested_count else "partial"
+                    return total, avg_c, st
+                # No fills yet — give the exchange a beat before concluding zero
+                if i < attempts - 1:
+                    _t.sleep(delay)
+                    continue
+        except Exception as e:
+            at_log("ERR", f"confirm_fill fills lookup failed for {ticker}: {e}", ticker=ticker)
+
+        # Fallback: read the order object itself
+        try:
+            r = requests.get(
+                f"{KALSHI_BASE}/portfolio/orders/{order_id}",
+                headers=kalshi_auth_headers("GET", f"/trade-api/v2/portfolio/orders/{order_id}"),
+                timeout=10
+            )
+            if r.ok:
+                o = r.json().get("order", {}) or {}
+                filled = o.get("taker_fill_count")
+                if filled is None:
+                    init = o.get("initial_count")
+                    rem  = o.get("remaining_count")
+                    if init is not None and rem is not None:
+                        filled = int(init) - int(rem)
+                if filled is not None:
+                    filled = int(filled)
+                    px = o.get("yes_price")
+                    avg_c = float(px) if px is not None else None
+                    if filled <= 0:
+                        return 0, None, "unfilled"
+                    return filled, avg_c, ("filled" if filled >= requested_count else "partial")
+        except Exception as e:
+            at_log("ERR", f"confirm_fill order lookup failed for {ticker}: {e}", ticker=ticker)
+
+        if i < attempts - 1:
+            _t.sleep(delay)
+
+    # Could not determine — assume full spend (fail-closed on the cap)
+    at_log("WARN", f"{ticker} fill unconfirmed after {attempts} tries — "
+                   f"assuming full {requested_count} for cap accounting", ticker=ticker)
+    return requested_count, None, "unknown"
+
+
+def at_cancel_order(order_id):
+    """Cancel a resting order. Returns True on success."""
+    if not order_id:
+        return False
+    try:
+        r = requests.delete(
+            f"{KALSHI_BASE}/portfolio/orders/{order_id}",
+            headers=kalshi_auth_headers("DELETE", f"/trade-api/v2/portfolio/orders/{order_id}"),
+            timeout=10
+        )
+        return bool(r.ok)
+    except Exception as e:
+        at_log("ERR", f"cancel_order {order_id} failed: {e}")
+        return False
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  PATCH 2 — LIVE PnL SETTLEMENT
+#  live_trades already carried settled_temp / settled_correct / settled_ts
+#  columns, but nothing ever wrote them, so real money had no result field.
+# ══════════════════════════════════════════════════════════════════════════
+
+def _live_trade_settle():
+    """
+    Settle live_trades against temp_snapshots and compute realised PnL.
+
+    PnL convention matches /debug/results section 9 and the paper backtests:
+        win  ->  filled_count * (0.98 - price)     [2% Kalshi fee on payout]
+        loss -> -filled_count * price
+    """
+    try:
+        conn = get_db()
+        if not conn:
+            return 0
+        n = 0
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE live_trades lt
+                SET settled_temp    = ts.settled_temp,
+                    settled_correct = CASE
+                        WHEN COALESCE(lt.side, 'yes') = 'no' THEN
+                            CASE
+                                WHEN lt.lo_temp IS NULL AND lt.hi_temp IS NOT NULL
+                                    THEN ts.settled_temp >  lt.hi_temp
+                                WHEN lt.hi_temp IS NULL AND lt.lo_temp IS NOT NULL
+                                    THEN ts.settled_temp <  lt.lo_temp
+                                ELSE ts.settled_temp <  lt.lo_temp
+                                  OR ts.settled_temp >  lt.hi_temp
+                            END
+                        ELSE
+                            CASE
+                                WHEN lt.lo_temp IS NULL AND lt.hi_temp IS NOT NULL
+                                    THEN ts.settled_temp <= lt.hi_temp
+                                WHEN lt.hi_temp IS NULL AND lt.lo_temp IS NOT NULL
+                                    THEN ts.settled_temp >= lt.lo_temp
+                                ELSE ts.settled_temp >= lt.lo_temp
+                                 AND ts.settled_temp <= lt.hi_temp
+                            END
+                    END,
+                    settled_ts = NOW()
+                FROM (
+                    SELECT DISTINCT ON (city, target_date)
+                        city, target_date, settled_temp
+                    FROM temp_snapshots
+                    WHERE settled_temp IS NOT NULL
+                ) ts
+                WHERE lt.city = ts.city
+                  AND lt.target_date = ts.target_date
+                  AND lt.settled_temp IS NULL
+                  AND lt.target_date IS NOT NULL
+            """)
+            n = cur.rowcount
+
+            # Realised PnL, in dollars, on confirmed fills only
+            cur.execute("""
+                UPDATE live_trades
+                SET pnl = ROUND(
+                    CASE WHEN settled_correct
+                         THEN  COALESCE(filled_count, "count") * (0.98 - avg_fill_price_c / 100.0)
+                         ELSE -COALESCE(filled_count, "count") * (avg_fill_price_c / 100.0)
+                    END::numeric, 2)
+                WHERE settled_correct IS NOT NULL
+                  AND avg_fill_price_c IS NOT NULL
+                  AND pnl IS NULL
+            """)
+        conn.commit()
+        conn.close()
+        return n
+    except Exception as e:
+        print(f"  live_trade_settle error: {e}")
+        return 0
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  PATCH 3 — STALE SETTLEMENT LEAK
+#  run_auto_settlement only ever targets *yesterday*, and fetch_nws_temp_cli
+#  scrapes a page that only holds the last few product versions. Any day the
+#  fetch fails, that date is orphaned permanently — which is why positions
+#  from 19-20 May are still sitting in active_positions. With real money that
+#  is stuck capital, not just a dirty table.
+#
+#  Fix: a bounded backfill sweep using ACIS (historical daily climate data,
+#  arbitrary date range) plus an explicit abandon marker so nothing retries
+#  forever or lingers in "open" views.
+# ══════════════════════════════════════════════════════════════════════════
+
+SETTLE_BACKFILL_DAYS = 14   # how far back to retry before abandoning
+SETTLE_BACKFILL_MIN_GAP = 3600   # seconds between automatic sweeps
+_LAST_BACKFILL_TS = 0.0
+
+
+def fetch_acis_daily(nws_station, date_str):
+    """
+    Historical daily max/min for one station and date via the RCC ACIS API.
+
+    NOTE: ACIS is the archived climate record, not the same product as the
+    NWS CLI. Values agree the overwhelming majority of the time but can differ
+    by a degree after QC. Rows settled this way are tagged settle_source='acis'
+    so they stay distinguishable in calibration analysis.
+
+    Returns {"ok": bool, "high": float, "low": float} or {"ok": False, ...}.
+    """
+    sid_variants = [nws_station]
+    if nws_station.startswith("K") and len(nws_station) == 4:
+        sid_variants.append(nws_station[1:])   # KSEA -> SEA (ThreadEx)
+
+    for sid in sid_variants:
+        try:
+            r = requests.post(
+                "https://data.rcc-acis.org/StnData",
+                json={
+                    "sid":   sid,
+                    "sdate": date_str,
+                    "edate": date_str,
+                    "elems": [{"name": "maxt"}, {"name": "mint"}],
+                },
+                headers={"Content-Type": "application/json",
+                         "User-Agent": "seattle-rain-tracker/1.0"},
+                timeout=15,
+            )
+            if not r.ok:
+                continue
+            data = (r.json() or {}).get("data") or []
+            if not data:
+                continue
+            row = data[0]
+            if len(row) < 3:
+                continue
+            hi_raw, lo_raw = str(row[1]).strip(), str(row[2]).strip()
+            if hi_raw in ("M", "", "T") or lo_raw in ("M", "", "T"):
+                continue
+            return {"ok": True, "high": float(hi_raw), "low": float(lo_raw),
+                    "sid": sid, "source": "acis"}
+        except Exception:
+            continue
+    return {"ok": False, "error": f"no ACIS data for {nws_station} on {date_str}"}
+
+
+def run_settlement_backfill(days=None, abandon=True, force=False):
+    """
+    Retry every unsettled (city, target_date) older than yesterday and inside
+    the lookback window. Anything still unsettled beyond the window is marked
+    settle_abandoned so it stops showing up as an open position.
+
+    Safe to run repeatedly. Never touches rows that already settled.
+    """
+    from datetime import datetime as dt_cls, timedelta
+    import time as _time
+    import pytz
+
+    global _LAST_BACKFILL_TS
+    if not force and (_time.time() - _LAST_BACKFILL_TS) < SETTLE_BACKFILL_MIN_GAP:
+        return {"ok": True, "skipped": True, "reason": "throttled"}
+    _LAST_BACKFILL_TS = _time.time()
+
+    days = days or SETTLE_BACKFILL_DAYS
+    et_tz  = pytz.timezone("America/New_York")
+    now_et = dt_cls.utcnow().replace(tzinfo=pytz.utc).astimezone(et_tz)
+    yesterday = (now_et - timedelta(days=1)).strftime("%Y-%m-%d")
+    window_start = (now_et - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    conn = get_db()
+    if not conn:
+        return {"ok": False, "error": "No DB"}
+
+    filled, abandoned, tried = 0, 0, []
+    try:
+        # Columns are added defensively — a fresh DB may not have them yet.
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            for _ddl in (
+                "ALTER TABLE temp_snapshots ADD COLUMN IF NOT EXISTS settle_source TEXT",
+                "ALTER TABLE temp_snapshots ADD COLUMN IF NOT EXISTS settle_abandoned BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS settle_abandoned BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE calibration_snapshots ADD COLUMN IF NOT EXISTS settle_abandoned BOOLEAN DEFAULT FALSE",
+            ):
+                try:
+                    cur.execute(_ddl)
+                except Exception as _de:
+                    print(f"  backfill DDL skipped: {_de}")
+        conn.autocommit = False
+
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT city, nws_station, target_date
+                FROM temp_snapshots
+                WHERE settled_temp IS NULL
+                  AND COALESCE(settle_abandoned, FALSE) = FALSE
+                  AND target_date >= %s
+                  AND target_date <  %s
+                ORDER BY target_date
+            """, (window_start, yesterday))
+            pending = cur.fetchall()
+
+        for city, station, tdate in pending:
+            res = fetch_acis_daily(station, tdate)
+            tried.append({"city": city, "date": tdate, "ok": res.get("ok"),
+                          "high": res.get("high")})
+            if not res.get("ok"):
+                continue
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE temp_snapshots
+                    SET settled_temp    = %s,
+                        settled_correct = ((lo_temp IS NULL OR %s >= lo_temp)
+                                       AND (hi_temp IS NULL OR %s <= hi_temp)),
+                        settle_source   = 'acis'
+                    WHERE city = %s AND target_date = %s
+                      AND market_type = 'high' AND settled_temp IS NULL
+                """, (res["high"], res["high"], res["high"], city, tdate))
+                filled += cur.rowcount
+                cur.execute("""
+                    UPDATE temp_snapshots
+                    SET settled_temp    = %s,
+                        settled_correct = ((lo_temp IS NULL OR %s >= lo_temp)
+                                       AND (hi_temp IS NULL OR %s <= hi_temp)),
+                        settle_source   = 'acis'
+                    WHERE city = %s AND target_date = %s
+                      AND market_type = 'low' AND settled_temp IS NULL
+                """, (res["low"], res["low"], res["low"], city, tdate))
+                filled += cur.rowcount
+            conn.commit()
+
+        # Anything older than the window that never resolved is dead weight.
+        if abandon:
+            with conn.cursor() as cur:
+                for tbl in ("temp_snapshots", "paper_trades", "calibration_snapshots"):
+                    cur.execute(f"""
+                        UPDATE {tbl}
+                        SET settle_abandoned = TRUE
+                        WHERE settled_temp IS NULL
+                          AND COALESCE(settle_abandoned, FALSE) = FALSE
+                          AND target_date < %s
+                    """, (window_start,))
+                    abandoned += cur.rowcount
+            conn.commit()
+
+        conn.close()
+        return {"ok": True, "window_start": window_start, "through": yesterday,
+                "dates_pending": len(pending), "rows_settled": filled,
+                "rows_abandoned": abandoned, "detail": tried[:40]}
+    except Exception as e:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return {"ok": False, "error": str(e)}
 
 
 def at_place_order(ticker, side, count, yes_price_c):
@@ -2259,27 +2663,67 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
 
         # Place the order — REAL only when live_mode; otherwise simulate the fill
         _paper_ask_c = round(float(signal.get("yes_ask", ask)) * 100)
+        _order_id    = None
+        _filled      = count
+        _avg_px_c    = float(ask_c)
+        _fill_status = "simulated"
+
         if _is_live:
             ok, order, err = at_place_order(ticker, "yes", count, ask_c)
             if not ok:
                 at_log("ERR", f"Order failed for {ticker}: {err}", ticker=ticker, city=city_key)
                 break
+
+            # ── Fill confirmation (Patch 1) ─────────────────────────────────
+            _o = (order or {}).get("order", order) or {}
+            _order_id = _o.get("order_id") or _o.get("id")
+            _filled, _conf_px, _fill_status = at_confirm_fill(_order_id, ticker, count)
+            if _conf_px is not None:
+                _avg_px_c = float(_conf_px)
+
+            if _fill_status == "unfilled" or not _filled:
+                at_cancel_order(_order_id)
+                at_log("WARN", f"{ticker} order did not fill at {ask_c}¢ — cancelled, "
+                               f"quote likely moved between scan and send",
+                       ticker=ticker, city=city_key)
+                break
+
+            if _fill_status == "partial":
+                # Remainder is resting in the book. Cancel it: the price that
+                # justified the order is stale by the time we get here.
+                at_cancel_order(_order_id)
+                at_log("WARN", f"{ticker} partial fill {_filled}/{count} @ {_avg_px_c:.1f}¢ "
+                               f"— resting remainder cancelled",
+                       ticker=ticker, city=city_key)
         else:
             ok, order, err = True, {"simulated": True}, None
 
-        _live_trade_log(ticker, city_key, "yes", count, _paper_ask_c, ask_c,
-                        round(count * ask, 2), _is_live, order_resp=order,
+        _actual_cost = round(_filled * (_avg_px_c / 100.0), 2)
+
+        _live_trade_log(ticker, city_key, "yes", _filled, _paper_ask_c, ask_c,
+                        _actual_cost, _is_live, order_resp=order,
                         grade=live_grade, net_gap_c=locals().get("net_gap_c", signal.get("net_gap_c")),
-                        htc=signal.get("hours_to_cutoff"))
+                        htc=signal.get("hours_to_cutoff"),
+                        order_id=_order_id, requested_count=count,
+                        filled_count=_filled, fill_status=_fill_status,
+                        avg_fill_price_c=_avg_px_c,
+                        target_date=forecast.get("target_date"),
+                        lo_temp=signal.get("lo_temp"), hi_temp=signal.get("hi_temp"))
         at_log("FILL" if _is_live else "SIM",
-               f"{ticker} {count}x @ {ask_c}¢ (paper {_paper_ask_c}¢, slip {ask_c - _paper_ask_c:+d}¢)"
+               f"{ticker} {_filled}/{count}x @ {_avg_px_c:.1f}¢ "
+               f"(paper {_paper_ask_c}¢, slip {_avg_px_c - _paper_ask_c:+.1f}¢, {_fill_status})"
                + ("" if _is_live else " [simulated]"),
                ticker=ticker, city=city_key)
 
-        cost = round(count * ask, 2)
+        cost = _actual_cost
         spent_this_ticker += cost
         ticker_spent[ticker] = spent_this_ticker
         fills += 1
+
+        # A short fill means the book was thinner than the quote implied.
+        # Do not keep walking on a stale picture — end this ticker here.
+        if _is_live and _fill_status in ("partial", "unknown"):
+            break
 
         # Update open positions count optimistically
         if ticker not in [p.get("ticker") for p in open_positions]:
@@ -2353,6 +2797,12 @@ def run_auto_trader_cycle(force=False):
             # Skip blacklisted cities — calibration still runs, bets do not
             if city_key in AUTO_TRADER_CITY_BLACKLIST:
                 at_log("SKIP", f"{city_key} is blacklisted — skipping auto-trade (calibration continues)", city=city_key)
+                continue
+            # Live-money whitelist. Paper mode ignores this entirely so that
+            # unproven cities keep accumulating calibration rows.
+            _wl = cfg.get("live_city_whitelist") or []
+            if cfg.get("live_mode") and _wl and city_key not in _wl:
+                at_log("SKIP", f"{city_key} not in live whitelist — no real orders", city=city_key)
                 continue
             try:
                 result = scan_temp_city(city_key, horizon)
@@ -6940,6 +7390,168 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
+        elif path == "/admin/backfill-settlements":
+            # Standalone sweep for orphaned settlement dates. Autocommit DDL
+            # pattern — deliberately NOT part of ensure_tables(), which wraps
+            # every statement in one transaction and rolls the lot back on any
+            # single failure.
+            import os as _os
+            _qs       = parse_qs(urlparse(self.path).query)
+            _expected = _os.environ.get("QUERY_TOKEN", "")
+            if not _expected:
+                self.send_json({"ok": False, "error": "QUERY_TOKEN not set in environment"})
+            elif _qs.get("token", [""])[0] != _expected:
+                self.send_json({"ok": False, "error": "Invalid token"})
+            else:
+                try:
+                    _days = int(_qs.get("days", ["14"])[0])
+                except Exception:
+                    _days = 14
+                _ab = _qs.get("abandon", ["true"])[0].lower() not in ("false", "0", "no")
+                self.send_json(run_settlement_backfill(days=_days, abandon=_ab, force=True))
+
+        elif path == "/debug/live-results":
+            # Everything about real-money execution in one read-only GET.
+            # Fill quality is the headline: paper EV means nothing if the ask
+            # we scan is not the ask we get.
+            try:
+                conn = get_db()
+                if not conn:
+                    self.send_json({"ok": False, "error": "No DB"})
+                else:
+                    out = {}
+                    # Existence check runs in its own cursor: closing the
+                    # connection while a cursor context manager is still open
+                    # raises InterfaceError on __exit__.
+                    with conn.cursor() as cur0:
+                        cur0.execute("""
+                            SELECT EXISTS (SELECT FROM information_schema.tables
+                                           WHERE table_name = 'live_trades')
+                        """)
+                        _has_live = cur0.fetchone()[0]
+                    if not _has_live:
+                        conn.close()
+                        self.send_json({"ok": True,
+                                        "results": {"note": "no live_trades yet"}})
+                        return
+                    with conn.cursor() as cur:
+                        # 1. Execution quality — the reason live trading exists
+                        cur.execute("""
+                            SELECT
+                                COUNT(*),
+                                COUNT(*) FILTER (WHERE is_live),
+                                COUNT(*) FILTER (WHERE fill_status = 'filled'),
+                                COUNT(*) FILTER (WHERE fill_status = 'partial'),
+                                COUNT(*) FILTER (WHERE fill_status = 'unfilled'),
+                                COUNT(*) FILTER (WHERE fill_status = 'unknown'),
+                                ROUND(AVG(avg_fill_price_c - paper_ask_c)
+                                      FILTER (WHERE is_live)::numeric, 2),
+                                ROUND(SUM(filled_count) FILTER (WHERE is_live)::numeric, 0),
+                                ROUND(SUM(requested_count) FILTER (WHERE is_live)::numeric, 0)
+                            FROM live_trades
+                        """)
+                        r = cur.fetchone()
+                        _req = float(r[8] or 0)
+                        out["execution"] = {
+                            "orders_total": r[0], "orders_live": r[1],
+                            "filled": r[2], "partial": r[3],
+                            "unfilled": r[4], "unknown": r[5],
+                            "avg_slippage_c": float(r[6]) if r[6] is not None else None,
+                            "contracts_filled": int(r[7] or 0),
+                            "contracts_requested": int(_req),
+                            "fill_rate": round(float(r[7] or 0) / _req, 3) if _req else None,
+                        }
+
+                        # 2. Realised PnL on settled live trades
+                        cur.execute("""
+                            SELECT COUNT(*),
+                                   COUNT(*) FILTER (WHERE settled_correct),
+                                   ROUND(SUM(pnl)::numeric, 2),
+                                   ROUND(SUM(pnl)::numeric
+                                         / NULLIF(SUM(filled_count * avg_fill_price_c / 100.0)::numeric, 0), 3),
+                                   ROUND(SUM(filled_count * avg_fill_price_c / 100.0)::numeric, 2)
+                            FROM live_trades
+                            WHERE is_live = TRUE AND settled_correct IS NOT NULL
+                        """)
+                        r = cur.fetchone()
+                        out["live_pnl"] = {
+                            "settled": r[0], "wins": r[1],
+                            "total_pnl": float(r[2] or 0),
+                            "ev_per_dollar": float(r[3] or 0),
+                            "staked": float(r[4] or 0),
+                        }
+
+                        # 3. Spend against the daily cap
+                        cur.execute("""
+                            SELECT ROUND(COALESCE(SUM(
+                                CASE WHEN filled_count IS NOT NULL AND avg_fill_price_c IS NOT NULL
+                                     THEN filled_count * avg_fill_price_c / 100.0
+                                     ELSE cost END), 0)::numeric, 2)
+                            FROM live_trades
+                            WHERE is_live = TRUE AND ts::date = CURRENT_DATE
+                        """)
+                        out["spend_today"] = {
+                            "spent": float(cur.fetchone()[0] or 0),
+                            "cap": _AT_CONFIG.get("daily_cap_dollars"),
+                            "live_mode": _AT_CONFIG.get("live_mode"),
+                            "whitelist": _AT_CONFIG.get("live_city_whitelist"),
+                        }
+
+                        # 4. Slippage by city — where the book actually is thin
+                        cur.execute("""
+                            SELECT city, COUNT(*),
+                                   ROUND(AVG(avg_fill_price_c - paper_ask_c)::numeric, 2),
+                                   ROUND(AVG(filled_count::numeric
+                                         / NULLIF(requested_count, 0))::numeric, 3)
+                            FROM live_trades
+                            WHERE is_live = TRUE AND paper_ask_c IS NOT NULL
+                            GROUP BY city ORDER BY 3 DESC NULLS LAST
+                        """)
+                        out["slippage_by_city"] = [
+                            {"city": q[0], "n": q[1],
+                             "avg_slippage_c": float(q[2]) if q[2] is not None else None,
+                             "fill_rate": float(q[3]) if q[3] is not None else None}
+                            for q in cur.fetchall()]
+
+                        # 5. Open real-money positions
+                        cur.execute("""
+                            SELECT ticker, city, filled_count, avg_fill_price_c,
+                                   target_date, ts
+                            FROM live_trades
+                            WHERE is_live = TRUE AND settled_temp IS NULL
+                              AND COALESCE(filled_count, 0) > 0
+                            ORDER BY ts DESC LIMIT 25
+                        """)
+                        out["open_live"] = [
+                            {"ticker": q[0], "city": q[1], "count": q[2],
+                             "price_c": float(q[3]) if q[3] is not None else None,
+                             "target_date": q[4], "ts": str(q[5])}
+                            for q in cur.fetchall()]
+
+                        # 6. Settlement health — the orphaned-date check
+                        cur.execute("""
+                            SELECT COUNT(DISTINCT (city, target_date))
+                            FROM temp_snapshots WHERE settled_temp IS NULL
+                        """)
+                        _orph = cur.fetchone()[0]
+                        try:
+                            cur.execute("""
+                                SELECT COUNT(*) FROM temp_snapshots
+                                WHERE COALESCE(settle_abandoned, FALSE) = TRUE
+                            """)
+                            _aband = cur.fetchone()[0]
+                        except Exception:
+                            _aband = None
+                        out["settlement_health"] = {
+                            "unsettled_city_dates": _orph,
+                            "abandoned_rows": _aband,
+                        }
+
+                    conn.close()
+                    self.send_json({"ok": True, "results": out})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
         elif path == "/debug/results":
             # Full paper-trade analysis in one GET call. No auth needed — read-only.
             # Returns everything needed to evaluate model edge and live-trading readiness:
@@ -7644,6 +8256,21 @@ def _run_background_scan(full=True):
                 pass
     if full:
         _paper_trade_settle()
+        # Real-money results (Patch 2)
+        try:
+            _n_live = _live_trade_settle()
+            if _n_live:
+                print(f"  live_trades settled: {_n_live}")
+        except Exception as _e:
+            print(f"  live settle error: {_e}")
+        # Orphaned-date sweep (Patch 3). Bounded, idempotent, once per run.
+        try:
+            _bf = run_settlement_backfill()
+            if _bf.get("ok") and (_bf.get("rows_settled") or _bf.get("rows_abandoned")):
+                print(f"  backfill: settled={_bf['rows_settled']} "
+                      f"abandoned={_bf['rows_abandoned']}")
+        except Exception as _e:
+            print(f"  backfill error: {_e}")
     tag = "full" if full else "fast"
     print(f"  📊 Background scan ({tag}): {total} scanned, {skipped} skipped in {round(_t.time()-start,1)}s")
 
