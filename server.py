@@ -4685,6 +4685,38 @@ class Handler(BaseHTTPRequestHandler):
                 print(f"  📌 Settlement recorded: {month} = {total}\"")
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)}, 400)
+        elif path == "/auto-trader/config":
+            # Save settings (this POST route was previously unreachable —
+            # the handler existed only under do_GET's elif chain).
+            try:
+                length  = int(self.headers.get("Content-Length", 0))
+                body    = json.loads(self.rfile.read(length))
+                conn    = get_db()
+                if not conn:
+                    self.send_json({"ok": False, "error": "No DB"}); return
+                with conn.cursor() as cur:
+                    for key, val in body.items():
+                        if key in _AT_CONFIG:
+                            cur.execute("""
+                                INSERT INTO auto_trader_config (key, value, updated_at)
+                                VALUES (%s, %s, NOW())
+                                ON CONFLICT (key) DO UPDATE
+                                    SET value=%s, updated_at=NOW()
+                            """, (key, json.dumps(val) if isinstance(val, (list, dict)) else str(val),
+                                  json.dumps(val) if isinstance(val, (list, dict)) else str(val)))
+                            _AT_CONFIG[key] = val
+                conn.commit()
+                conn.close()
+                if "enabled" in body:
+                    _AT_CONFIG["enabled"] = bool(body["enabled"])
+                    if body["enabled"]:
+                        start_auto_trader_scheduler()
+                        at_log("SCAN", "Auto-trader enabled via UI")
+                    else:
+                        at_log("SCAN", "Auto-trader disabled via UI")
+                self.send_json({"ok": True, "config": _AT_CONFIG})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
         elif path == "/admin/query":
             import os as _os
             try:
@@ -5581,46 +5613,12 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(e)})
 
         elif path == "/auto-trader/config":
-            if self.command == "POST":
-                # Save settings from UI
-                try:
-                    length  = int(self.headers.get("Content-Length", 0))
-                    body    = json.loads(self.rfile.read(length))
-                    conn    = get_db()
-                    if not conn:
-                        self.send_json({"ok": False, "error": "No DB"}); return
-                    with conn.cursor() as cur:
-                        for key, val in body.items():
-                            if key in _AT_CONFIG:
-                                cur.execute("""
-                                    INSERT INTO auto_trader_config (key, value, updated_at)
-                                    VALUES (%s, %s, NOW())
-                                    ON CONFLICT (key) DO UPDATE
-                                        SET value=%s, updated_at=NOW()
-                                """, (key, json.dumps(val) if isinstance(val, (list, dict)) else str(val),
-                                      json.dumps(val) if isinstance(val, (list, dict)) else str(val)))
-                                # Update in-memory config immediately
-                                _AT_CONFIG[key] = val
-                    conn.commit()
-                    conn.close()
-                    # Handle enabled toggle
-                    if "enabled" in body:
-                        _AT_CONFIG["enabled"] = bool(body["enabled"])
-                        if body["enabled"]:
-                            start_auto_trader_scheduler()
-                            at_log("SCAN", "Auto-trader enabled via UI")
-                        else:
-                            at_log("SCAN", "Auto-trader disabled via UI")
-                    self.send_json({"ok": True, "config": _AT_CONFIG})
-                except Exception as e:
-                    self.send_json({"ok": False, "error": str(e)})
-            else:
-                # GET — return current config + scheduler status
-                self.send_json({
-                    "ok":     True,
-                    "config": _AT_CONFIG,
-                    "scheduler_alive": _AT_THREAD is not None and _AT_THREAD.is_alive(),
-                })
+            # GET — return current config + scheduler status (POST handled in do_POST)
+            self.send_json({
+                "ok":     True,
+                "config": _AT_CONFIG,
+                "scheduler_alive": _AT_THREAD is not None and _AT_THREAD.is_alive(),
+            })
 
         elif path == "/auto-trader/log":
             # Return last 3 days of execution log — DB first, in-memory fallback
