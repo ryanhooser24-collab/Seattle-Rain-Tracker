@@ -455,9 +455,7 @@ body{max-width:900px;margin:0 auto;}
   <div class="tab active" id="t-scan" onclick="sw('scan')">Scanner</div>
   <div class="tab" id="t-dash" onclick="sw('dash')">Rainfall Tracker</div>
   <div class="tab" id="t-pos" onclick="sw('pos')">Positions</div>
-  <div class="tab" id="t-rules" onclick="sw('rules')">Auto-trader</div>
-  <div class="tab" id="t-hist" onclick="sw('hist')">History</div>
-  <div class="tab" id="t-bt" onclick="sw('bt')">Backtest</div>
+  <div class="tab" id="t-live" onclick="sw('live')">Live</div>
   <div class="tab" id="t-analysis" onclick="sw('analysis')">Analysis</div>
 </div>
 
@@ -618,111 +616,130 @@ body{max-width:900px;margin:0 auto;}
 </div>
 
 <!-- AUTO-TRADER -->
-<div id="p-rules" style="display:none">
+
+
+<!-- LIVE TRADING -->
+<div id="p-live" style="display:none">
   <div class="main">
-    <div id="at-stats" class="at-stat-grid">
-      <div class="at-stat"><div class="at-stat-lbl">Status</div><div class="at-stat-val" id="at-status-val" style="color:var(--muted);">Stopped</div></div>
-      <div class="at-stat"><div class="at-stat-lbl">Today's bets</div><div class="at-stat-val" id="at-bets-val">—</div></div>
-      <div class="at-stat"><div class="at-stat-lbl">Deployed</div><div class="at-stat-val" id="at-deployed-val">—</div></div>
-      <div class="at-stat"><div class="at-stat-lbl">Daily limit</div><div class="at-stat-val" id="at-limit-val">—</div></div>
+
+    <!-- Status -->
+    <div class="rf-card">
+      <div class="rf-hdr">
+        <div class="rf-hdr-lbl">LIVE TRADING</div>
+        <div id="lv-armed" class="pill">—</div>
+      </div>
+      <div style="padding:12px 14px;">
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;">
+          <div><div style="font-size:10px;color:var(--muted);">SPENT TODAY</div><div id="lv-spent" style="font-size:16px;font-weight:500;">—</div></div>
+          <div><div style="font-size:10px;color:var(--muted);">DAILY CAP</div><div id="lv-cap" style="font-size:16px;font-weight:500;">—</div></div>
+          <div><div style="font-size:10px;color:var(--muted);">LIVE FILLS TODAY</div><div id="lv-fills" style="font-size:16px;font-weight:500;">—</div></div>
+          <div><div style="font-size:10px;color:var(--muted);">SIM FILLS TODAY</div><div id="lv-simfills" style="font-size:16px;font-weight:500;">—</div></div>
+        </div>
+        <div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin-bottom:12px;">
+          <div id="lv-capbar" style="height:100%;width:0%;background:var(--yes);"></div>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button id="lv-armbtn" onclick="lvArm()" style="flex:1;padding:8px;font-family:inherit;font-size:11px;letter-spacing:1px;background:var(--yes-lt);color:var(--yes);border:1px solid var(--yes-border);border-radius:4px;cursor:pointer;">ARM — GO LIVE</button>
+          <button id="lv-killbtn" onclick="lvKill()" style="flex:1;padding:8px;font-family:inherit;font-size:11px;letter-spacing:1px;background:var(--no-lt);color:var(--no);border:1px solid var(--no-border);border-radius:4px;cursor:pointer;">KILL — STOP ALL</button>
+        </div>
+      </div>
     </div>
 
-    <div class="at-card">
-      <div class="section-lbl" style="margin-bottom:10px;">Engine</div>
-      <div class="at-row">
+    <!-- Settings -->
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">SETTINGS</div>
+        <button onclick="lvSaveCfg()" style="padding:4px 12px;font-family:inherit;font-size:10px;letter-spacing:1px;background:var(--rain-lt);color:var(--rain);border:1px solid var(--border);border-radius:4px;cursor:pointer;">SAVE</button>
+      </div>
+      <div style="padding:12px 14px;display:flex;flex-direction:column;gap:10px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+          <div><div style="font-size:12px;">Daily cap</div><div style="font-size:10px;color:var(--muted);">Most real dollars the system may spend in one day</div></div>
+          <input id="lv-cfg-cap" type="number" step="1" min="0" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+          <div><div style="font-size:12px;">Max per fill</div><div style="font-size:10px;color:var(--muted);">Most dollars allowed on a single order</div></div>
+          <input id="lv-cfg-fill" type="number" step="1" min="0" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+          <div><div style="font-size:12px;">Max per ticker</div><div style="font-size:10px;color:var(--muted);">Total dollars across all fills on one market — caps the walk-up loop</div></div>
+          <input id="lv-cfg-ticker" type="number" step="1" min="0" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+          <div><div style="font-size:12px;">Min fill</div><div style="font-size:10px;color:var(--muted);">Smallest allowed fill — a sized fill below this stops the loop. Must be &le; max per fill or nothing trades.</div></div>
+          <input id="lv-cfg-minfill" type="number" step="1" min="0" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+        </div>
         <div>
-          <div style="font-size:13px;font-weight:500;color:var(--ink);">Auto-trader</div>
-          <div style="font-size:11px;color:var(--muted);margin-top:2px;">Scans every 5 min · re-evaluates grade after each fill · walks book while A holds</div>
+          <div style="font-size:12px;">City whitelist</div>
+          <div style="font-size:10px;color:var(--muted);margin-bottom:5px;">Only these cities may receive real orders. Comma-separated; empty = all cities.</div>
+          <input id="lv-cfg-wl" type="text" style="width:100%;padding:6px;font-family:inherit;font-size:11px;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
         </div>
-        <button class="at-toggle" id="at-master-toggle" onclick="atToggleMaster(this)"></button>
-      </div>
-      <div class="at-row">
-        <div class="at-row-lbl">Min grade</div>
-        <select id="at-min-grade" style="font-size:11px;border:0.5px solid var(--border);border-radius:5px;padding:3px 8px;background:var(--paper);color:var(--ink);font-family:inherit;">
-          <option value="A">A only</option>
-          <option value="AB">A or B</option>
-        </select>
-      </div>
-      <div class="at-row">
-        <div class="at-row-lbl">Next scan</div>
-        <div id="at-next-scan" style="font-size:12px;font-weight:500;color:var(--ink);">—</div>
-      </div>
-      <div class="at-row">
-        <div class="at-row-lbl">Last cycle</div>
-        <div id="at-last-cycle" style="font-size:12px;color:var(--muted);">—</div>
-      </div>
-      <div class="at-row">
-        <div class="at-row-lbl">Signals found</div>
-        <div id="at-signals-found" style="font-size:12px;color:var(--muted);">—</div>
-      </div>
-    </div>
-
-    <div class="at-card">
-      <div class="section-lbl" style="margin-bottom:4px;">Sizing &amp; limits</div>
-      <div class="at-param">
-        <span class="at-param-lbl">Max per fill <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Hard dollar cap on each individual order placement. Each time the execution loop fills at a price level, this is the ceiling — regardless of Kelly output or book depth. Start small while testing, scale up as win rate confirms the model.</div></span>
-        <input type="range" min="10" max="200" step="5" value="25" style="flex:1;" oninput="document.getElementById('at-maxbet-val').textContent='$'+this.value;atSaveSetting('max_per_fill',this.value)">
-        <span class="at-param-val" id="at-maxbet-val">$25</span>
-      </div>
-      <div class="at-param">
-        <span class="at-param-lbl">Max per ticker <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Total dollar cap across all fills on a single ticker per session. The loop walks the book while grade holds A — this is the hard stop. Defaults to 3× max per fill.</div></span>
-        <input type="range" min="25" max="500" step="25" value="75" style="flex:1;" oninput="document.getElementById('at-maxticker-val').textContent='$'+this.value;atSaveSetting('max_per_ticker',this.value)">
-        <span class="at-param-val" id="at-maxticker-val">$75</span>
-      </div>
-      <div style="margin-top:10px;">
-        <button onclick="atToggleAdvanced(this)" style="font-size:10px;color:var(--muted);background:none;border:none;cursor:pointer;padding:0;font-family:inherit;">&#9656; Advanced settings</button>
-      </div>
-      <div id="at-advanced" style="display:none;margin-top:4px;">
-        <div class="at-param">
-          <span class="at-param-lbl">Kelly multiplier <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Scales the Kelly formula output. Kelly fraction = (p × b − q) / b, where p = model probability, q = 1−p, b = (1−ask)/ask. E.g. model 60%, ask 40¢ → b=1.5, Kelly=33%. At 0.5× multiplier, bet size = 16.5% of bankroll unit. Use 0.5× until 100+ trades confirm model calibration.</div></span>
-          <input type="range" min="10" max="100" step="5" value="50" style="flex:1;" oninput="document.getElementById('at-kelly-val').textContent=(this.value/100).toFixed(2)+'×';atSaveSetting('kelly_mult',this.value/100)">
-          <span class="at-param-val" id="at-kelly-val">0.50×</span>
-        </div>
-        <div class="at-param">
-          <span class="at-param-lbl">Bankroll unit <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Dollar amount Kelly sizing is applied against. Set to 5–10% of your trading account. Kelly size = 0.5 × unit × Kelly fraction. Update as your account grows.</div></span>
-          <input type="range" min="50" max="1000" step="50" value="100" style="flex:1;" oninput="document.getElementById('at-unit-val').textContent='$'+this.value;atSaveSetting('bankroll_unit',this.value)">
-          <span class="at-param-val" id="at-unit-val">$100</span>
-        </div>
-        <div class="at-param">
-          <span class="at-param-lbl">Max open positions <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Your primary exposure control. Kalshi settlements lag until the next morning, so a daily loss limit would block good signals based on stale P&L. This is the real guardrail — max exposure = this × max per ticker. At defaults (10 × $75 = $750 max deployed at once).</div></span>
-          <input type="range" min="1" max="20" step="1" value="10" style="flex:1;" oninput="document.getElementById('at-maxpos-val').textContent=this.value;atSaveSetting('max_positions',this.value)">
-          <span class="at-param-val" id="at-maxpos-val">10</span>
-        </div>
-        <div class="at-param">
-          <span class="at-param-lbl">Max per city <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Max open tickers in one city at once. Prevents correlated losses when the model is wrong about a specific city.</div></span>
-          <input type="range" min="1" max="5" step="1" value="2" style="flex:1;" oninput="document.getElementById('at-percity-val').textContent=this.value;atSaveSetting('max_per_city',this.value)">
-          <span class="at-param-val" id="at-percity-val">2</span>
-        </div>
-        <div class="at-param">
-          <span class="at-param-lbl">Min 24h volume <span class="at-tip-icon" tabindex="0">?</span><div class="at-tip-box">Skip tickers below this 24h volume. Guards against early D+1 markets with unreliable thin-book pricing.</div></span>
-          <input type="range" min="0" max="2000" step="100" value="500" style="flex:1;" oninput="document.getElementById('at-vol-val').textContent='$'+this.value;atSaveSetting('min_volume',this.value)">
-          <span class="at-param-val" id="at-vol-val">$500</span>
+        <div id="lv-cfg-msg" style="font-size:10px;color:var(--muted);"></div>
+        <button onclick="lvToggleAdv(this)" style="font-size:10px;color:var(--muted);background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-align:left;">&#9656; Advanced</button>
+        <div id="lv-adv" style="display:none;flex-direction:column;gap:10px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+            <div><div style="font-size:12px;">Min grade</div><div style="font-size:10px;color:var(--muted);">Only signals at this grade or better trade</div></div>
+            <select id="lv-cfg-grade" style="padding:5px;font-family:inherit;font-size:12px;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;"><option>A</option><option>B</option><option>C</option></select>
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+            <div><div style="font-size:12px;">Kelly multiplier</div><div style="font-size:10px;color:var(--muted);">Fraction of full Kelly used for sizing (0.5 = half-Kelly)</div></div>
+            <input id="lv-cfg-kelly" type="number" step="0.05" min="0" max="1" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+            <div><div style="font-size:12px;">Max positions</div><div style="font-size:10px;color:var(--muted);">Total open positions allowed at once</div></div>
+            <input id="lv-cfg-maxpos" type="number" step="1" min="1" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+            <div><div style="font-size:12px;">Max per city</div><div style="font-size:10px;color:var(--muted);">Open positions allowed in one city</div></div>
+            <input id="lv-cfg-percity" type="number" step="1" min="1" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+          </div>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+            <div><div style="font-size:12px;">Scan interval</div><div style="font-size:10px;color:var(--muted);">Seconds between market scans</div></div>
+            <input id="lv-cfg-scan" type="number" step="60" min="60" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+          </div>
         </div>
       </div>
     </div>
 
-    <div class="at-card">
-      <div class="section-lbl" style="margin-bottom:10px;">Active orders</div>
-      <div id="at-orders"><div style="font-size:11px;color:var(--muted);">No orders today.</div></div>
+    <!-- This week -->
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">RESULTS — ALL LIVE TRADES</div></div>
+      <div id="lv-week" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
     </div>
 
-    <div class="at-card">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-        <div class="section-lbl" style="margin-bottom:0;">Execution log <span style="font-weight:400;color:var(--muted);">— last 3 days</span></div>
-        <button onclick="loadAutoTrader()" style="font-size:9px;padding:3px 8px;border:0.5px solid var(--border);border-radius:4px;background:var(--bg);color:var(--muted);cursor:pointer;font-family:inherit;">↻</button>
-      </div>
-      <div id="at-log"><div style="font-size:11px;color:var(--muted);">Not yet implemented.</div></div>
+    <!-- PnL over time -->
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">CUMULATIVE PNL</div><div id="lv-pnl-total" class="rf-hdr-val"></div></div>
+      <div id="lv-pnlchart" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
     </div>
+
+    <!-- Open positions -->
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">OPEN LIVE POSITIONS</div></div>
+      <div id="lv-open" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
+    </div>
+
+    <!-- Recent fills -->
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">RECENT FILLS</div></div>
+      <div id="lv-recent" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
+    </div>
+
+    <!-- Slippage -->
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">SLIPPAGE BY CITY</div></div>
+      <div id="lv-slip" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
+    </div>
+
+    <!-- Settlement health -->
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">SETTLEMENT HEALTH</div></div>
+      <div id="lv-health" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
+    </div>
+
   </div>
 </div>
 
 <!-- HISTORY -->
-<div id="p-hist" style="display:none">
-  <div class="main">
-    <div id="hist-summary" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px;"></div>
-    <div id="hist-list"><div style="color:var(--muted);font-size:11px;padding:16px 0;">Loading…</div></div>
-  </div>
-</div>
+
 
 <script>
 const SERVER='';
@@ -1084,7 +1101,7 @@ function toggleTheme(){
   });
 })();
 function sw(t){
-  ['scan','dash','pos','rules','hist','bt','analysis'].forEach(x=>{
+  ['scan','dash','pos','live','analysis'].forEach(x=>{
     const p=document.getElementById('p-'+x)||document.getElementById('s-'+x);
     if(p)p.style.display=x===t?'block':'none';
     const tb=document.getElementById('t-'+x);
@@ -1094,78 +1111,178 @@ function sw(t){
   if(t==='scan'&&!tempScanCache&&currentScanMode==='temp')loadTempScanner();
   if(t==='scan'&&currentScanMode==='temp')loadTempStatus();
   if(t==='pos')loadPortfolio();
-  if(t==='hist')loadHistory();
-  if(t==='rules')loadAutoTrader();
+  if(t==='live')loadLive();
+}
+
+// ── LIVE TAB ─────────────────────────────────────────────────────────────
+function lvFmt$(x){return (x<0?'-$':'$')+Math.abs(x).toFixed(2);}
+async function loadLive(){
+  try{
+    const [live,cfgR,resR]=await Promise.all([
+      fetch(SERVER+'/debug/live').then(r=>r.json()),
+      fetch(SERVER+'/auto-trader/config').then(r=>r.json()),
+      fetch(SERVER+'/debug/live-results').then(r=>r.json()).catch(()=>null)
+    ]);
+    const cfg=cfgR.config||{};
+    // status
+    const armed=live.live_mode&&live.enabled;
+    const el=document.getElementById('lv-armed');
+    el.textContent=armed?'LIVE — ARMED':'OFF';
+    el.className='pill '+(armed?'pill-ok':'pill-err');
+    document.getElementById('lv-spent').textContent=lvFmt$(live.spent_today||0);
+    document.getElementById('lv-cap').textContent=lvFmt$(live.daily_cap||0);
+    document.getElementById('lv-fills').textContent=live.live_fills_today??0;
+    document.getElementById('lv-simfills').textContent=live.sim_fills_today??0;
+    const pct=live.daily_cap?Math.min(100,100*(live.spent_today||0)/live.daily_cap):0;
+    const bar=document.getElementById('lv-capbar');
+    bar.style.width=pct+'%';
+    bar.style.background=pct>=90?'var(--no)':pct>=60?'var(--warn)':'var(--yes)';
+    // settings
+    document.getElementById('lv-cfg-cap').value=cfg.daily_cap_dollars??'';
+    document.getElementById('lv-cfg-fill').value=cfg.max_per_fill??'';
+    document.getElementById('lv-cfg-ticker').value=cfg.max_per_ticker??'';
+    document.getElementById('lv-cfg-minfill').value=cfg.min_fill_dollars??'';
+    document.getElementById('lv-cfg-grade').value=cfg.min_grade||'A';
+    document.getElementById('lv-cfg-kelly').value=cfg.kelly_mult??'';
+    document.getElementById('lv-cfg-maxpos').value=cfg.max_positions??'';
+    document.getElementById('lv-cfg-percity').value=cfg.max_per_city??'';
+    document.getElementById('lv-cfg-scan').value=cfg.scan_interval??'';
+    document.getElementById('lv-cfg-wl').value=(cfg.live_city_whitelist||[]).join(', ');
+    // results
+    const R=resR&&resR.ok?resR.results:null;
+    const wk=document.getElementById('lv-week');
+    if(R&&R.live_pnl&&R.execution){
+      const p=R.live_pnl,e=R.execution;
+      wk.innerHTML=
+        '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;color:var(--ink);">'+
+        '<div><div style="font-size:10px;color:var(--muted);">STAKED</div><div style="font-size:15px;font-weight:500;">'+lvFmt$(p.staked)+'</div></div>'+
+        '<div><div style="font-size:10px;color:var(--muted);">PNL</div><div style="font-size:15px;font-weight:500;color:'+(p.total_pnl>=0?'var(--yes)':'var(--no)')+'">'+lvFmt$(p.total_pnl)+'</div></div>'+
+        '<div><div style="font-size:10px;color:var(--muted);">RETURN / $</div><div style="font-size:15px;font-weight:500;">'+(p.ev_per_dollar>=0?'+':'')+(p.ev_per_dollar*100).toFixed(0)+'&cent;</div></div>'+
+        '<div><div style="font-size:10px;color:var(--muted);">WINS</div><div style="font-size:15px;font-weight:500;">'+p.wins+' / '+p.settled+'</div></div>'+
+        '</div>'+
+        '<div style="margin-top:10px;font-size:11px;color:var(--muted);">Fill rate '+
+        (e.fill_rate!=null?(e.fill_rate*100).toFixed(0)+'%':'—')+
+        ' &middot; avg slippage '+(e.avg_slippage_c!=null?e.avg_slippage_c+'&cent;':'—')+
+        ' &middot; orders: '+e.filled+' filled, '+e.partial+' partial, '+e.unfilled+' unfilled</div>';
+    } else if(R&&R.note){
+      wk.textContent='No live trades yet.';
+    } else {
+      wk.textContent=(resR&&resR.error)?('Results unavailable: '+resR.error):'No settled live trades yet.';
+    }
+    // pnl chart
+    lvPnlChart(R&&R.pnl_series?R.pnl_series:[]);
+    // open positions
+    const op=document.getElementById('lv-open');
+    if(R&&R.open_live&&R.open_live.length){
+      op.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:11px;color:var(--ink);">'+
+        '<tr style="color:var(--muted);text-align:left;"><th style="padding:3px 6px;">TICKER</th><th>CT</th><th>PRICE</th><th>TARGET</th></tr>'+
+        R.open_live.map(o=>'<tr><td style="padding:3px 6px;">'+o.ticker+'</td><td>'+o.count+'</td><td>'+(o.price_c!=null?o.price_c+'&cent;':'—')+'</td><td>'+(o.target_date||'—')+'</td></tr>').join('')+'</table>';
+    } else op.textContent='None.';
+    // recent fills
+    const rc=document.getElementById('lv-recent');
+    if(live.recent_fills&&live.recent_fills.length){
+      rc.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:11px;color:var(--ink);">'+
+        '<tr style="color:var(--muted);text-align:left;"><th style="padding:3px 6px;">WHEN</th><th>TICKER</th><th>CT</th><th>COST</th><th>SLIP</th><th></th></tr>'+
+        live.recent_fills.map(f=>'<tr><td style="padding:3px 6px;white-space:nowrap;">'+String(f.ts).slice(5,16)+'</td><td>'+f.ticker+'</td><td>'+f.count+'</td><td>'+lvFmt$(f.cost||0)+'</td><td>'+(f.slippage_c!=null?f.slippage_c+'&cent;':'—')+'</td><td>'+(f.is_live?'<span style="color:var(--yes);">LIVE</span>':'<span style="color:var(--muted);">sim</span>')+'</td></tr>').join('')+'</table>';
+    } else rc.textContent='No fills yet.';
+    // slippage by city
+    const sl=document.getElementById('lv-slip');
+    if(R&&R.slippage_by_city&&R.slippage_by_city.length){
+      sl.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:11px;color:var(--ink);">'+
+        '<tr style="color:var(--muted);text-align:left;"><th style="padding:3px 6px;">CITY</th><th>N</th><th>AVG SLIP</th><th>FILL RATE</th></tr>'+
+        R.slippage_by_city.map(s=>'<tr><td style="padding:3px 6px;">'+s.city+'</td><td>'+s.n+'</td><td>'+(s.avg_slippage_c!=null?s.avg_slippage_c+'&cent;':'—')+'</td><td>'+(s.fill_rate!=null?(s.fill_rate*100).toFixed(0)+'%':'—')+'</td></tr>').join('')+'</table>';
+    } else sl.textContent='No live orders yet.';
+    // settlement health
+    const hh=document.getElementById('lv-health');
+    if(R&&R.settlement_health){
+      const h=R.settlement_health;
+      hh.innerHTML='<span style="color:var(--ink);">'+h.unsettled_city_dates+'</span> unsettled city-dates'+
+        (h.abandoned_rows!=null?' &middot; <span style="color:var(--ink);">'+h.abandoned_rows+'</span> abandoned':'');
+    } else hh.textContent='—';
+  }catch(e){
+    document.getElementById('lv-week').textContent='Load error: '+e.message;
+  }
+}
+function lvPnlChart(series){
+  const el=document.getElementById('lv-pnlchart');
+  const tot=document.getElementById('lv-pnl-total');
+  if(!series.length){el.textContent='No settled live trades yet.';tot.textContent='';return;}
+  let cum=0;const pts=series.map(d=>({date:d.date,v:(cum+=d.pnl)}));
+  tot.innerHTML=(cum<0?'-$':'$')+Math.abs(cum).toFixed(2);
+  tot.style.color=cum>=0?'var(--yes)':'var(--no)';
+  const W=640,H=180,PL=46,PR=10,PT=12,PB=26;
+  const vs=pts.map(p=>p.v);
+  let lo=Math.min(0,...vs),hi=Math.max(0,...vs);
+  if(hi===lo){hi+=1;lo-=1;}
+  const pad=(hi-lo)*0.1;hi+=pad;lo-=pad;
+  const X=i=>pts.length===1?(PL+(W-PL-PR)/2):PL+(W-PL-PR)*i/(pts.length-1);
+  const Y=v=>PT+(H-PT-PB)*(1-(v-lo)/(hi-lo));
+  const line=pts.map((p,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(p.v).toFixed(1)).join(' ');
+  const zero=Y(0);
+  const last=pts[pts.length-1];
+  // x labels: first, last, middle if room
+  let xl=[[0,pts[0].date]];
+  if(pts.length>2)xl.push([Math.floor((pts.length-1)/2),pts[Math.floor((pts.length-1)/2)].date]);
+  if(pts.length>1)xl.push([pts.length-1,last.date]);
+  el.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto;display:block;">'+
+    '<line x1="'+PL+'" y1="'+zero.toFixed(1)+'" x2="'+(W-PR)+'" y2="'+zero.toFixed(1)+'" stroke="var(--border)" stroke-dasharray="3 3"/>'+
+    '<text x="'+(PL-6)+'" y="'+(Y(hi-pad)+4).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--muted)">$'+(hi-pad).toFixed(2)+'</text>'+
+    '<text x="'+(PL-6)+'" y="'+(zero+4).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--muted)">$0</text>'+
+    '<text x="'+(PL-6)+'" y="'+(Y(lo+pad)+4).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--muted)">$'+(lo+pad).toFixed(2)+'</text>'+
+    '<path d="'+line+'" fill="none" stroke="'+(cum>=0?'var(--yes)':'var(--no)')+'" stroke-width="1.5"/>'+
+    pts.map((p,i)=>'<circle cx="'+X(i).toFixed(1)+'" cy="'+Y(p.v).toFixed(1)+'" r="2.5" fill="'+(p.v>=0?'var(--yes)':'var(--no)')+'"/>').join('')+
+    xl.map(([i,d])=>'<text x="'+X(i).toFixed(1)+'" y="'+(H-8)+'" text-anchor="middle" font-size="10" fill="var(--muted)">'+d.slice(5)+'</text>').join('')+
+    '</svg>';
+}
+function lvToggleAdv(btn){
+  const el=document.getElementById('lv-adv');
+  const open=el.style.display==='none';
+  el.style.display=open?'flex':'none';
+  btn.innerHTML=(open?'&#9662;':'&#9656;')+' Advanced';
+}
+async function lvArm(){
+  if(!confirm('Arm live trading? Real money orders will be placed.'))return;
+  await fetch(SERVER+'/auto-trader/go-live');loadLive();
+}
+async function lvKill(){
+  await fetch(SERVER+'/auto-trader/kill');loadLive();
+}
+async function lvSaveCfg(){
+  const msg=document.getElementById('lv-cfg-msg');
+  try{
+    const body={
+      daily_cap_dollars:parseFloat(document.getElementById('lv-cfg-cap').value)||0,
+      max_per_fill:parseFloat(document.getElementById('lv-cfg-fill').value)||0,
+      max_per_ticker:parseFloat(document.getElementById('lv-cfg-ticker').value)||0,
+      min_fill_dollars:parseFloat(document.getElementById('lv-cfg-minfill').value)||0,
+      live_city_whitelist:document.getElementById('lv-cfg-wl').value.split(',').map(s=>s.trim()).filter(Boolean),
+      min_grade:document.getElementById('lv-cfg-grade').value,
+      kelly_mult:parseFloat(document.getElementById('lv-cfg-kelly').value)||0.5,
+      max_positions:parseInt(document.getElementById('lv-cfg-maxpos').value)||10,
+      max_per_city:parseInt(document.getElementById('lv-cfg-percity').value)||2,
+      scan_interval:parseInt(document.getElementById('lv-cfg-scan').value)||300
+    };
+    if(body.min_fill_dollars>body.max_per_fill){
+      msg.textContent='Not saved: min fill ('+body.min_fill_dollars+') > max per fill ('+body.max_per_fill+') — no order could ever place.';
+      msg.style.color='var(--no)';return;
+    }
+    const r=await fetch(SERVER+'/auto-trader/config',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+    msg.textContent=r.ok?'Saved.':'Save failed: '+(r.error||'unknown');
+    msg.style.color=r.ok?'var(--yes)':'var(--no)';
+  }catch(e){msg.textContent='Save failed: '+e.message;msg.style.color='var(--no)';}
 }
 
 // ── AUTO-TRADER TAB ───────────────────────────────────────────────────────
-function atToggleAdvanced(btn){
-  const el=document.getElementById('at-advanced');
-  const open=el.style.display==='none';
-  el.style.display=open?'block':'none';
-  btn.textContent=(open?'\u25be':'\u25b6')+' Advanced settings';
-}
 
-function atLockInputs(on){
-  document.querySelectorAll('#at-advanced input, .at-card input[type=range]')
-    .forEach(function(el){ el.disabled=on; el.style.opacity=on?'0.4':'1'; });
-  document.querySelectorAll('#at-min-grade')
-    .forEach(function(el){ el.disabled=on; el.style.opacity=on?'0.4':'1'; });
-}
 
-async function atToggleMaster(btn){
-  const on = !btn.classList.contains('on');
-  btn.classList.toggle('on', on);
-  const statusEl = document.getElementById('at-status-val');
-  statusEl.textContent = on ? 'Starting...' : 'Stopping...';
-  statusEl.style.color = 'var(--muted)';
-  atLockInputs(on);
-  atSaveSetting('master_on', on ? '1' : '0');
-  try {
-    const cfg = atCollectConfig();
-    cfg.enabled = on;
-    const r = await fetch(SERVER+'/auto-trader/config', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(cfg)
-    }).then(x=>x.json());
-    if(r.ok){
-      const alive = r.config && r.config.enabled;
-      statusEl.textContent = alive ? 'Running' : 'Stopped';
-      statusEl.style.color = alive ? 'var(--yes)' : 'var(--muted)';
-    } else {
-      statusEl.textContent = 'Error'; statusEl.style.color = 'var(--loss)';
-    }
-  } catch(e){
-    statusEl.textContent = on ? 'Running' : 'Stopped';
-    statusEl.style.color = on ? 'var(--yes)' : 'var(--muted)';
-  }
-}
 
-function atCollectConfig(){
-  return {
-    enabled:        localStorage.getItem('at_master_on') === '1',
-    min_grade:      document.getElementById('at-min-grade')?.value || 'A',
-    horizons:       ['d0', 'd1'],
-    kelly_mult:     parseFloat(localStorage.getItem('at_kelly_mult') || '0.5'),
-    bankroll_unit:  parseFloat(localStorage.getItem('at_bankroll_unit') || '100'),
-    max_per_fill:   parseFloat(localStorage.getItem('at_max_per_fill') || '25'),
-    max_per_ticker: parseFloat(localStorage.getItem('at_max_per_ticker') || '75'),
-    max_positions:  parseInt(localStorage.getItem('at_max_positions') || '10'),
-    max_per_city:   parseInt(localStorage.getItem('at_max_per_city') || '2'),
-    min_volume:     parseInt(localStorage.getItem('at_min_volume') || '200'),
-  };
-}
 
-function atSaveSetting(key, val){
-  try { localStorage.setItem('at_'+key, String(val)); } catch(e){}
-  clearTimeout(window._atSaveTimer);
-  window._atSaveTimer = setTimeout(function(){
-    fetch(SERVER+'/auto-trader/config', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(atCollectConfig())
-    }).catch(function(){});
-  }, 1000);
-}
+
+
+
+
+
 
 function atRestoreSettings(){
   const map = {
@@ -1191,251 +1308,9 @@ function atRestoreSettings(){
   });
 }
 
-async function loadAutoTrader(){
-  atRestoreSettings();
-  // Fetch live config + scheduler status from server
-  try {
-    const cfg = await fetch(SERVER+'/auto-trader/config').then(r=>r.json());
-    if(cfg.ok){
-      const on    = cfg.config.enabled;
-      const alive = cfg.scheduler_alive;
-      const btn   = document.getElementById('at-master-toggle');
-      const statusEl = document.getElementById('at-status-val');
-      if(btn) btn.classList.toggle('on', on);
-      if(statusEl){
-        statusEl.textContent = on && alive ? 'Running' : on ? 'Armed' : 'Stopped';
-        statusEl.style.color = on && alive ? 'var(--yes)' : on ? 'var(--amber,#854F0B)' : 'var(--muted)';
-      }
-      if(on) atLockInputs(true);
-      localStorage.setItem('at_master_on', on ? '1' : '0');
-    }
-  } catch(e){}
 
-  // Load open positions
-  const ordersEl = document.getElementById('at-orders');
-  const betsEl   = document.getElementById('at-bets-val');
-  const deployEl = document.getElementById('at-deployed-val');
-  try {
-    const posRes = await fetch(SERVER+'/portfolio').then(r=>r.json());
-    const positions  = posRes.ok ? posRes.positions : [];
-    const weatherPos = positions.filter(p=>/RAIN|KXHIGH|KXLOWT|KXLOWS/.test(p.ticker||''));
-    if(betsEl) betsEl.textContent = weatherPos.length;
-    if(deployEl) deployEl.textContent = '$'+weatherPos.reduce((s,p)=>s+(p.total_cost||0),0).toFixed(2);
-    if(ordersEl){
-      if(!weatherPos.length){
-        ordersEl.innerHTML = '<div style="font-size:11px;color:var(--muted);">No open weather positions.</div>';
-      } else {
-        ordersEl.innerHTML = weatherPos.map(function(p){
-          return '<div class="at-order-row">'
-            +'<div class="at-dot at-dot-open"></div>'
-            +'<div style="flex:1;">'
-            +'<div style="font-size:12px;font-weight:500;color:var(--ink);">'+(p.market_title||p.ticker)+'</div>'
-            +'<div style="font-size:10px;color:var(--muted);margin-top:2px;">'+p.ticker
-            +' \u00b7 '+p.yes_contracts+' contracts @ '+p.avg_yes_price_c+'\u00a2'
-            +' \u00b7 $'+p.total_cost+'</div></div>'
-            +'<span style="font-size:10px;padding:2px 7px;border-radius:3px;background:var(--bg);color:var(--muted);border:0.5px solid var(--border);">Open</span>'
-            +'</div>';
-        }).join('');
-      }
-    }
-  } catch(e){
-    if(ordersEl) ordersEl.innerHTML='<div style="font-size:11px;color:var(--loss);">'+e+'</div>';
-  }
-
-  // Load execution log
-  const logEl = document.getElementById('at-log');
-  try {
-    const logRes = await fetch(SERVER+'/auto-trader/log').then(r=>r.json());
-    const levelColor = {PLACE:'var(--yes)',OK:'var(--yes)',SCAN:'var(--muted)',
-                        SKIP:'#854F0B',ERR:'var(--loss)',SETTLE:'#378ADD'};
-    if(logRes.ok && logRes.log && logRes.log.length){
-
-      // Parse last cycle summary for status indicators
-      const lastComplete = logRes.log.find(l=>l.level==='SCAN' && l.msg && l.msg.includes('Cycle complete'));
-      const lastStart    = logRes.log.find(l=>l.level==='SCAN' && l.msg && l.msg.includes('Cycle start'));
-      const lastCycleEl  = document.getElementById('at-last-cycle');
-      const signalsEl    = document.getElementById('at-signals-found');
-
-      if(lastComplete && lastCycleEl){
-        const ts = new Date(lastComplete.ts);
-        const ago = Math.round((Date.now() - ts)/60000);
-        lastCycleEl.textContent = ago < 60 ? ago+'m ago' : Math.round(ago/60)+'h ago';
-        lastCycleEl.style.color = ago < 10 ? 'var(--yes)' : 'var(--muted)';
-      }
-
-      if(signalsEl && lastStart){
-        // Count signals evaluated, placed, and skipped in last cycle
-        const startIdx = logRes.log.indexOf(lastStart);
-        const cycleEntries = logRes.log.slice(0, startIdx + 1);
-        const placed  = cycleEntries.filter(l=>l.level==='PLACE').length;
-        const evals   = cycleEntries.filter(l=>l.level==='SCAN' && l.msg && l.msg.includes('Evaluating')).length;
-        const skipped = cycleEntries.filter(l=>l.level==='SKIP').length;
-        if(placed > 0){
-          signalsEl.textContent = evals+' evaluated · '+placed+' placed';
-          signalsEl.style.color = 'var(--yes)';
-        } else if(evals > 0){
-          signalsEl.textContent = evals+' evaluated · 0 placed (book/budget)';
-          signalsEl.style.color = '#854F0B';
-        } else {
-          signalsEl.textContent = 'No A-grade signals found';
-          signalsEl.style.color = 'var(--muted)';
-        }
-      }
-
-      logEl.innerHTML = logRes.log.map(function(l){
-        const col = levelColor[l.level]||'var(--muted)';
-        const ts  = l.ts ? l.ts.substring(11,19) : '—';
-        return '<div class="at-log-line">'
-          +'<span class="at-log-ts">'+ts+'</span>'
-          +'<span style="color:'+col+';margin-right:6px;">'+l.level+'</span>'
-          +(l.msg||'')+(l.ticker?' \u00b7 '+l.ticker:'')
-          +'</div>';
-      }).join('');
-    } else {
-      logEl.innerHTML = '<div style="font-size:11px;color:var(--muted);">No log entries yet. Auto-trader will log here once running.</div>';
-    }
-  } catch(e){
-    if(logEl) logEl.innerHTML='<div style="font-size:11px;color:var(--muted);">Log unavailable.</div>';
-  }
-}
 // ── HISTORY TAB — Kalshi settlements + model snapshots ───────────────────
-async function loadHistory(){
-  const summary=document.getElementById('hist-summary');
-  const list=document.getElementById('hist-list');
-  if(!list)return;
-  list.innerHTML='<div style="color:var(--muted);font-size:11px;padding:16px 0;">Loading…</div>';
-  try{
-    const [pnlRes,posRes,histRes]=await Promise.all([
-      fetch(SERVER+'/pnl?limit=200').then(r=>r.json()),
-      fetch(SERVER+'/portfolio').then(r=>r.json()),
-      fetch(SERVER+'/temp/history?limit=500').then(r=>r.json()),
-    ]);
-    const settled  = pnlRes.ok ? pnlRes.trades    : [];
-    const open     = posRes.ok ? posRes.positions  : [];
-    const snapshots= histRes.ok? histRes.snapshots : [];
 
-    // Build ticker->snapshot map from DB
-    const snapMap={};
-    snapshots.forEach(function(s){ snapMap[s.ticker]=s; });
-
-    // Enrich settled with DB snapshot + actual settlement temp
-    settled.forEach(function(t){
-      const s=snapMap[t.ticker];
-      if(s){ t.snap=s; }
-      if(s&&s.settled_temp!=null) t.actual_f=parseFloat(s.settled_temp);
-    });
-
-    const TEMP_START = '2026-04-16'; // ignore all pre-model rain-era bets
-    const weather      = settled.filter(t=>/KXHIGH|KXLOWT|KXLOWS/.test(t.ticker||'') && (t.date||'') >= TEMP_START);
-    const weatherOpen  = open.filter(p=>/KXHIGH|KXLOWT|KXLOWS/.test(p.ticker||''));
-    const wins      = weather.filter(t=>t.outcome==='win');
-    const winRate   = weather.length?Math.round(wins.length/weather.length*100):null;
-    const weatherPnl= weather.reduce((s,t)=>s+(t.pnl||0),0);
-
-    if(summary)summary.innerHTML=
-      '<div class="bal-card"><div class="bal-lbl">Weather P&L</div>'
-      +'<div class="bal-val '+(weatherPnl>=0?'c-profit':'c-loss')+'">'+(weatherPnl>=0?'+':'')+'$'+weatherPnl.toFixed(2)+'</div></div>'
-      +'<div class="bal-card"><div class="bal-lbl">Win rate</div><div class="bal-val">'+(winRate!==null?winRate+'%':'—')+'</div></div>'
-      +'<div class="bal-card"><div class="bal-lbl">Weather trades</div><div class="bal-val">'+weather.length+'</div></div>'
-      +'<div class="bal-card"><div class="bal-lbl">Open positions</div><div class="bal-val">'+weatherOpen.length+'</div></div>';
-
-    let html='';
-
-    // Model analysis — weather trades that have both snap and actual temp
-    const withData=weather.filter(t=>t.snap&&t.snap.best_forecast!=null&&t.actual_f!=null);
-    if(withData.length>=1){
-      const avgMiss=withData.reduce((s,t)=>s+(t.actual_f-parseFloat(t.snap.best_forecast)),0)/withData.length;
-      const ranHot=withData.filter(t=>t.actual_f>parseFloat(t.snap.best_forecast)).length;
-      const ranCold=withData.filter(t=>t.actual_f<parseFloat(t.snap.best_forecast)).length;
-      const missByCity={};
-      withData.forEach(function(t){
-        const city=t.snap.city||t.snap.nws_station||'?';
-        if(!missByCity[city])missByCity[city]={sum:0,n:0,losses:0};
-        missByCity[city].sum+=(t.actual_f-parseFloat(t.snap.best_forecast));
-        missByCity[city].n++;
-        if(t.outcome==='loss')missByCity[city].losses++;
-      });
-      html+='<div style="background:var(--paper);border:0.5px solid var(--border);border-radius:8px;padding:12px;margin-bottom:16px;">'
-        +'<div style="font-size:10px;color:var(--muted);letter-spacing:0.8px;text-transform:uppercase;margin-bottom:10px;">Model analysis — '+withData.length+' weather trade'+(withData.length>1?'s':'')+'</div>'
-        +'<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px;">'
-        +'<div class="bal-card"><div class="bal-lbl">Avg miss</div><div style="font-size:15px;font-weight:500;color:'+(avgMiss>0?'#c0392b':'#378ADD')+';">'+(avgMiss>0?'+':'')+avgMiss.toFixed(1)+'°F</div></div>'
-        +'<div class="bal-card"><div class="bal-lbl">Ran hot</div><div style="font-size:15px;font-weight:500;">'+ranHot+'/'+withData.length+'</div></div>'
-        +'<div class="bal-card"><div class="bal-lbl">Ran cold</div><div style="font-size:15px;font-weight:500;">'+ranCold+'/'+withData.length+'</div></div>'
-        +'</div>'
-        +'<div style="font-size:10px;color:var(--muted);margin-bottom:6px;">Miss by city (actual − model center):</div>';
-      Object.keys(missByCity).forEach(function(city){
-        const m=missByCity[city];
-        const avg=m.sum/m.n;
-        html+='<div style="display:flex;justify-content:space-between;font-size:11px;padding:4px 0;border-bottom:0.5px solid var(--border);">'
-          +'<span>'+city+'</span>'
-          +'<span style="color:'+(avg>0?'#c0392b':'#378ADD')+';">'+(avg>0?'+':'')+avg.toFixed(1)+'°F avg · '+m.n+' trade'+(m.n>1?'s':'')+' · '+m.losses+' loss'+(m.losses!==1?'es':'')+'</span>'
-          +'</div>';
-      });
-      html+='</div>';
-    }
-
-    // Open positions — weather only, show NWS temp if already settled
-    if(weatherOpen.length){
-      html+='<div style="font-size:10px;color:var(--muted);letter-spacing:0.8px;text-transform:uppercase;margin-bottom:8px;">Open positions</div>';
-      weatherOpen.forEach(function(p){
-        // Use market_value - total_cost for unrealized — matches Kalshi's own display
-        const mktVal = p.market_value != null ? parseFloat(p.market_value) : null;
-        const cost   = parseFloat(p.total_cost||0);
-        const unr    = mktVal != null ? mktVal - cost : null;
-        const unrPct = unr != null && cost > 0 ? Math.round(unr/cost*100) : null;
-        const s=snapMap[p.ticker];
-        const nwsTemp=s&&s.settled_temp!=null?parseFloat(s.settled_temp):null;
-        html+='<div class="hist-row">'
-          +'<div style="flex:1;min-width:0;"><div style="font-size:12px;font-weight:500;color:var(--ink);">'+(p.market_title||p.ticker)+'</div>'
-          +'<div style="font-size:10px;color:var(--muted);margin-top:2px;">'+p.ticker+' \u00b7 '+p.yes_contracts+' contracts @ '+p.avg_yes_price_c+'\u00a2 \u00b7 cost $'+cost.toFixed(2)+'</div>'
-          +(nwsTemp!=null
-            ?'<div style="font-size:10px;margin-top:3px;font-weight:500;color:#378ADD;">NWS settled: '+nwsTemp+'\u00b0F \u00b7 awaiting Kalshi payout</div>'
-            :'<div style="font-size:10px;color:var(--muted);margin-top:3px;">Awaiting NWS settlement</div>')
-          +'</div>'
-          +'<div style="text-align:right;flex-shrink:0;">'
-          +(unr!=null
-            ?'<div style="font-size:13px;font-weight:500;color:'+(unr>=0?'var(--gain)':'var(--loss)')+';">'+(unr>=0?'+':'')+'$'+Math.abs(unr).toFixed(2)+'</div>'
-             +'<div style="font-size:10px;color:'+(unr>=0?'var(--gain)':'var(--loss)')+';">'+(unrPct!=null?(unr>=0?'+':'')+unrPct+'%':'')+' unrealized</div>'
-            :'<div style="font-size:11px;color:var(--muted);">Open</div>')
-          +'</div></div>';
-      });
-    }
-
-    // Settled trades — weather only
-    if(weather.length){
-      html+='<div style="font-size:10px;color:var(--muted);letter-spacing:0.8px;text-transform:uppercase;margin:16px 0 8px;">Settled trades</div>';
-      let lastDate='';
-      weather.forEach(function(t){
-        if(t.date!==lastDate){html+='<div class="month-lbl">'+t.date+'</div>';lastDate=t.date;}
-        const win=t.outcome==='win';
-        const isW=/KXHIGH|KXLOWT|KXLOWS/.test(t.ticker||'');
-        const s=t.snap;
-        const mu=s?parseFloat(s.best_forecast):null;
-        const miss=(mu!=null&&t.actual_f!=null)?(t.actual_f-mu):null;
-        html+='<div class="hist-row" style="border-left:3px solid '+(win?'#3B6D11':'#c0392b')+';">'
-          +'<div style="flex:1;min-width:0;">'
-          +'<div style="font-size:12px;font-weight:500;color:var(--ink);">'+(t.market_title||t.ticker)+'</div>'
-          +'<div style="font-size:10px;color:var(--muted);margin-top:2px;">'+t.ticker+' · '+t.side+' · '+t.contracts+' @ '+t.avg_entry_c+'¢'+(isW?' · <span style="color:#3B6D11;">weather</span>':'')+'</div>'
-          +(s?'<div style="font-size:10px;color:var(--muted);margin-top:3px;">'
-            +'model '+(mu!=null?mu.toFixed(1)+'\u00b0':'?')+' / '+(s.model_prob?Math.round(s.model_prob*100)+'%':'?')+' / grade '+(s.grade||'?')
-            +(t.actual_f!=null?' \u00b7 <span style="font-weight:500;color:#378ADD;">NWS '+t.actual_f+'\u00b0F</span>':'')
-            +(miss!=null?' \u00b7 <span style="color:'+(Math.abs(miss)>2?'#c0392b':'var(--muted)')+';">miss '+(miss>0?'+':'')+miss.toFixed(1)+'\u00b0</span>':'')
-            +'</div>':'')
-          +'</div>'
-          +'<div style="text-align:right;flex-shrink:0;margin-left:12px;">'
-          +'<div style="font-size:13px;font-weight:500;color:'+(win?'var(--gain)':'var(--loss)')+';">'+(t.pnl>=0?'+':'')+'$'+t.pnl+'</div>'
-          +'<div style="font-size:10px;color:var(--muted);">'+(win?'✓ Win':'✗ Loss')+'</div>'
-          +'</div></div>';
-      });
-    }
-
-    if(!weather.length&&!weatherOpen.length)
-      html='<div style="color:var(--muted);font-size:11px;padding:16px 0;">No trades found. Kalshi API key required.</div>';
-    list.innerHTML=html;
-  }catch(e){
-    list.innerHTML='<div style="color:var(--loss);font-size:11px;padding:16px 0;">Error: '+e+'</div>';
-  }
-}
 
 
 let currentScanMode = 'rain';
@@ -2594,118 +2469,7 @@ loadData();
 </script>
 
 <!-- BACKTEST TAB -->
-<div id="s-bt" class="section" style="display:none">
-  <div style="max-width:900px;margin:0 auto;padding:0 16px">
-    <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px;flex-wrap:wrap">
-      <h2 style="font-size:13px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin:0">Forecast Backtest</h2>
-      <select id="bt-city" style="font-family:'DM Mono',monospace;font-size:11px;background:var(--card);border:1px solid var(--border);color:var(--ink);padding:6px 10px;border-radius:4px">
-        <option value="seattle">Seattle</option>
-        <option value="portland">Portland</option>
-        <option value="los_angeles">Los Angeles</option>
-        <option value="san_francisco">San Francisco</option>
-        <option value="new_york">New York</option>
-        <option value="chicago">Chicago</option>
-        <option value="miami">Miami</option>
-        <option value="denver">Denver</option>
-      </select>
-      <button onclick="runBacktest()" style="font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:var(--rain);color:#fff;border:none;padding:8px 18px;border-radius:4px;cursor:pointer">Run Backtest</button>
-      <button onclick="testAllCitiesActuals()" style="font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:var(--card);color:var(--ink);border:1px solid var(--border);padding:8px 18px;border-radius:4px;cursor:pointer">Test All Cities</button>
-      <button onclick="recalibrateAll()" style="font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:var(--ink);color:var(--paper);border:none;padding:8px 18px;border-radius:4px;cursor:pointer">⚡ Recalibrate All</button>
-      <span id="bt-status" style="font-size:11px;color:var(--muted)"></span>
-    </div>
 
-    <!-- Recalibrate status panel -->
-    <div id="recal-panel" style="display:none;margin-bottom:20px;background:var(--card);border:1px solid var(--border);border-radius:6px;overflow:hidden">
-      <div style="padding:10px 14px;border-bottom:0.5px solid var(--border);display:flex;justify-content:space-between;align-items:center">
-        <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)">Calibration Status — All Cities</div>
-        <span id="recal-status" style="font-size:11px;color:var(--muted)"></span>
-      </div>
-      <div id="recal-results" style="font-family:'DM Mono',monospace;font-size:11px;padding:4px 0"></div>
-    </div>
-
-    <!-- All Cities Actuals Panel -->
-    <div id="all-cities-panel" style="display:none;margin-bottom:20px;background:var(--card);border:1px solid var(--border);border-radius:6px;overflow:hidden">
-      <div style="padding:10px 14px;border-bottom:0.5px solid var(--border);display:flex;justify-content:space-between;align-items:center">
-        <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)">CLM Actuals Coverage — All 8 Cities</div>
-        <span id="all-cities-status" style="font-size:11px;color:var(--muted)"></span>
-      </div>
-      <div id="all-cities-table" style="font-family:'DM Mono',monospace;font-size:11px"></div>
-    </div>
-
-    <!-- Summary sigma cards -->
-    <div id="bt-sigma" style="display:none;margin-bottom:28px">
-      <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:12px">Calibrated Sigma — Monthly RMSE (OM forecast vs NWS actual)</div>
-      <div id="bt-sigma-cards" style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px"></div>
-      <div style="margin-top:12px;padding:12px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:11px;color:var(--muted)">
-        <strong style="color:var(--ink)">What this means:</strong> Base sigma is the monthly RMSE between OM's full-month forecast and the NWS CLM actual, computed over 12 months. Horizon scaling is applied automatically (D-1 ×0.55 → D-7 ×1.15). Bias is the mean systematic error — negative means OM consistently under-forecasts, so the model adds it back to every projection.
-      </div>
-    </div>
-
-    <!-- Month by month results table -->
-    <div id="bt-table-wrap" style="display:none">
-      <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:12px">Month-by-Month Results</div>
-      <div style="overflow-x:auto">
-        <table id="bt-table" style="width:100%;border-collapse:collapse;font-size:11px;font-family:'DM Mono',monospace">
-          <thead>
-            <tr style="border-bottom:1px solid var(--border);color:var(--muted)">
-              <th style="text-align:left;padding:8px 12px">Month</th>
-              <th style="text-align:right;padding:8px 12px">Actual</th>
-              <th style="text-align:right;padding:8px 12px">OM forecast</th>
-              <th style="text-align:right;padding:8px 12px">Error</th>
-            </tr>
-          </thead>
-          <tbody id="bt-tbody"></tbody>
-        </table>
-      </div>
-    </div>
-
-    <div id="bt-empty" style="display:none;color:var(--muted);font-size:12px;padding:40px 0;text-align:center">
-      No backtest data for this city yet. Run Backtest to fetch OM historical forecast vs NWS CLM actuals.
-    </div>
-
-    <!-- IEM Accuracy Section -->
-    <!-- Explanation box -->
-    <div style="margin-top:28px;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:11px;color:var(--muted);line-height:1.8">
-      <strong style="color:var(--ink)">Calibration columns explained</strong><br>
-      <b style="color:var(--ink)">Base σ (RMSE)</b> — how far off OM's full-month forecast typically is from the NWS CLM actual, in inches. Computed over 12 months of history. This is the uncertainty radius around any EOM projection. Smaller = more predictable city.<br>
-      <b style="color:var(--ink)">Bias</b> — the mean error (OM forecast minus actual). Negative means OM systematically under-forecasts. The model adds this back to every projection silently before computing probabilities.<br>
-      <b style="color:var(--ink)">Direction</b> — WET means OM over-forecasts (positive bias), DRY means it under-forecasts (negative bias). All 8 cities are currently DRY — OM tends to underestimate monthly totals.<br><br>
-      <strong style="color:var(--ink)">Workflow</strong> — <b>⚡ Recalibrate All</b> is the only button you need to run, once after every deploy. Everything else is automatic.
-    </div>
-
-    <!-- Diagnostics (collapsed) -->
-    <div style="margin-top:16px">
-      <div onclick="this.nextElementSibling.style.display=this.nextElementSibling.style.display==='none'?'block':'none'"
-           style="cursor:pointer;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);display:flex;align-items:center;gap:8px;user-select:none">
-        <span>▸ Diagnostics</span>
-        <span style="font-size:9px;font-weight:400;letter-spacing:0;text-transform:none">(IEM accuracy, NWS correction history — informational only)</span>
-      </div>
-      <div style="display:none;margin-top:16px">
-
-        <div style="margin-bottom:20px">
-          <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px;flex-wrap:wrap">
-            <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)">IEM Gap Fill Accuracy</div>
-            <button onclick="runIEMBacktest()" style="font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:var(--card);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:4px;cursor:pointer">Run IEM Test</button>
-            <span id="iem-bt-status" style="font-size:11px;color:var(--muted)"></span>
-          </div>
-          <div id="iem-bt-result" style="display:none;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:11px;line-height:1.8;margin-bottom:8px"></div>
-          <div style="font-size:11px;color:var(--muted);line-height:1.6">Compares IEM ASOS daily totals vs NWS CLI official. Measures the gap-fill error carried in true_mtd — does not feed the model, informational only.</div>
-        </div>
-
-        <div>
-          <div style="display:flex;align-items:center;gap:16px;margin-bottom:8px;flex-wrap:wrap">
-            <div style="font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted)">NWS Correction History</div>
-            <button onclick="runCorrectionsBacktest()" style="font-family:'DM Mono',monospace;font-size:11px;letter-spacing:1px;text-transform:uppercase;background:var(--card);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:4px;cursor:pointer">Check Corrections</button>
-            <span id="corr-bt-status" style="font-size:11px;color:var(--muted)"></span>
-          </div>
-          <div id="corr-bt-result" style="display:none;padding:14px;background:var(--card);border:1px solid var(--border);border-radius:6px;font-size:11px;line-height:1.8;margin-bottom:8px"></div>
-          <div style="font-size:11px;color:var(--muted);line-height:1.6">Scans last 10 CLI versions for MTD revisions ≥ 0.05". Shows how often NWS corrects figures and by how much — does not feed the model.</div>
-        </div>
-
-      </div>
-    </div>
-  </div>
-</div>
 
 <!-- ANALYSIS TAB -->
 <div id="s-analysis" class="section" style="display:none">
@@ -2729,6 +2493,7 @@ loadData();
         <option value="recent_settlements">Recent Settlements (last 20)</option>
         <option value="forecast_shifts">Forecast Shifts (mu change between scans)</option>
         <option value="temp_snapshots_check">Temp Snapshots Settled Data</option>
+        <option value="temp_snapshots_dates">Temp Snapshots by City+Date</option>
       </select>
       <input id="analysis-token" type="password" placeholder="Query token" value="raintracker2026!" 
         style="font-family:'DM Mono',monospace;font-size:11px;background:var(--card);border:1px solid var(--border);color:var(--ink);padding:6px 10px;border-radius:4px;width:160px">
@@ -2822,6 +2587,13 @@ ORDER BY settled_ts DESC LIMIT 20`,
 FROM temp_snapshots
 WHERE settled_temp IS NOT NULL
 ORDER BY target_date DESC LIMIT 20`,
+
+  temp_snapshots_dates: `SELECT city, target_date, COUNT(*) as rows,
+    COUNT(settled_temp) as settled
+FROM temp_snapshots
+GROUP BY city, target_date
+ORDER BY target_date DESC, city
+LIMIT 40`,
 
   forecast_shifts: `SELECT ph1.city, ph1.ticker, ph1.bracket_label,
     ph1.scan_ts as t1, ph2.scan_ts as t2,
@@ -3121,75 +2893,7 @@ async function runCorrectionsBacktest(){
   }catch(e){ status.textContent='Failed: '+e.message; }
 }
 
-async function runBacktest(){
-  const city = document.getElementById('bt-city').value;
-  const status = document.getElementById('bt-status');
-  status.textContent = 'Fetching... this takes ~30 seconds';
-  document.getElementById('bt-sigma').style.display='none';
-  document.getElementById('bt-table-wrap').style.display='none';
-  document.getElementById('bt-empty').style.display='none';
 
-  try{
-    const res = await fetch(SERVER+'/backtest?city='+city+'&months=14');
-    const data = await res.json();
-    if(!data.ok){ status.textContent='Error: '+data.error; return; }
-
-    const results = data.results.filter(r=>r.actual!==null && Object.keys(r.horizons).length>0);
-    if(!results.length){
-      document.getElementById('bt-empty').style.display='block';
-      status.textContent='No data for this city yet';
-      return;
-    }
-
-    // Sigma cards
-    const sigmaCards = document.getElementById('bt-sigma-cards');
-    sigmaCards.innerHTML='';
-    const hardcoded = {d1:0.15,d3:0.4,d5:0.7,d7:1.0};
-    const labels = {d1:'D-1 (1 day out)',d3:'D-3 (3 days out)',d5:'D-5 (5 days out)',d7:'D-7 (7 days out)'};
-    for(const key of ['d1','d3','d5','d7']){
-      const s = data.summary[key];
-      if(!s) continue;
-      const better = s.sigma < hardcoded[key];
-      const bias = s.bias;
-      const biasCl = bias==='WET'?'color:#4a9eff':bias==='DRY'?'color:var(--warn)':'color:var(--muted)';
-      sigmaCards.innerHTML+=`
-        <div style="background:var(--card);border:1px solid var(--border);border-radius:6px;padding:14px">
-          <div style="font-size:10px;color:var(--muted);letter-spacing:1px;margin-bottom:6px">${labels[key]}</div>
-          <div style="font-size:22px;font-weight:700;color:${better?'var(--gain)':'var(--warn)'}">${s.sigma}"</div>
-          <div style="font-size:10px;color:var(--muted);margin-top:4px">was ${hardcoded[key]}" hardcoded ${better?'✓ more accurate':''}</div>
-          <div style="font-size:10px;margin-top:4px;${biasCl}">${bias} bias · n=${s.n}</div>
-        </div>`;
-    }
-    document.getElementById('bt-sigma').style.display='block';
-
-    // Table
-    const tbody = document.getElementById('bt-tbody');
-    tbody.innerHTML='';
-    for(const r of results){
-      const h = r.horizons;
-      const e = r.errors||{};
-      // Use d3 as representative mid-horizon, fall back to any available
-      const projKey = ['d3','d5','d1','d7'].find(k=>h[k]!=null);
-      const proj = projKey ? h[projKey] : null;
-      const err  = projKey ? e[projKey] : null;
-      const projTd = proj!=null
-        ? `<td style="text-align:right;padding:8px 12px">${proj.toFixed(2)}"</td>`
-        : '<td style="text-align:right;padding:8px 12px;color:var(--muted)">—</td>';
-      const errTd = err!=null
-        ? `<td style="text-align:right;padding:8px 12px;${Math.abs(err)<0.3?'color:var(--yes)':Math.abs(err)<0.7?'color:#c8a228':'color:var(--no)'}">${err>0?'+':''}${err.toFixed(2)}"</td>`
-        : '<td style="text-align:right;padding:8px 12px;color:var(--muted)">—</td>';
-      tbody.innerHTML+=`<tr style="border-bottom:1px solid var(--border)">
-        <td style="padding:8px 12px">${r.month}</td>
-        <td style="text-align:right;padding:8px 12px;font-weight:600">${r.actual.toFixed(2)}"</td>
-        ${projTd}${errTd}
-      </tr>`;
-    }
-    document.getElementById('bt-table-wrap').style.display='block';
-    status.textContent=`${results.length} months analyzed`;
-  }catch(err){
-    status.textContent='Request failed: '+err.message;
-  }
-}
 
 // ── TEMP STATUS + AUTO-BACKTEST ───────────────────────────────────────────────
 async function loadTempStatus(){

@@ -6705,6 +6705,47 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
+        elif path == "/admin/migrate-live-trades":
+            # Eagerly apply live_trades columns normally added lazily by
+            # _live_trade_log(). Autocommit — DDL in a shared transaction
+            # rolls back silently on any later error.
+            import os as _os
+            qs = parse_qs(urlparse(self.path).query)
+            if qs.get("token", [""])[0] != _os.environ.get("QUERY_TOKEN", ""):
+                self.send_json({"ok": False, "error": "bad token"})
+                return
+            try:
+                conn = get_db()
+                if not conn:
+                    self.send_json({"ok": False, "error": "No DB"}); return
+                conn.autocommit = True
+                applied, errors = [], []
+                ddls = [
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS order_id TEXT",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS requested_count INTEGER",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS filled_count INTEGER",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS fill_status TEXT",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS avg_fill_price_c NUMERIC(6,2)",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS target_date TEXT",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS lo_temp NUMERIC(5,1)",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS hi_temp NUMERIC(5,1)",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS pnl NUMERIC(10,2)",
+                    "ALTER TABLE temp_snapshots ADD COLUMN IF NOT EXISTS settle_abandoned BOOLEAN DEFAULT FALSE",
+                    "CREATE INDEX IF NOT EXISTS idx_live_trades_ts ON live_trades (ts)",
+                ]
+                for ddl in ddls:
+                    try:
+                        with conn.cursor() as cur:
+                            cur.execute(ddl)
+                        applied.append(ddl)
+                    except Exception as de:
+                        errors.append({"ddl": ddl, "error": str(de)})
+                conn.close()
+                self.send_json({"ok": len(errors) == 0,
+                                "applied": len(applied), "errors": errors})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
         elif path == "/admin/setup-db":
             # Run each table creation independently so one failure doesn't block others
             results = {}
@@ -7544,6 +7585,18 @@ class Handler(BaseHTTPRequestHandler):
                             "unsettled_city_dates": _orph,
                             "abandoned_rows": _aband,
                         }
+
+                        # 7. Daily realised PnL series for charting
+                        cur.execute("""
+                            SELECT settled_ts::date, ROUND(SUM(pnl)::numeric, 2)
+                            FROM live_trades
+                            WHERE is_live = TRUE AND pnl IS NOT NULL
+                              AND settled_ts IS NOT NULL
+                            GROUP BY 1 ORDER BY 1
+                        """)
+                        out["pnl_series"] = [
+                            {"date": str(q[0]), "pnl": float(q[1])}
+                            for q in cur.fetchall()]
 
                     conn.close()
                     self.send_json({"ok": True, "results": out})
