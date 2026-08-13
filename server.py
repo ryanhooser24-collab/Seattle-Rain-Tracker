@@ -2726,12 +2726,27 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
                 at_log("ERR", f"Order failed for {ticker}: {err}", ticker=ticker, city=city_key)
                 break
 
-            # ── Fill confirmation (Patch 1) ─────────────────────────────────
+            # ── Fill confirmation ───────────────────────────────────────────
+            # V2 create-order (immediate_or_cancel) reports the outcome in the
+            # response itself: fill_count / average_fill_price / remaining_count
+            # as fixed-point strings. Legacy polling only as fallback.
             _o = (order or {}).get("order", order) or {}
             _order_id = _o.get("order_id") or _o.get("id")
-            _filled, _conf_px, _fill_status = at_confirm_fill(_order_id, ticker, count)
-            if _conf_px is not None:
-                _avg_px_c = float(_conf_px)
+            if _o.get("fill_count") is not None:
+                _filled = int(float(_o["fill_count"]))
+                _px = _o.get("average_fill_price")
+                if _px is not None:
+                    _avg_px_c = float(_px) * 100.0
+                if _filled <= 0:
+                    _fill_status = "unfilled"
+                elif _filled >= count:
+                    _fill_status = "filled"
+                else:
+                    _fill_status = "partial"
+            else:
+                _filled, _conf_px, _fill_status = at_confirm_fill(_order_id, ticker, count)
+                if _conf_px is not None:
+                    _avg_px_c = float(_conf_px)
 
             if _fill_status == "unfilled" or not _filled:
                 at_cancel_order(_order_id)
