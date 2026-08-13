@@ -336,7 +336,7 @@ _TEMP_BIAS_CACHE   = {}   # city_key -> {"gfs_bias": float, "ecmwf_bias": float,
 _MODEL_CAL_CACHE = {"ts": 0.0, "global": None, "cities": {}, "cities_h": {}, "global_h": {}}
 _MODEL_CAL_TTL   = 6 * 3600
 _MODEL_CAL_BIAS_CLAMP  = 4.0          # max |mu correction| in °F
-_MODEL_CAL_SIGF_CLAMP  = (0.8, 2.5)   # sigma factor bounds
+_MODEL_CAL_SIGF_CLAMP  = (0.8, 3.5)   # sigma factor bounds
 
 def _load_model_calibration(force=False):
     """
