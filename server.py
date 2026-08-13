@@ -2335,22 +2335,35 @@ def run_settlement_backfill(days=None, abandon=True, force=False):
 
 def at_place_order(ticker, side, count, yes_price_c):
     """
-    Place a single order on Kalshi. Returns (ok, order_dict, error_str).
+    Place a single order via Kalshi's V2 create-order endpoint
+    (POST /portfolio/events/orders — the old /portfolio/orders POST now
+    returns 410 deprecated_v1_order_endpoint).
+    V2 quotes are YES-perspective: buy YES = "bid" at price; buy NO = "ask"
+    at (1 - no_price). count and price are fixed-point strings.
+    immediate_or_cancel preserves the old take-at-ask-else-cancel intent
+    without ever leaving a resting order.
+    Returns (ok, order_dict, error_str).
     """
     try:
         import uuid as _uuid
+        if side == "yes":
+            v2_side = "bid"
+            price_d = yes_price_c / 100.0
+        else:
+            v2_side = "ask"
+            price_d = 1.0 - (yes_price_c / 100.0)
         payload = {
-            "ticker":          ticker,
-            "side":            side,
-            "action":          "buy",
-            "type":            "limit",
-            "count":           count,
-            "yes_price":       yes_price_c,
-            "client_order_id": str(_uuid.uuid4()),
+            "ticker":                     ticker,
+            "side":                       v2_side,
+            "count":                      f"{int(count)}.00",
+            "price":                      f"{price_d:.4f}",
+            "time_in_force":              "immediate_or_cancel",
+            "self_trade_prevention_type": "taker_at_cross",
+            "client_order_id":            str(_uuid.uuid4()),
         }
         r = requests.post(
-            f"{KALSHI_BASE}/portfolio/orders",
-            headers=kalshi_auth_headers("POST", "/trade-api/v2/portfolio/orders"),
+            f"{KALSHI_BASE}/portfolio/events/orders",
+            headers=kalshi_auth_headers("POST", "/trade-api/v2/portfolio/events/orders"),
             json=payload, timeout=10
         )
         # Safe JSON parse — API occasionally returns non-JSON on errors
