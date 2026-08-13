@@ -2338,17 +2338,19 @@ def at_place_order(ticker, side, count, yes_price_c):
     Place a single order on Kalshi. Returns (ok, order_dict, error_str).
     """
     try:
+        import uuid as _uuid
         payload = {
-            "ticker":    ticker,
-            "side":      side,
-            "action":    "buy",
-            "type":      "limit",
-            "count":     count,
-            "yes_price": yes_price_c,
+            "ticker":          ticker,
+            "side":            side,
+            "action":          "buy",
+            "type":            "limit",
+            "count":           count,
+            "yes_price":       yes_price_c,
+            "client_order_id": str(_uuid.uuid4()),
         }
         r = requests.post(
-            f"{KALSHI_BASE}/orders",
-            headers=kalshi_auth_headers("POST", "/trade-api/v2/orders"),
+            f"{KALSHI_BASE}/portfolio/orders",
+            headers=kalshi_auth_headers("POST", "/trade-api/v2/portfolio/orders"),
             json=payload, timeout=10
         )
         # Safe JSON parse — API occasionally returns non-JSON on errors
