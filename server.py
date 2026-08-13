@@ -1865,6 +1865,49 @@ def at_flush_log_to_db():
 
 _LIVE_TABLE_READY = False
 
+def _ensure_live_trades_table(conn):
+    """Create/upgrade live_trades in place. Safe to call repeatedly."""
+    global _LIVE_TABLE_READY
+    if _LIVE_TABLE_READY:
+        return
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS live_trades (
+                id BIGSERIAL PRIMARY KEY,
+                ts TIMESTAMPTZ DEFAULT NOW(),
+                ticker TEXT NOT NULL, city TEXT, side TEXT,
+                count INTEGER, paper_ask_c INTEGER, order_ask_c INTEGER,
+                slippage_c INTEGER, cost NUMERIC(10,2),
+                is_live BOOLEAN, grade TEXT, net_gap_c INTEGER,
+                hours_to_cutoff NUMERIC(5,1), order_resp TEXT,
+                settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ
+            )
+        """)
+        # Patch columns — added individually so a pre-existing table gets
+        # upgraded in place. autocommit is ON here, so a failure on one
+        # ALTER cannot roll back the others.
+        for _ddl in (
+            "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS order_id TEXT",
+            "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS requested_count INTEGER",
+            "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS filled_count INTEGER",
+            "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS fill_status TEXT",
+            "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS avg_fill_price_c NUMERIC(6,2)",
+            "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS target_date TEXT",
+            "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS lo_temp NUMERIC(5,1)",
+            "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS hi_temp NUMERIC(5,1)",
+            "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS pnl NUMERIC(10,2)",
+            "CREATE INDEX IF NOT EXISTS ix_live_trades_settle "
+            "ON live_trades (city, target_date) WHERE settled_temp IS NULL",
+        ):
+            try:
+                cur.execute(_ddl)
+            except Exception as _de:
+                print(f"  live_trades DDL skipped: {_de}")
+    conn.autocommit = False
+    _LIVE_TABLE_READY = True
+
+
 def _live_trade_log(ticker, city, side, count, paper_ask_c, order_ask_c, cost,
                     is_live, order_resp=None, grade=None, net_gap_c=None, htc=None,
                     order_id=None, requested_count=None, filled_count=None,
@@ -1875,47 +1918,10 @@ def _live_trade_log(ticker, city, side, count, paper_ask_c, order_ask_c, cost,
     slippage_c = order price - paper price (BBO at signal scan time).
     This is THE dataset live trading exists to produce.
     """
-    global _LIVE_TABLE_READY
     try:
         conn = get_db()
         if not conn: return
-        if not _LIVE_TABLE_READY:
-            conn.autocommit = True
-            with conn.cursor() as cur:
-                cur.execute("""
-                    CREATE TABLE IF NOT EXISTS live_trades (
-                        id BIGSERIAL PRIMARY KEY,
-                        ts TIMESTAMPTZ DEFAULT NOW(),
-                        ticker TEXT NOT NULL, city TEXT, side TEXT,
-                        count INTEGER, paper_ask_c INTEGER, order_ask_c INTEGER,
-                        slippage_c INTEGER, cost NUMERIC(10,2),
-                        is_live BOOLEAN, grade TEXT, net_gap_c INTEGER,
-                        hours_to_cutoff NUMERIC(5,1), order_resp TEXT,
-                        settled_temp NUMERIC(5,1), settled_correct BOOLEAN, settled_ts TIMESTAMPTZ
-                    )
-                """)
-                # Patch 1/2 columns — added individually so a pre-existing
-                # table gets upgraded in place. autocommit is ON here, so a
-                # failure on one ALTER cannot roll back the others.
-                for _ddl in (
-                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS order_id TEXT",
-                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS requested_count INTEGER",
-                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS filled_count INTEGER",
-                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS fill_status TEXT",
-                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS avg_fill_price_c NUMERIC(6,2)",
-                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS target_date TEXT",
-                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS lo_temp NUMERIC(5,1)",
-                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS hi_temp NUMERIC(5,1)",
-                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS pnl NUMERIC(10,2)",
-                    "CREATE INDEX IF NOT EXISTS ix_live_trades_settle "
-                    "ON live_trades (city, target_date) WHERE settled_temp IS NULL",
-                ):
-                    try:
-                        cur.execute(_ddl)
-                    except Exception as _de:
-                        print(f"  live_trades DDL skipped: {_de}")
-            conn.autocommit = False
-            _LIVE_TABLE_READY = True
+        _ensure_live_trades_table(conn)
         with conn.cursor() as cur:
             cur.execute("""
                 INSERT INTO live_trades
@@ -2091,6 +2097,7 @@ def _live_trade_settle():
         conn = get_db()
         if not conn:
             return 0
+        _ensure_live_trades_table(conn)
         n = 0
         with conn.cursor() as cur:
             cur.execute("""
@@ -2358,24 +2365,58 @@ def at_place_order(ticker, side, count, yes_price_c):
         return False, None, str(e)
 
 
-def at_fetch_market(ticker):
-    """Fetch live orderbook for one ticker. Returns dict with yes_ask, yes_ask_size or None."""
+def kalshi_fetch_orderbook(ticker, timeout=8):
+    """
+    Fetch one market's orderbook, normalized to the legacy shape:
+        {"yes": [[price_c, size], ...], "no": [[price_c, size], ...]}
+    where each array is that side's resting BIDS in integer cents.
+
+    Kalshi replaced the "orderbook" key (cent-integer levels) with
+    "orderbook_fp" ("yes_dollars"/"no_dollars", dollar-string levels).
+    Handles both. Returns None on HTTP/parse failure.
+    """
     try:
         r = requests.get(
             f"{KALSHI_BASE}/markets/{ticker}/orderbook",
             headers=kalshi_auth_headers("GET", f"/trade-api/v2/markets/{ticker}/orderbook"),
-            timeout=8
+            timeout=timeout
         )
         if not r.ok:
             return None
-        ob = r.json().get("orderbook", {})
-        yes_asks = ob.get("yes", [])   # [[price_c, size], ...]
-        if not yes_asks:
-            return None
-        best = sorted(yes_asks, key=lambda x: x[0])[0]
-        return {"yes_ask": best[0] / 100.0, "yes_ask_size": best[1]}
+        data = r.json()
+        ob = data.get("orderbook")
+        if ob and (ob.get("yes") or ob.get("no")):
+            return {"yes": [[int(p), int(float(s))] for p, s in ob.get("yes") or []],
+                    "no":  [[int(p), int(float(s))] for p, s in ob.get("no") or []]}
+        fp = data.get("orderbook_fp") or {}
+
+        def _levels(raw):
+            out = []
+            for p, s in raw or []:
+                size = int(float(s))
+                if size > 0:
+                    out.append([int(round(float(p) * 100)), size])
+            return out
+
+        return {"yes": _levels(fp.get("yes_dollars")), "no": _levels(fp.get("no_dollars"))}
     except Exception:
         return None
+
+
+def at_fetch_market(ticker):
+    """
+    Fetch live best YES ask for one ticker. The book only holds bids, so the
+    YES ask is implied by the best (highest) NO bid: yes_ask_c = 100 - no_bid_c.
+    Returns dict with yes_ask, yes_ask_size or None.
+    """
+    ob = kalshi_fetch_orderbook(ticker)
+    if not ob or not ob.get("no"):
+        return None
+    no_bid_c, size = max(ob["no"], key=lambda x: x[0])
+    yes_ask_c = 100 - no_bid_c
+    if yes_ask_c <= 0 or yes_ask_c >= 100:
+        return None
+    return {"yes_ask": yes_ask_c / 100.0, "yes_ask_size": size}
 
 
 def fetch_full_orderbook_liq(ticker, mu, sigma, lo, hi, min_edge_ratio=0.07):
@@ -2393,19 +2434,15 @@ def fetch_full_orderbook_liq(ticker, mu, sigma, lo, hi, min_edge_ratio=0.07):
     """
     from math import erf, sqrt as _sqrt
     try:
-        r = requests.get(
-            f"{KALSHI_BASE}/markets/{ticker}/orderbook",
-            headers=kalshi_auth_headers("GET", f"/trade-api/v2/markets/{ticker}/orderbook"),
-            timeout=8
-        )
-        if not r.ok:
+        ob = kalshi_fetch_orderbook(ticker)
+        if not ob or not ob.get("no"):
             return None
-        yes_asks = r.json().get("orderbook", {}).get("yes", [])
-        if not yes_asks:
+        # YES asks are implied by NO bids: yes_ask_c = 100 - no_bid_c
+        levels_raw = sorted(
+            [[100 - p, s] for p, s in ob["no"] if 0 < 100 - p < 100],
+            key=lambda x: x[0])
+        if not levels_raw:
             return None
-
-        # Sort ascending by price
-        levels_raw = sorted(yes_asks, key=lambda x: x[0])
 
         def _cdf(x):
             if sigma <= 0: return 1.0 if x > mu else 0.0
@@ -5364,12 +5401,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "No ticker"})
             else:
                 try:
-                    ob_path = f"/trade-api/v2/markets/{ticker}/orderbook"
-                    r = requests.get(
-                        f"{KALSHI_BASE}/markets/{ticker}/orderbook",
-                        headers=kalshi_auth_headers("GET", ob_path), timeout=8)
-                    r.raise_for_status()
-                    ob = r.json().get("orderbook", {})
+                    ob = kalshi_fetch_orderbook(ticker)
+                    if ob is None:
+                        raise RuntimeError("orderbook fetch failed")
                     EDGE_CEILING = 97
                     depth, total_contracts, total_cost = [], 0, 0.0
                     # YES asks are derived from NO bids: YES ask = 100 - no_bid
@@ -5409,10 +5443,9 @@ class Handler(BaseHTTPRequestHandler):
                     cash    = float(bal.get("balance", 0) or 0) / 100
                     port    = float(bal.get("portfolio_value", 0) or 0) / 100  # in cents like balance
                     budget  = min(cash, port * MAX_PCT)
-                    ob_r = requests.get(f"{KALSHI_BASE}/markets/{ticker}/orderbook",
-                        headers=kalshi_auth_headers("GET", f"/trade-api/v2/markets/{ticker}/orderbook"), timeout=8)
-                    ob_r.raise_for_status()
-                    ob_data = ob_r.json().get("orderbook", {})
+                    ob_data = kalshi_fetch_orderbook(ticker)
+                    if ob_data is None:
+                        raise RuntimeError("orderbook fetch failed")
                     orders, spent = [], 0.0
                     if side == "yes":
                         # YES asks = 100 - NO bids, sorted descending by NO bid = ascending YES ask
@@ -8057,14 +8090,9 @@ def _book_snapshot_log(city_key, fc, signals, max_fetches=12):
             ticker = m["ticker"]
             if ticker.startswith("COMBO:"): continue  # combos have no single book
             try:
-                r = requests.get(
-                    f"{KALSHI_BASE}/markets/{ticker}/orderbook",
-                    headers=kalshi_auth_headers("GET", f"/trade-api/v2/markets/{ticker}/orderbook"),
-                    timeout=6
-                )
+                ob = kalshi_fetch_orderbook(ticker, timeout=6)
                 fetched += 1
-                if not r.ok: continue
-                ob = r.json().get("orderbook", {})
+                if ob is None: continue
                 rows.append((
                     city_key, ticker,
                     m.get("target_date") or fc.get("target_date"),
