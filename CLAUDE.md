@@ -24,12 +24,15 @@ hot-swappable — no redeploy needed for config changes.
 - Arm: `GET /auto-trader/go-live` · Kill: `GET /auto-trader/kill`
 - Config: `GET/POST /auto-trader/config`
 - State: `GET /debug/live` · Results: `GET /debug/live-results`
-- Current settings (2026-08-13): `daily_cap_dollars: 25`, `max_per_fill: 5`,
-  `min_fill_dollars: 1`, whitelist = las_vegas, denver, phoenix, houston,
-  boston, san_francisco. DC dropped (−10¢/$ YES-only over 47 paper bets);
-  SF added (+63¢/$, sigma clamp raised for it 2026-08-13). Caps raised
-  before first-ever live fill — pipeline was unproven at the time; watch
-  early fills/slippage in /debug/live-results.
+- Current settings (2026-08-13): `daily_cap_dollars: 75`, `max_per_ticker: 25`
+  (a true cross-cycle cap since 030e8df — enforced against live_trades
+  history; a ticker embeds its date so this is per-ticker-per-day),
+  `max_per_fill: 5`, `min_fill_dollars: 1`, whitelist = las_vegas, denver,
+  phoenix, houston, boston, san_francisco. DC dropped (−10¢/$ YES-only over
+  47 paper bets); SF added (+63¢/$, sigma clamp raised 2026-08-13).
+  First live fills 2026-08-13: 43x KXHIGHTLV-26AUG14-B91.5 @ ~31¢, 100%
+  fill rate, 0 slippage. Daily cap rolls at UTC midnight (5pm Vegas) —
+  known quirk, accepted for now.
 - Sizing loop per ticker: re-fetch BBO → re-grade at new price → stop when
   grade < min_grade; fill = min(book at ask, max_per_fill, kelly remaining);
   fills below min_fill_dollars stop the loop. min_fill must be ≤ max_per_fill
