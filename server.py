@@ -1968,6 +1968,33 @@ def _live_spend_today():
         return 999999.0  # fail-closed: if we can't read spend, treat cap as hit
 
 
+def _live_spend_ticker(ticker):
+    """
+    Real dollars already filled into one ticker, across all scan cycles.
+    A ticker is a single day's market, so no date filter is needed.
+    Enforces max_per_ticker as a true cross-cycle ceiling.
+    """
+    try:
+        conn = get_db()
+        if not conn: return 999999.0
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COALESCE(SUM(
+                    CASE
+                        WHEN filled_count IS NOT NULL AND avg_fill_price_c IS NOT NULL
+                            THEN filled_count * avg_fill_price_c / 100.0
+                        ELSE cost
+                    END
+                ), 0) FROM live_trades
+                WHERE is_live = TRUE AND ticker = %s
+            """, (ticker,))
+            v = float(cur.fetchone()[0] or 0)
+        conn.close()
+        return v
+    except Exception:
+        return 999999.0  # fail-closed: unknown spend = no budget
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  PATCH 1 — FILL CONFIRMATION
 #  at_place_order posts a marketable limit order but never verified what
@@ -2611,7 +2638,19 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
     bankroll_scale = cfg.get("bankroll_unit", 100.0) / 100.0
     kelly_mult_scale = cfg.get("kelly_mult", 0.5) / 0.5  # scale vs default 0.5x
     kelly_budget   = round(scan_kelly_sz * bankroll_scale * kelly_mult_scale, 2)
-    kelly_budget   = min(kelly_budget, cfg.get("max_per_ticker", 75.0))
+    # max_per_ticker must bind ACROSS scan cycles, not just within one —
+    # ticker_spent resets every cycle, which let repeated cycles stack the
+    # same market up to the daily cap. Subtract real filled dollars already
+    # in this ticker (live mode only; sim rows are excluded by is_live).
+    _mpt = cfg.get("max_per_ticker", 75.0)
+    if cfg.get("live_mode", False):
+        _prior_ticker_spend = _live_spend_ticker(ticker)
+        _mpt = max(0.0, _mpt - _prior_ticker_spend)
+        if _prior_ticker_spend > 0:
+            at_log("SCAN", f"{ticker} prior live spend ${_prior_ticker_spend:.2f} — "
+                           f"${_mpt:.2f} of max_per_ticker remains",
+                   ticker=ticker, city=city_key)
+    kelly_budget   = min(kelly_budget, _mpt)
 
     # Min fill check — if Kelly budget is below threshold, skip entirely
     min_fill = cfg.get("min_fill_dollars", 5.0)
