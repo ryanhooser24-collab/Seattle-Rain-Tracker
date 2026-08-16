@@ -1810,6 +1810,12 @@ _AT_CONFIG = {
     "min_volume":     200,
     "scan_interval":  300,   # seconds between scans
     "min_fill_dollars": 5.0, # skip execution if Kelly budget < this
+    # Exit rule (backtested 2026-08-16 on 619 settled paper trades:
+    # EV +0.200/$ with exits at 0.6 vs +0.127 hold; ~85% of the Vegas
+    # 2026-08-14 loss was recoverable). Sell entire position at bid when
+    # current model_prob < exit_prob_frac * entry_prob.
+    "exit_enabled":   True,
+    "exit_prob_frac": 0.60,
     "live_mode":      False, # False = simulate fills (no real orders); True = REAL Kalshi orders
     "daily_cap_dollars": 25.0, # hard cap on real dollars spent per UTC day
     # Cities allowed to trade REAL money. Empty list = all cities.
@@ -1912,7 +1918,8 @@ def _live_trade_log(ticker, city, side, count, paper_ask_c, order_ask_c, cost,
                     is_live, order_resp=None, grade=None, net_gap_c=None, htc=None,
                     order_id=None, requested_count=None, filled_count=None,
                     fill_status=None, avg_fill_price_c=None,
-                    target_date=None, lo_temp=None, hi_temp=None):
+                    target_date=None, lo_temp=None, hi_temp=None,
+                    entry_prob=None):
     """
     Log every fill (real or simulated) with the slippage measurement:
     slippage_c = order price - paper price (BBO at signal scan time).
@@ -1928,15 +1935,15 @@ def _live_trade_log(ticker, city, side, count, paper_ask_c, order_ask_c, cost,
                 (ticker, city, side, count, paper_ask_c, order_ask_c, slippage_c,
                  cost, is_live, grade, net_gap_c, hours_to_cutoff, order_resp,
                  order_id, requested_count, filled_count, fill_status,
-                 avg_fill_price_c, target_date, lo_temp, hi_temp)
+                 avg_fill_price_c, target_date, lo_temp, hi_temp, entry_prob)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                        %s,%s,%s,%s,%s,%s,%s,%s)
+                        %s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (ticker, city, side, count, paper_ask_c, order_ask_c,
                   (order_ask_c - paper_ask_c) if (order_ask_c is not None and paper_ask_c is not None) else None,
                   cost, is_live, grade, net_gap_c, htc,
                   json.dumps(order_resp) if order_resp else None,
                   order_id, requested_count, filled_count, fill_status,
-                  avg_fill_price_c, target_date, lo_temp, hi_temp))
+                  avg_fill_price_c, target_date, lo_temp, hi_temp, entry_prob))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -2407,6 +2414,119 @@ def at_place_order(ticker, side, count, yes_price_c):
         return False, None, str(e)
 
 
+def at_place_sell(ticker, count, yes_bid_c):
+    """
+    Sell YES contracts at the bid via V2 create-order: YES-perspective
+    side "ask" at the bid price, immediate_or_cancel.
+    Returns (ok, order_dict, error_str).
+    """
+    try:
+        import uuid as _uuid
+        payload = {
+            "ticker":                     ticker,
+            "side":                       "ask",
+            "count":                      f"{int(count)}.00",
+            "price":                      f"{yes_bid_c / 100.0:.4f}",
+            "time_in_force":              "immediate_or_cancel",
+            "self_trade_prevention_type": "taker_at_cross",
+            "client_order_id":            str(_uuid.uuid4()),
+        }
+        r = requests.post(
+            f"{KALSHI_BASE}/portfolio/events/orders",
+            headers=kalshi_auth_headers("POST", "/trade-api/v2/portfolio/events/orders"),
+            json=payload, timeout=10
+        )
+        try:
+            resp = r.json()
+        except Exception:
+            resp = {"raw": r.text[:200]}
+        if r.ok:
+            return True, resp, None
+        return False, None, f"HTTP {r.status_code}: {resp}"
+    except Exception as e:
+        return False, None, str(e)
+
+
+def at_check_exits(city_key, markets, cfg):
+    """
+    Exit rule (backtested: EV +0.200/$ vs +0.127 hold at frac 0.6, n=619).
+    For each open live position in this city whose current model_prob has
+    fallen below exit_prob_frac * entry_prob, sell the whole position at
+    the bid (IOC). Marks rows exited and books pnl from exit proceeds;
+    settlement pnl then skips them (pnl already non-NULL).
+    Positions in cities removed from the whitelist are not scanned and
+    therefore not exit-checked — remove cities only when flat.
+    """
+    if not cfg.get("exit_enabled", True) or not cfg.get("live_mode", False):
+        return 0
+    frac = float(cfg.get("exit_prob_frac", 0.60))
+    view = {m["ticker"]: m for m in markets
+            if m.get("ticker") and m.get("side") != "no"}
+    if not view:
+        return 0
+    exits = 0
+    try:
+        conn = get_db()
+        if not conn:
+            return 0
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT ticker, SUM(COALESCE(filled_count, "count")),
+                       AVG(entry_prob)
+                FROM live_trades
+                WHERE is_live = TRUE AND COALESCE(exited, FALSE) = FALSE
+                  AND settled_temp IS NULL AND pnl IS NULL
+                  AND city = %s AND entry_prob IS NOT NULL
+                  AND ticker = ANY(%s)
+                GROUP BY ticker
+            """, (city_key, list(view.keys())))
+            positions = cur.fetchall()
+        conn.close()
+
+        for ticker, held, entry_prob in positions:
+            m = view.get(ticker) or {}
+            p, bid = m.get("model_prob"), m.get("yes_bid")
+            if p is None or not bid or bid <= 0.02 or not held:
+                continue
+            if float(p) >= frac * float(entry_prob):
+                continue
+            bid_c = round(float(bid) * 100)
+            ok, resp, err = at_place_sell(ticker, int(held), bid_c)
+            if not ok:
+                at_log("ERR", f"EXIT sell failed for {ticker}: {err}",
+                       ticker=ticker, city=city_key)
+                continue
+            _o = (resp or {}).get("order", resp) or {}
+            sold = int(float(_o.get("fill_count") or 0))
+            px_c = float(_o.get("average_fill_price") or 0) * 100.0
+            if sold <= 0:
+                at_log("WARN", f"EXIT for {ticker} did not fill at {bid_c}¢",
+                       ticker=ticker, city=city_key)
+                continue
+            if sold < held:
+                at_log("WARN", f"EXIT partial {sold}/{held} on {ticker} — "
+                               f"remainder rides to settlement unbooked",
+                       ticker=ticker, city=city_key)
+            conn = get_db()
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE live_trades
+                    SET exited = TRUE, exit_price_c = %s, exit_ts = NOW(),
+                        pnl = ROUND((COALESCE(filled_count, "count") * %s - cost)::numeric, 2)
+                    WHERE ticker = %s AND is_live = TRUE
+                      AND COALESCE(exited, FALSE) = FALSE AND pnl IS NULL
+                """, (px_c, px_c / 100.0, ticker))
+            conn.commit()
+            conn.close()
+            exits += 1
+            at_log("EXIT", f"{ticker} sold {sold}x @ {px_c:.1f}¢ — model_prob "
+                           f"{float(p):.2f} < {frac:.2f} × entry {float(entry_prob):.2f}",
+                   ticker=ticker, city=city_key)
+    except Exception as e:
+        at_log("ERR", f"at_check_exits error for {city_key}: {e}", city=city_key)
+    return exits
+
+
 def kalshi_fetch_orderbook(ticker, timeout=8):
     """
     Fetch one market's orderbook, normalized to the legacy shape:
@@ -2814,7 +2934,8 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
                         filled_count=_filled, fill_status=_fill_status,
                         avg_fill_price_c=_avg_px_c,
                         target_date=forecast.get("target_date"),
-                        lo_temp=signal.get("lo_temp"), hi_temp=signal.get("hi_temp"))
+                        lo_temp=signal.get("lo_temp"), hi_temp=signal.get("hi_temp"),
+                        entry_prob=round(prob, 4) if prob else None)
         at_log("FILL" if _is_live else "SIM",
                f"{ticker} {_filled}/{count}x @ {_avg_px_c:.1f}¢ "
                f"(paper {_paper_ask_c}¢, slip {_avg_px_c - _paper_ask_c:+.1f}¢, {_fill_status})"
@@ -2916,6 +3037,11 @@ def run_auto_trader_cycle(force=False):
                     continue
 
                 all_markets = result.get("high_markets", []) + result.get("low_markets", []) + result.get("combo_signals", [])
+
+                # Exit check before new entries — free budget from dead
+                # positions first (exit proceeds don't touch the daily cap)
+                at_check_exits(city_key, all_markets, cfg)
+
                 for signal in all_markets:
                     g = signal.get("grade", "skip")
                     if g == "skip" or not signal.get("actionable"):
@@ -6832,6 +6958,10 @@ class Handler(BaseHTTPRequestHandler):
                     "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS lo_temp NUMERIC(5,1)",
                     "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS hi_temp NUMERIC(5,1)",
                     "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS pnl NUMERIC(10,2)",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS entry_prob NUMERIC(6,4)",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS exited BOOLEAN DEFAULT FALSE",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS exit_price_c NUMERIC(6,2)",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS exit_ts TIMESTAMPTZ",
                     "ALTER TABLE temp_snapshots ADD COLUMN IF NOT EXISTS settle_abandoned BOOLEAN DEFAULT FALSE",
                     "CREATE INDEX IF NOT EXISTS idx_live_trades_ts ON live_trades (ts)",
                 ]
