@@ -989,11 +989,11 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
         # inflates sigma in quadrature upstream.
         prob = bracket_prob(lo, hi, mu, sigma)
 
-        # Account for 2% Kalshi taker fee on winning contracts
-        # Effective probability = prob * 0.98 (fee reduces payout from $1 to $0.98)
-        prob_after_fee = round(prob * 0.98, 4)
-        
-        gap_c     = round((prob_after_fee - ask) * 100)
+        # Kalshi taker fee: 0.07 * price * (1 - price) per contract, charged at
+        # entry. Verified live 2026-08-13 (1.52¢ on a 32¢ fill). The old flat
+        # 2%-of-payout haircut under-counted fees on cheap tails.
+        fee = 0.07 * ask * (1 - ask)
+        gap_c     = round((prob - ask - fee) * 100)
         net_gap_c = max(0, gap_c - spr)
         edge_ratio = round(gap_c / sigma, 3) if sigma > 0 else 0.0
 
@@ -1405,8 +1405,8 @@ def detect_combo_signals(all_markets, forecast):
             # Combined edge: model probability of combined range vs total cost
             # Account for 2% Kalshi fee on the combined payout
             # If combined_prob = 0.97 and combined_cost = 0.20, edge = +77.06¢ before fee → +75.48¢ after
-            combined_prob_after_fee = round(combined_prob * 0.98, 4)
-            combined_gap_c = round((combined_prob_after_fee - combined_cost) * 100)
+            combined_fee = 0.07 * (cost_a * (1 - cost_a) + cost_b * (1 - cost_b))
+            combined_gap_c = round((combined_prob - combined_cost - combined_fee) * 100)
 
             # Spread cost: use worst spread of the two brackets
             spr_a = max(0, round((a.get("yes_ask",0) - a.get("yes_bid",0)) * 100))
@@ -2707,7 +2707,7 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
             else:
                 prob = _cdf(hi + 0.5) - _cdf(lo - 0.5)
 
-            gap_c      = round((prob * 0.98 - ask) * 100)   # 2% Kalshi fee on payout
+            gap_c      = round((prob - ask - 0.07 * ask * (1 - ask)) * 100)  # real Kalshi taker fee
             net_gap_c  = max(0, gap_c - round(signal.get("spread_c", 1)))
             edge_ratio = round(net_gap_c / sigma, 3) if sigma > 0 else 0
 
@@ -8206,6 +8206,11 @@ def _paper_trade_log(city_key, fc, markets):
         with conn.cursor() as cur:
             for m in markets:
                 if not m.get("ticker"): continue
+                # NO-side is a dead strategy (tested raw + corrected, train +
+                # test). Rows were 68% of paper volume and pure noise in every
+                # EV analysis. Calibration is unaffected — it filters to
+                # side='yes' when computing residuals.
+                if m.get("side") == "no": continue
                 htc = m.get("hours_to_cutoff")
                 if htc is not None and htc < 0: continue
 
