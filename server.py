@@ -2158,9 +2158,9 @@ def _live_trade_settle():
                     WHERE settled_temp IS NOT NULL
                 ) ts
                 WHERE lt.city = ts.city
-                  AND lt.target_date = ts.target_date
+                  AND lt.target_date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                  AND lt.target_date::date = ts.target_date
                   AND lt.settled_temp IS NULL
-                  AND lt.target_date IS NOT NULL
             """)
             n = cur.rowcount
 
