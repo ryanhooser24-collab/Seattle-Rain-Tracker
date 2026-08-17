@@ -1816,6 +1816,13 @@ _AT_CONFIG = {
     # current model_prob < exit_prob_frac * entry_prob.
     "exit_enabled":   True,
     "exit_prob_frac": 0.60,
+    # Momentum entries (backtested 2026-08-16 on price_history, n=7,239
+    # jump events: 56% win at 34¢ ask vs 41% baseline at same ask).
+    # Model prob jumped >= momentum_jump vs last logged scan while the ask
+    # moved <= momentum_max_ask_move: bump grade one level, accept >= B.
+    "momentum_enabled":      True,
+    "momentum_jump":         0.15,
+    "momentum_max_ask_move": 0.02,
     "live_mode":      False, # False = simulate fills (no real orders); True = REAL Kalshi orders
     "daily_cap_dollars": 25.0, # hard cap on real dollars spent per UTC day
     # Cities allowed to trade REAL money. Empty list = all cities.
@@ -1919,7 +1926,7 @@ def _live_trade_log(ticker, city, side, count, paper_ask_c, order_ask_c, cost,
                     order_id=None, requested_count=None, filled_count=None,
                     fill_status=None, avg_fill_price_c=None,
                     target_date=None, lo_temp=None, hi_temp=None,
-                    entry_prob=None):
+                    entry_prob=None, momentum=None):
     """
     Log every fill (real or simulated) with the slippage measurement:
     slippage_c = order price - paper price (BBO at signal scan time).
@@ -1935,15 +1942,17 @@ def _live_trade_log(ticker, city, side, count, paper_ask_c, order_ask_c, cost,
                 (ticker, city, side, count, paper_ask_c, order_ask_c, slippage_c,
                  cost, is_live, grade, net_gap_c, hours_to_cutoff, order_resp,
                  order_id, requested_count, filled_count, fill_status,
-                 avg_fill_price_c, target_date, lo_temp, hi_temp, entry_prob)
+                 avg_fill_price_c, target_date, lo_temp, hi_temp, entry_prob,
+                 momentum_entry)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                        %s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (ticker, city, side, count, paper_ask_c, order_ask_c,
                   (order_ask_c - paper_ask_c) if (order_ask_c is not None and paper_ask_c is not None) else None,
                   cost, is_live, grade, net_gap_c, htc,
                   json.dumps(order_resp) if order_resp else None,
                   order_id, requested_count, filled_count, fill_status,
-                  avg_fill_price_c, target_date, lo_temp, hi_temp, entry_prob))
+                  avg_fill_price_c, target_date, lo_temp, hi_temp, entry_prob,
+                  bool(momentum)))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -2447,6 +2456,59 @@ def at_place_sell(ticker, count, yes_bid_c):
         return False, None, str(e)
 
 
+def at_apply_momentum(city_key, markets, cfg):
+    """
+    Tag momentum entries: model_prob jumped vs the last logged scan while
+    the market ask barely moved (the market lags new forecast runs by
+    hours). Backtest: 56% win at same 34¢ avg ask vs 41% baseline.
+    Bumps grade one level (C->B, B->A); execution accepts >= B for tagged
+    signals. Tagged rows land in live_trades.momentum_entry for
+    segmentation.
+    """
+    if not cfg.get("momentum_enabled", True):
+        return 0
+    jump     = float(cfg.get("momentum_jump", 0.15))
+    max_move = float(cfg.get("momentum_max_ask_move", 0.02))
+    cand = {m["ticker"]: m for m in markets
+            if m.get("ticker") and m.get("side") != "no"
+            and m.get("model_prob") is not None and m.get("yes_ask")}
+    if not cand:
+        return 0
+    tagged = 0
+    try:
+        conn = get_db()
+        if not conn:
+            return 0
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT ON (ticker) ticker, model_prob, yes_ask
+                FROM price_history
+                WHERE ticker = ANY(%s) AND COALESCE(side, 'yes') = 'yes'
+                  AND model_prob IS NOT NULL
+                ORDER BY ticker, scan_ts DESC
+            """, (list(cand.keys()),))
+            prior = {r[0]: (float(r[1]), float(r[2] or 0)) for r in cur.fetchall()}
+        conn.close()
+        for tk, m in cand.items():
+            if tk not in prior:
+                continue
+            pp, pa = prior[tk]
+            if (float(m["model_prob"]) - pp >= jump
+                    and float(m["yes_ask"]) - pa <= max_move):
+                old_g = m.get("grade")
+                m["momentum_entry"] = True
+                m["grade"] = {"C": "B", "B": "A"}.get(old_g, old_g)
+                tagged += 1
+                at_log("SCAN",
+                       f"{tk} MOMENTUM: prob {pp:.2f}→{float(m['model_prob']):.2f}, "
+                       f"ask {round(pa*100)}→{round(float(m['yes_ask'])*100)}¢, "
+                       f"grade {old_g}→{m['grade']}",
+                       ticker=tk, city=city_key)
+    except Exception as e:
+        at_log("ERR", f"at_apply_momentum error for {city_key}: {e}", city=city_key)
+    return tagged
+
+
 def at_check_exits(city_key, markets, cfg):
     """
     Exit rule (backtested: EV +0.200/$ vs +0.127 hold at frac 0.6, n=619).
@@ -2843,8 +2905,13 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
             live_grade = grade
             prob       = signal.get("model_prob", 0)
 
-        # Stop if grade degraded below threshold
-        if grade_rank.get(live_grade, 99) > grade_rank.get(min_grade, 0):
+        # Stop if grade degraded below threshold. Momentum entries accept
+        # down to B — the backtested edge is the prob jump itself, not the
+        # static grade (never loosens an already-loose min_grade).
+        _eff_min = min_grade
+        if signal.get("momentum_entry") and grade_rank.get(min_grade, 0) < grade_rank.get("B", 1):
+            _eff_min = "B"
+        if grade_rank.get(live_grade, 99) > grade_rank.get(_eff_min, 0):
             at_log("SKIP", f"{ticker} grade degraded to {live_grade} at {ask_c}¢ — stopping",
                    ticker=ticker, city=city_key)
             break
@@ -2935,7 +3002,8 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
                         avg_fill_price_c=_avg_px_c,
                         target_date=forecast.get("target_date"),
                         lo_temp=signal.get("lo_temp"), hi_temp=signal.get("hi_temp"),
-                        entry_prob=round(prob, 4) if prob else None)
+                        entry_prob=round(prob, 4) if prob else None,
+                        momentum=signal.get("momentum_entry"))
         at_log("FILL" if _is_live else "SIM",
                f"{ticker} {_filled}/{count}x @ {_avg_px_c:.1f}¢ "
                f"(paper {_paper_ask_c}¢, slip {_avg_px_c - _paper_ask_c:+.1f}¢, {_fill_status})"
@@ -3041,6 +3109,9 @@ def run_auto_trader_cycle(force=False):
                 # Exit check before new entries — free budget from dead
                 # positions first (exit proceeds don't touch the daily cap)
                 at_check_exits(city_key, all_markets, cfg)
+
+                # Momentum tagging: model jumped, market lagged → grade boost
+                at_apply_momentum(city_key, all_markets, cfg)
 
                 for signal in all_markets:
                     g = signal.get("grade", "skip")
@@ -6962,6 +7033,7 @@ class Handler(BaseHTTPRequestHandler):
                     "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS exited BOOLEAN DEFAULT FALSE",
                     "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS exit_price_c NUMERIC(6,2)",
                     "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS exit_ts TIMESTAMPTZ",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS momentum_entry BOOLEAN DEFAULT FALSE",
                     "ALTER TABLE temp_snapshots ADD COLUMN IF NOT EXISTS settle_abandoned BOOLEAN DEFAULT FALSE",
                     "CREATE INDEX IF NOT EXISTS idx_live_trades_ts ON live_trades (ts)",
                 ]
