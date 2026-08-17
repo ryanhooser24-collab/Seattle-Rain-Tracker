@@ -447,6 +447,12 @@ body{max-width:900px;margin:0 auto;}
 .kelly-row{display:flex;justify-content:space-between;font-size:10px;line-height:1.8;}
 .kelly-lbl{color:var(--yes);}
 .kelly-val{color:#0f4d2a;font-weight:500;}
+/* Advanced settings: grouped boxes + hover help */
+.lv-box{border:1px solid var(--border);border-radius:6px;padding:10px 12px 12px;margin-bottom:10px;}
+.lv-grp{font-size:10px;letter-spacing:.14em;color:var(--muted);margin:0 0 10px;text-transform:uppercase;border-bottom:1px solid var(--border);padding-bottom:6px;}
+.lv-help{position:relative;display:inline-flex;width:14px;height:14px;border:1px solid var(--border);border-radius:50%;color:var(--muted);font-size:9px;align-items:center;justify-content:center;cursor:help;vertical-align:middle;margin-left:6px;}
+.lv-help .lv-tt{display:none;position:absolute;left:20px;top:-6px;z-index:50;width:250px;background:var(--ink);color:var(--bg);font-size:10px;line-height:1.5;border-radius:5px;padding:8px 10px;white-space:normal;}
+.lv-help:hover .lv-tt{display:block;}
 </style>
 </head>
 <body>
@@ -674,27 +680,74 @@ body{max-width:900px;margin:0 auto;}
         </div>
         <div id="lv-cfg-msg" style="font-size:10px;color:var(--muted);"></div>
         <button onclick="lvToggleAdv(this)" style="font-size:10px;color:var(--muted);background:none;border:none;cursor:pointer;padding:0;font-family:inherit;text-align:left;">&#9656; Advanced</button>
-        <div id="lv-adv" style="display:none;flex-direction:column;gap:10px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
-            <div><div style="font-size:12px;">Min grade</div><div style="font-size:10px;color:var(--muted);">Only signals at this grade or better trade</div></div>
-            <select id="lv-cfg-grade" style="padding:5px;font-family:inherit;font-size:12px;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;"><option>A</option><option>B</option><option>C</option></select>
+        <div id="lv-adv" style="display:none;flex-direction:column;">
+
+          <div class="lv-box">
+            <div class="lv-grp">Sizing — how much money per bet</div>
+            <div style="display:flex;flex-direction:column;gap:10px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+                <div style="font-size:12px;">Bankroll unit<span class="lv-help">i<span class="lv-tt">Kelly sizing base in $ &mdash; every stake scales linearly with this. THE knob for scaling risk: double this = double every bet. Raise in 2&times; steps and watch slippage.</span></span></div>
+                <input id="lv-cfg-unit" type="number" step="10" min="10" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+                <div style="font-size:12px;">Kelly multiplier <span style="font-size:9px;border:1px solid var(--border);border-radius:3px;padding:1px 5px;color:var(--muted);">locked</span><span class="lv-help">i<span class="lv-tt">Safety discount for model overconfidence. Locked at 0.50 &mdash; model probs run ~20pts hot on selected bets; raising this overbets. Scale bankroll unit instead.</span></span></div>
+                <input id="lv-cfg-kelly" type="number" disabled style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--muted);border:1px solid var(--border);border-radius:4px;opacity:.55;">
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+                <div style="font-size:12px;">Max positions<span class="lv-help">i<span class="lv-tt">Total open positions allowed at once. Rarely binds &mdash; leave at 10 unless the whitelist grows past 8 cities.</span></span></div>
+                <input id="lv-cfg-maxpos" type="number" step="1" min="1" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+                <div style="font-size:12px;">Max per city<span class="lv-help">i<span class="lv-tt">Open positions allowed per city. Caps correlated risk &mdash; same city, same weather miss. 2 is right while proving out.</span></span></div>
+                <input id="lv-cfg-percity" type="number" step="1" min="1" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+              </div>
+            </div>
           </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
-            <div><div style="font-size:12px;">Kelly multiplier</div><div style="font-size:10px;color:var(--muted);">Fraction of full Kelly used for sizing (0.5 = half-Kelly)</div></div>
-            <input id="lv-cfg-kelly" type="number" step="0.05" min="0" max="1" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+
+          <div class="lv-box">
+            <div class="lv-grp">Entries — what gets bought</div>
+            <div style="display:flex;flex-direction:column;gap:10px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+                <div style="font-size:12px;">Min grade<span class="lv-help">i<span class="lv-tt">Only signals at this grade or better trade. A only &mdash; B-grades were negative EV in every backtest.</span></span></div>
+                <select id="lv-cfg-grade" style="padding:5px;font-family:inherit;font-size:12px;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;"><option>A</option><option>B</option><option>C</option></select>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+                <div style="font-size:12px;">Momentum entries<span class="lv-help">i<span class="lv-tt">When a fresh forecast run jumps the model prob but the market hasn't repriced, boost the signal one grade. Backtest: 56% win vs 41% baseline at the same price.</span></span></div>
+                <select id="lv-cfg-momon" style="padding:5px;font-family:inherit;font-size:12px;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;"><option value="on">on</option><option value="off">off</option></select>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+                <div style="font-size:12px;">Momentum jump<span class="lv-help">i<span class="lv-tt">Min model prob jump (0&ndash;1) since last scan to trigger. 0.15 backtested best. Lower = more triggers, weaker signal.</span></span></div>
+                <input id="lv-cfg-momjump" type="number" step="0.01" min="0.05" max="0.5" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+                <div style="font-size:12px;">Momentum max ask move<span class="lv-help">i<span class="lv-tt">Max ask rise ($) since last scan to still count as "market lagging". If the ask already moved, the edge is gone. 0.02 backtested.</span></span></div>
+                <input id="lv-cfg-momask" type="number" step="0.01" min="0" max="0.10" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+              </div>
+            </div>
           </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
-            <div><div style="font-size:12px;">Max positions</div><div style="font-size:10px;color:var(--muted);">Total open positions allowed at once</div></div>
-            <input id="lv-cfg-maxpos" type="number" step="1" min="1" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+
+          <div class="lv-box">
+            <div class="lv-grp">Exits — when to cut a position</div>
+            <div style="display:flex;flex-direction:column;gap:10px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+                <div style="font-size:12px;">Exits<span class="lv-help">i<span class="lv-tt">Sell the whole position at bid when the model gives up on it. Backtest: +57% EV improvement &mdash; the market reprices hours after the model. Leave on.</span></span></div>
+                <select id="lv-cfg-exiton" style="padding:5px;font-family:inherit;font-size:12px;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;"><option value="on">on</option><option value="off">off</option></select>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+                <div style="font-size:12px;">Exit threshold<span class="lv-help">i<span class="lv-tt">Exit when current prob &lt; this &times; prob at entry. 0.60 backtested best (0.3&ndash;0.7 all beat holding). Higher = faster exits, more false exits.</span></span></div>
+                <input id="lv-cfg-exitfrac" type="number" step="0.05" min="0.1" max="0.9" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+              </div>
+            </div>
           </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
-            <div><div style="font-size:12px;">Max per city</div><div style="font-size:10px;color:var(--muted);">Open positions allowed in one city</div></div>
-            <input id="lv-cfg-percity" type="number" step="1" min="1" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+
+          <div class="lv-box" style="margin-bottom:0;">
+            <div class="lv-grp">Scanner</div>
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+              <div style="font-size:12px;">Scan interval<span class="lv-help">i<span class="lv-tt">Seconds between market scans. 300 = 5 min. Faster burns API quota for little gain; slower misses momentum windows.</span></span></div>
+              <input id="lv-cfg-scan" type="number" step="60" min="60" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+            </div>
           </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
-            <div><div style="font-size:12px;">Scan interval</div><div style="font-size:10px;color:var(--muted);">Seconds between market scans</div></div>
-            <input id="lv-cfg-scan" type="number" step="60" min="60" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
-          </div>
+
         </div>
       </div>
     </div>
@@ -1148,6 +1201,13 @@ async function loadLive(){
     document.getElementById('lv-cfg-percity').value=cfg.max_per_city??'';
     document.getElementById('lv-cfg-scan').value=cfg.scan_interval??'';
     document.getElementById('lv-cfg-wl').value=(cfg.live_city_whitelist||[]).join(', ');
+    document.getElementById('lv-cfg-unit').value=cfg.bankroll_unit??'';
+    document.getElementById('lv-cfg-momon').value=(cfg.momentum_enabled===false)?'off':'on';
+    document.getElementById('lv-cfg-momjump').value=cfg.momentum_jump??'';
+    document.getElementById('lv-cfg-momask').value=cfg.momentum_max_ask_move??'';
+    document.getElementById('lv-cfg-exiton').value=(cfg.exit_enabled===false)?'off':'on';
+    document.getElementById('lv-cfg-exitfrac').value=cfg.exit_prob_frac??'';
+    lvCfgLoaded=cfg;
     // results
     const R=resR&&resR.ok?resR.results:null;
     const wk=document.getElementById('lv-week');
@@ -1247,29 +1307,60 @@ async function lvArm(){
 async function lvKill(){
   await fetch(SERVER+'/auto-trader/kill');loadLive();
 }
+let lvCfgLoaded=null;   // config as last loaded — SAVE only posts keys that changed
 async function lvSaveCfg(){
   const msg=document.getElementById('lv-cfg-msg');
   try{
-    const body={
+    // kelly_mult is intentionally absent: locked in the UI
+    const form={
       daily_cap_dollars:parseFloat(document.getElementById('lv-cfg-cap').value)||0,
       max_per_fill:parseFloat(document.getElementById('lv-cfg-fill').value)||0,
       max_per_ticker:parseFloat(document.getElementById('lv-cfg-ticker').value)||0,
       min_fill_dollars:parseFloat(document.getElementById('lv-cfg-minfill').value)||0,
       live_city_whitelist:document.getElementById('lv-cfg-wl').value.split(',').map(s=>s.trim()).filter(Boolean),
       min_grade:document.getElementById('lv-cfg-grade').value,
-      kelly_mult:parseFloat(document.getElementById('lv-cfg-kelly').value)||0.5,
       max_positions:parseInt(document.getElementById('lv-cfg-maxpos').value)||10,
       max_per_city:parseInt(document.getElementById('lv-cfg-percity').value)||2,
-      scan_interval:parseInt(document.getElementById('lv-cfg-scan').value)||300
+      scan_interval:parseInt(document.getElementById('lv-cfg-scan').value)||300,
+      bankroll_unit:parseFloat(document.getElementById('lv-cfg-unit').value)||100,
+      momentum_enabled:document.getElementById('lv-cfg-momon').value==='on',
+      momentum_jump:parseFloat(document.getElementById('lv-cfg-momjump').value)||0.15,
+      momentum_max_ask_move:parseFloat(document.getElementById('lv-cfg-momask').value)||0.02,
+      exit_enabled:document.getElementById('lv-cfg-exiton').value==='on',
+      exit_prob_frac:parseFloat(document.getElementById('lv-cfg-exitfrac').value)||0.6
     };
-    if(body.min_fill_dollars>body.max_per_fill){
-      msg.textContent='Not saved: min fill ('+body.min_fill_dollars+') > max per fill ('+body.max_per_fill+') — no order could ever place.';
+    // Cross-setting sanity checks
+    if(form.min_fill_dollars>form.max_per_fill){
+      msg.textContent='Not saved: min fill ('+form.min_fill_dollars+') > max per fill ('+form.max_per_fill+') — no order could ever place.';
       msg.style.color='var(--no)';return;
+    }
+    if(form.max_per_ticker>form.daily_cap_dollars){
+      msg.textContent='Not saved: max per ticker ('+form.max_per_ticker+') > daily cap ('+form.daily_cap_dollars+') — one market could eat the whole day.';
+      msg.style.color='var(--no)';return;
+    }
+    if(form.exit_prob_frac<0.1||form.exit_prob_frac>0.9){
+      msg.textContent='Not saved: exit threshold must be 0.1–0.9.';
+      msg.style.color='var(--no)';return;
+    }
+    if(form.momentum_jump<0.05||form.momentum_jump>0.5){
+      msg.textContent='Not saved: momentum jump must be 0.05–0.5.';
+      msg.style.color='var(--no)';return;
+    }
+    // Only send keys that actually changed since load — nothing else is touched
+    const body={};
+    Object.keys(form).forEach(function(k){
+      const cur=lvCfgLoaded?lvCfgLoaded[k]:undefined;
+      const a=JSON.stringify(form[k]), b=JSON.stringify(cur);
+      if(lvCfgLoaded===null||a!==b) body[k]=form[k];
+    });
+    if(Object.keys(body).length===0){
+      msg.textContent='No changes to save.';msg.style.color='var(--muted)';return;
     }
     const r=await fetch(SERVER+'/auto-trader/config',{method:'POST',
       headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
-    msg.textContent=r.ok?'Saved.':'Save failed: '+(r.error||'unknown');
+    msg.textContent=r.ok?'Saved: '+Object.keys(body).join(', '):'Save failed: '+(r.error||'unknown');
     msg.style.color=r.ok?'var(--yes)':'var(--no)';
+    if(r.ok&&r.config)lvCfgLoaded=r.config;
   }catch(e){msg.textContent='Save failed: '+e.message;msg.style.color='var(--no)';}
 }
 
