@@ -7892,10 +7892,12 @@ class Handler(BaseHTTPRequestHandler):
 
                         # 7. Daily realised PnL series for charting
                         cur.execute("""
-                            SELECT settled_ts::date, ROUND(SUM(pnl)::numeric, 2)
+                            SELECT CASE WHEN target_date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                                        THEN target_date::date
+                                        ELSE settled_ts::date END,
+                                   ROUND(SUM(pnl)::numeric, 2)
                             FROM live_trades
                             WHERE is_live = TRUE AND pnl IS NOT NULL
-                              AND settled_ts IS NOT NULL
                             GROUP BY 1 ORDER BY 1
                         """)
                         out["pnl_series"] = [
