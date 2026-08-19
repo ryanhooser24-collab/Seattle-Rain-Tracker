@@ -7892,20 +7892,149 @@ class Handler(BaseHTTPRequestHandler):
 
                         # 7. Daily realised PnL series for charting
                         cur.execute("""
-                            SELECT CASE WHEN target_date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
-                                        THEN target_date::date
-                                        ELSE settled_ts::date END,
-                                   ROUND(SUM(pnl)::numeric, 2)
-                            FROM live_trades
-                            WHERE is_live = TRUE AND pnl IS NOT NULL
-                            GROUP BY 1 ORDER BY 1
+                            SELECT day, ROUND(SUM(tp)::numeric, 2),
+                                   COUNT(*) FILTER (WHERE tp > 0),
+                                   COUNT(*) FILTER (WHERE tp <= 0)
+                            FROM (SELECT CASE WHEN target_date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                                              THEN target_date::date
+                                              ELSE settled_ts::date END day,
+                                         ticker, SUM(pnl) tp
+                                  FROM live_trades
+                                  WHERE is_live = TRUE AND pnl IS NOT NULL
+                                  GROUP BY 1, ticker) t
+                            GROUP BY day ORDER BY day
                         """)
                         out["pnl_series"] = [
-                            {"date": str(q[0]), "pnl": float(q[1])}
+                            {"date": str(q[0]), "pnl": float(q[1]),
+                             "wins": int(q[2]), "losses": int(q[3])}
                             for q in cur.fetchall()]
 
                     conn.close()
                     self.send_json({"ok": True, "results": out})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/debug/report":
+            # Reports tab data — read-only aggregates for visual review.
+            try:
+                conn = get_db()
+                if not conn:
+                    self.send_json({"ok": False, "error": "No DB"}); return
+                out = {}
+                DAY = "CASE WHEN target_date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN target_date::date ELSE settled_ts::date END"
+                with conn.cursor() as cur:
+                    # Scoreboard (live, settled tickers only for pnl/ev/winrate)
+                    cur.execute("""
+                        SELECT COALESCE(SUM(tp),0), COALESCE(SUM(tc),0),
+                               COUNT(*) FILTER (WHERE tp > 0),
+                               COUNT(*) FILTER (WHERE tp <= 0)
+                        FROM (SELECT ticker, SUM(pnl) tp, SUM(cost) tc
+                              FROM live_trades
+                              WHERE is_live = TRUE AND pnl IS NOT NULL
+                              GROUP BY ticker) t
+                    """)
+                    r = cur.fetchone()
+                    pnl, staked, w, l = float(r[0]), float(r[1]), int(r[2]), int(r[3])
+                    cur.execute("""
+                        SELECT COUNT(*),
+                               ROUND(AVG(slippage_c)::numeric, 2),
+                               ROUND(100.0 * COUNT(*) FILTER (WHERE COALESCE(filled_count,0) >= COALESCE(requested_count, filled_count, 0))
+                                     / GREATEST(COUNT(*), 1), 1)
+                        FROM live_trades WHERE is_live = TRUE
+                    """)
+                    e = cur.fetchone()
+                    out["scoreboard"] = {
+                        "pnl": round(pnl, 2), "staked": round(staked, 2),
+                        "ev_per_dollar": round(pnl / staked, 3) if staked else None,
+                        "wins": w, "losses": l,
+                        "win_rate": round(100.0 * w / (w + l), 1) if (w + l) else None,
+                        "fills": int(e[0]), "avg_slippage_c": float(e[1] or 0),
+                        "fill_rate": float(e[2] or 0),
+                    }
+                    # Daily pnl + W/L (per ticker)
+                    cur.execute(f"""
+                        SELECT day, ROUND(SUM(tp)::numeric,2),
+                               COUNT(*) FILTER (WHERE tp > 0),
+                               COUNT(*) FILTER (WHERE tp <= 0)
+                        FROM (SELECT {DAY} day, ticker, SUM(pnl) tp
+                              FROM live_trades
+                              WHERE is_live = TRUE AND pnl IS NOT NULL
+                              GROUP BY 1, ticker) t
+                        GROUP BY day ORDER BY day
+                    """)
+                    out["daily"] = [{"date": str(q[0]), "pnl": float(q[1]),
+                                     "wins": int(q[2]), "losses": int(q[3])}
+                                    for q in cur.fetchall()]
+                    # City pnl (live) + paper EV 14d
+                    cur.execute("""
+                        SELECT city, ROUND(SUM(pnl)::numeric,2)
+                        FROM live_trades WHERE is_live = TRUE AND pnl IS NOT NULL
+                        GROUP BY city ORDER BY 2 DESC
+                    """)
+                    out["city_live"] = [{"city": q[0], "pnl": float(q[1])} for q in cur.fetchall()]
+                    cur.execute("""
+                        SELECT city, COUNT(*),
+                               ROUND(AVG(CASE WHEN settled_correct THEN (1-yes_ask)/NULLIF(yes_ask,0) ELSE -1 END)::numeric, 3)
+                        FROM paper_trades
+                        WHERE settled_temp IS NOT NULL AND COALESCE(side,'yes') = 'yes'
+                          AND target_date >= (CURRENT_DATE - 14)::text
+                          AND yes_ask > 0
+                        GROUP BY city HAVING COUNT(*) >= 5 ORDER BY 3 DESC
+                    """)
+                    out["city_paper_14d"] = [{"city": q[0], "n": int(q[1]), "ev": float(q[2])} for q in cur.fetchall()]
+                    # HTC buckets (settled paper YES since Jun)
+                    cur.execute("""
+                        SELECT CASE WHEN hours_to_cutoff < 6 THEN 'a_lt6h'
+                                    WHEN hours_to_cutoff < 12 THEN 'b_6_12h'
+                                    WHEN hours_to_cutoff < 24 THEN 'c_12_24h'
+                                    ELSE 'd_gt24h' END b,
+                               COUNT(*),
+                               ROUND(AVG(CASE WHEN settled_correct THEN (1-yes_ask)/NULLIF(yes_ask,0) ELSE -1 END)::numeric, 3),
+                               ROUND(AVG(CASE WHEN settled_correct THEN 1.0 ELSE 0 END)::numeric*100, 1)
+                        FROM paper_trades
+                        WHERE settled_temp IS NOT NULL AND COALESCE(side,'yes') = 'yes'
+                          AND target_date >= '2026-06-01' AND yes_ask > 0
+                          AND hours_to_cutoff IS NOT NULL
+                        GROUP BY 1 ORDER BY 1
+                    """)
+                    out["htc"] = [{"bucket": q[0], "n": int(q[1]), "ev": float(q[2]), "win_pct": float(q[3])} for q in cur.fetchall()]
+                    # Segments: horizon + tail/bracket (paper), momentum + exits (live)
+                    segs = []
+                    cur.execute("""
+                        SELECT horizon, COUNT(*),
+                               ROUND(AVG(CASE WHEN settled_correct THEN (1-yes_ask)/NULLIF(yes_ask,0) ELSE -1 END)::numeric, 3)
+                        FROM paper_trades
+                        WHERE settled_temp IS NOT NULL AND COALESCE(side,'yes') = 'yes'
+                          AND target_date >= '2026-06-01' AND yes_ask > 0
+                        GROUP BY 1 ORDER BY 1
+                    """)
+                    for q in cur.fetchall():
+                        segs.append({"seg": str(q[0]), "n": int(q[1]), "ev": float(q[2])})
+                    cur.execute("""
+                        SELECT CASE WHEN is_tail_bet THEN 'tail' ELSE 'bracket' END, COUNT(*),
+                               ROUND(AVG(CASE WHEN settled_correct THEN (1-yes_ask)/NULLIF(yes_ask,0) ELSE -1 END)::numeric, 3)
+                        FROM paper_trades
+                        WHERE settled_temp IS NOT NULL AND COALESCE(side,'yes') = 'yes'
+                          AND target_date >= '2026-06-01' AND yes_ask > 0 AND is_tail_bet IS NOT NULL
+                        GROUP BY 1 ORDER BY 1
+                    """)
+                    for q in cur.fetchall():
+                        segs.append({"seg": str(q[0]), "n": int(q[1]), "ev": float(q[2])})
+                    cur.execute("""
+                        SELECT COUNT(DISTINCT ticker), ROUND(COALESCE(SUM(pnl),0)::numeric,2)
+                        FROM live_trades WHERE is_live = TRUE AND COALESCE(momentum_entry,FALSE) = TRUE
+                    """)
+                    q = cur.fetchone()
+                    segs.append({"seg": "momentum_live", "n": int(q[0]), "pnl": float(q[1])})
+                    cur.execute("""
+                        SELECT COUNT(DISTINCT ticker), ROUND(COALESCE(SUM(pnl),0)::numeric,2)
+                        FROM live_trades WHERE is_live = TRUE AND COALESCE(exited,FALSE) = TRUE
+                    """)
+                    q = cur.fetchone()
+                    segs.append({"seg": "exits_live", "n": int(q[0]), "pnl": float(q[1])})
+                    out["segments"] = segs
+                conn.close()
+                self.send_json({"ok": True, "report": out})
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 

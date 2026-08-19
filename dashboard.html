@@ -462,7 +462,7 @@ body{max-width:900px;margin:0 auto;}
   <div class="tab" id="t-dash" onclick="sw('dash')">Rainfall Tracker</div>
   <div class="tab" id="t-pos" onclick="sw('pos')">Positions</div>
   <div class="tab" id="t-live" onclick="sw('live')">Live</div>
-  <div class="tab" id="t-analysis" onclick="sw('analysis')">Analysis</div>
+  <div class="tab" id="t-analysis" onclick="sw('analysis')">Reports</div>
 </div>
 
 <!-- TEMPERATURE SCANNER -->
@@ -1165,6 +1165,7 @@ function sw(t){
   if(t==='scan'&&currentScanMode==='temp')loadTempStatus();
   if(t==='pos')loadPortfolio();
   if(t==='live')loadLive();
+  if(t==='analysis')loadReports();
 }
 
 // ── LIVE TAB ─────────────────────────────────────────────────────────────
@@ -1263,36 +1264,107 @@ async function loadLive(){
     document.getElementById('lv-week').textContent='Load error: '+e.message;
   }
 }
-function lvPnlChart(series){
-  const el=document.getElementById('lv-pnlchart');
-  const tot=document.getElementById('lv-pnl-total');
-  if(!series.length){el.textContent='No settled live trades yet.';tot.textContent='';return;}
-  let cum=0;const pts=series.map(d=>({date:d.date,v:(cum+=d.pnl)}));
-  tot.innerHTML=(cum<0?'-$':'$')+Math.abs(cum).toFixed(2);
-  tot.style.color=cum>=0?'var(--yes)':'var(--no)';
-  const W=640,H=180,PL=46,PR=10,PT=12,PB=26;
-  const vs=pts.map(p=>p.v);
-  let lo=Math.min(0,...vs),hi=Math.max(0,...vs);
+function lvPnlChart(series){renderPnlCombo(series,'lv-pnlchart','lv-pnl-total');}
+function renderPnlCombo(series,elId,totId){
+  const el=document.getElementById(elId);
+  const tot=totId?document.getElementById(totId):null;
+  if(!el)return;
+  if(!series.length){el.textContent='No settled live trades yet.';if(tot)tot.textContent='';return;}
+  let cum=0;const pts=series.map(d=>({date:d.date,day:d.pnl,w:d.wins||0,l:d.losses||0,v:(cum+=d.pnl)}));
+  if(tot){tot.innerHTML=(cum<0?'-$':'$')+Math.abs(cum).toFixed(2);tot.style.color=cum>=0?'var(--yes)':'var(--no)';}
+  const W=640,H=210,PL=48,PR=10,PT=26,PB=30;
+  const all=pts.map(p=>p.v).concat(pts.map(p=>p.day));
+  let lo=Math.min(0,...all),hi=Math.max(0,...all);
   if(hi===lo){hi+=1;lo-=1;}
-  const pad=(hi-lo)*0.1;hi+=pad;lo-=pad;
-  const X=i=>pts.length===1?(PL+(W-PL-PR)/2):PL+(W-PL-PR)*i/(pts.length-1);
+  const pad=(hi-lo)*0.12;hi+=pad;lo-=pad;
+  const n=pts.length;
+  const slot=(W-PL-PR)/n;
+  const bw=Math.min(36,slot*0.4);
+  const Xc=i=>PL+slot*(i+0.5);
   const Y=v=>PT+(H-PT-PB)*(1-(v-lo)/(hi-lo));
-  const line=pts.map((p,i)=>(i?'L':'M')+X(i).toFixed(1)+' '+Y(p.v).toFixed(1)).join(' ');
   const zero=Y(0);
-  const last=pts[pts.length-1];
-  // x labels: first, last, middle if room
-  let xl=[[0,pts[0].date]];
-  if(pts.length>2)xl.push([Math.floor((pts.length-1)/2),pts[Math.floor((pts.length-1)/2)].date]);
-  if(pts.length>1)xl.push([pts.length-1,last.date]);
-  el.innerHTML='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto;display:block;">'+
-    '<line x1="'+PL+'" y1="'+zero.toFixed(1)+'" x2="'+(W-PR)+'" y2="'+zero.toFixed(1)+'" stroke="var(--border)" stroke-dasharray="3 3"/>'+
-    '<text x="'+(PL-6)+'" y="'+(Y(hi-pad)+4).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--muted)">$'+(hi-pad).toFixed(2)+'</text>'+
-    '<text x="'+(PL-6)+'" y="'+(zero+4).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--muted)">$0</text>'+
-    '<text x="'+(PL-6)+'" y="'+(Y(lo+pad)+4).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--muted)">$'+(lo+pad).toFixed(2)+'</text>'+
-    '<path d="'+line+'" fill="none" stroke="'+(cum>=0?'var(--yes)':'var(--no)')+'" stroke-width="1.5"/>'+
-    pts.map((p,i)=>'<circle cx="'+X(i).toFixed(1)+'" cy="'+Y(p.v).toFixed(1)+'" r="2.5" fill="'+(p.v>=0?'var(--yes)':'var(--no)')+'"/>').join('')+
-    xl.map(([i,d])=>'<text x="'+X(i).toFixed(1)+'" y="'+(H-8)+'" text-anchor="middle" font-size="10" fill="var(--muted)">'+d.slice(5)+'</text>').join('')+
-    '</svg>';
+  let s='<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto;display:block;">';
+  s+='<line x1="'+PL+'" y1="'+zero.toFixed(1)+'" x2="'+(W-PR)+'" y2="'+zero.toFixed(1)+'" stroke="var(--border)"/>';
+  [hi-pad,(hi-pad)/2].forEach(v=>{
+    if(Math.abs(v)>0.01)s+='<line x1="'+PL+'" y1="'+Y(v).toFixed(1)+'" x2="'+(W-PR)+'" y2="'+Y(v).toFixed(1)+'" stroke="var(--border)" stroke-dasharray="2 4" opacity="0.5"/>'+
+      '<text x="'+(PL-6)+'" y="'+(Y(v)+3.5).toFixed(1)+'" text-anchor="end" font-size="9" fill="var(--muted)">$'+v.toFixed(0)+'</text>';
+  });
+  s+='<text x="'+(PL-6)+'" y="'+(zero+3.5).toFixed(1)+'" text-anchor="end" font-size="9" fill="var(--muted)">$0</text>';
+  // daily bars + W/L labels
+  pts.forEach((p,i)=>{
+    const x=Xc(i)-bw/2, y=p.day>=0?Y(p.day):zero, h=Math.abs(zero-Y(p.day));
+    if(Math.abs(p.day)>0.005)s+='<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw+'" height="'+Math.max(1,h).toFixed(1)+'" rx="2" fill="'+(p.day>=0?'var(--yes)':'var(--no)')+'" opacity="0.75"/>';
+    const lbl=(p.day>=0?'+':'-')+'$'+Math.abs(p.day).toFixed(0)+' '+p.w+'W/'+p.l+'L';
+    const ly=p.day>=0?Y(p.day)-5:zero-5;
+    s+='<text x="'+Xc(i).toFixed(1)+'" y="'+ly.toFixed(1)+'" text-anchor="middle" font-size="8.5" fill="var(--muted)">'+lbl+'</text>';
+  });
+  // cumulative line on top
+  const line=pts.map((p,i)=>(i?'L':'M')+Xc(i).toFixed(1)+' '+Y(p.v).toFixed(1)).join(' ');
+  s+='<path d="'+line+'" fill="none" stroke="var(--ink)" stroke-width="1.5"/>';
+  s+=pts.map((p,i)=>'<circle cx="'+Xc(i).toFixed(1)+'" cy="'+Y(p.v).toFixed(1)+'" r="2.5" fill="var(--ink)"/>').join('');
+  // x labels (thin if crowded)
+  const step=Math.ceil(n/8);
+  pts.forEach((p,i)=>{
+    if(i%step===0||i===n-1)s+='<text x="'+Xc(i).toFixed(1)+'" y="'+(H-8)+'" text-anchor="middle" font-size="9" fill="var(--muted)">'+p.date.slice(5)+'</text>';
+  });
+  s+='</svg>';
+  el.innerHTML=s+'<div style="font-size:9px;color:var(--muted);margin-top:4px;">bars = day PnL with wins/losses · line = cumulative</div>';
+}
+let rpData=null,rpCityMode='live';
+function rpBars(el,rows,fmt){
+  if(!rows.length){el.textContent='No data yet.';return;}
+  const mx=Math.max(...rows.map(r=>Math.abs(r.v)))||1;
+  el.innerHTML=rows.map(r=>{
+    const w=Math.max(2,Math.round(180*Math.abs(r.v)/mx));
+    const col=r.v>=0?'var(--yes)':'var(--no)';
+    return '<div style="display:flex;align-items:center;gap:10px;margin:6px 0;">'+
+      '<span style="width:110px;flex-shrink:0;text-align:right;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+r.name+'</span>'+
+      '<span style="width:'+w+'px;height:12px;border-radius:2px;background:'+col+';flex-shrink:0;"></span>'+
+      '<span style="color:var(--muted);white-space:nowrap;">'+fmt(r)+'</span></div>';
+  }).join('');
+}
+async function loadReports(){
+  try{
+    const r=await fetch(SERVER+'/debug/report').then(x=>x.json());
+    if(!r.ok)throw new Error(r.error||'report failed');
+    rpData=r.report;
+    const s=rpData.scoreboard;
+    const kpi=(l,v,c)=>'<div style="background:var(--bg);border-radius:6px;padding:10px 12px;"><div style="font-size:9px;letter-spacing:1px;color:var(--muted);">'+l+'</div><div style="font-size:15px;margin-top:4px;color:'+(c||'var(--ink)')+';white-space:nowrap;">'+v+'</div></div>';
+    document.getElementById('rp-score').innerHTML=
+      kpi('TOTAL PNL',(s.pnl<0?'-$':'+$')+Math.abs(s.pnl).toFixed(2),s.pnl>=0?'var(--yes)':'var(--no)')+
+      kpi('EV / $ STAKED',s.ev_per_dollar===null?'—':(s.ev_per_dollar>=0?'+':'')+s.ev_per_dollar.toFixed(2))+
+      kpi('WIN RATE',s.win_rate===null?'—':s.win_rate+'% ('+s.wins+'W/'+s.losses+'L)')+
+      kpi('FILL / SLIP',s.fill_rate+'% · '+s.avg_slippage_c.toFixed(1)+'¢');
+    renderPnlCombo(rpData.daily,'rp-daily',null);
+    rpRenderCity();
+    rpBars(document.getElementById('rp-htc'),
+      rpData.htc.map(h=>({name:{a_lt6h:'< 6h',b_6_12h:'6–12h',c_12_24h:'12–24h',d_gt24h:'> 24h'}[h.bucket]||h.bucket,v:h.ev,h:h})),
+      r=>(r.v>=0?'+':'')+r.v.toFixed(2)+'/$ · '+r.h.win_pct+'% (n='+r.h.n+')');
+    const segName={d0:'d0 (today)',d1:'d1 (tomorrow)',bracket:'bracket',tail:'tail',momentum_live:'momentum (live)',exits_live:'exits (live)'};
+    const segEl=document.getElementById('rp-seg');
+    const evSegs=rpData.segments.filter(x=>x.ev!==undefined);
+    const liveSegs=rpData.segments.filter(x=>x.ev===undefined);
+    rpBars(segEl,evSegs.map(x=>({name:segName[x.seg]||x.seg,v:x.ev,n:x.n})),r=>(r.v>=0?'+':'')+r.v.toFixed(2)+'/$ (n='+r.n+')');
+    segEl.innerHTML+=liveSegs.map(x=>'<div style="display:flex;align-items:center;gap:10px;margin:6px 0;">'+
+      '<span style="width:110px;flex-shrink:0;text-align:right;color:var(--muted);">'+(segName[x.seg]||x.seg)+'</span>'+
+      '<span style="color:var(--muted);">'+(x.n?x.n+' market(s) · '+(x.pnl>=0?'+$':'-$')+Math.abs(x.pnl).toFixed(2):'none yet')+'</span></div>').join('');
+  }catch(e){
+    document.getElementById('rp-score').textContent='Load error: '+e.message;
+  }
+}
+function rpRenderCity(){
+  if(!rpData)return;
+  const el=document.getElementById('rp-city');
+  if(rpCityMode==='live'){
+    rpBars(el,rpData.city_live.map(c=>({name:c.city,v:c.pnl})),r=>(r.v>=0?'+$':'-$')+Math.abs(r.v).toFixed(2));
+  }else{
+    rpBars(el,rpData.city_paper_14d.map(c=>({name:c.city,v:c.ev,n:c.n})),r=>(r.v>=0?'+':'')+r.v.toFixed(2)+'/$ (n='+r.n+')');
+  }
+}
+function rpToggleCity(){
+  rpCityMode=rpCityMode==='live'?'paper':'live';
+  document.getElementById('rp-city-toggle').textContent=rpCityMode==='live'?'show paper EV 14d':'show live PnL';
+  rpRenderCity();
 }
 function lvToggleAdv(btn){
   const el=document.getElementById('lv-adv');
@@ -2565,7 +2637,35 @@ loadData();
 <!-- ANALYSIS TAB -->
 <div id="s-analysis" class="section" style="display:none">
   <div style="max-width:900px;margin:0 auto;padding:0 16px">
-    <h2 style="font-size:13px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin:0 0 16px">Analysis Queries</h2>
+
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">LIVE SCOREBOARD</div><div class="rf-hdr-val" style="font-size:10px;color:var(--muted);">all time</div></div>
+      <div id="rp-score" style="padding:12px 14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;font-size:11px;color:var(--muted);">Loading…</div>
+    </div>
+
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">DAILY PNL + CUMULATIVE</div><div class="rf-hdr-val" style="font-size:10px;color:var(--muted);">wins/losses per day</div></div>
+      <div id="rp-daily" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
+    </div>
+
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">PNL BY CITY</div>
+        <button id="rp-city-toggle" onclick="rpToggleCity()" style="padding:3px 10px;font-family:inherit;font-size:9px;background:var(--bg);color:var(--muted);border:1px solid var(--border);border-radius:4px;cursor:pointer;">show paper EV 14d</button>
+      </div>
+      <div id="rp-city" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
+    </div>
+
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">EV BY HOURS-TO-CUTOFF</div><div class="rf-hdr-val" style="font-size:10px;color:var(--muted);">settled paper · YES only · since Jun</div></div>
+      <div id="rp-htc" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
+    </div>
+
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">SEGMENTS</div><div class="rf-hdr-val" style="font-size:10px;color:var(--muted);">paper EV + live strategy tags</div></div>
+      <div id="rp-seg" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
+    </div>
+
+    <h2 style="font-size:13px;letter-spacing:2px;text-transform:uppercase;color:var(--muted);margin:24px 0 16px">Analysis Queries</h2>
 
     <div style="margin-bottom:12px;font-size:11px;color:var(--muted)">
       Run pre-built analysis queries against live DB. Results update on each run.
