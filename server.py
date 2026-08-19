@@ -993,6 +993,7 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
         # entry. Verified live 2026-08-13 (1.52¢ on a 32¢ fill). The old flat
         # 2%-of-payout haircut under-counted fees on cheap tails.
         fee = 0.07 * ask * (1 - ask)
+        prob_after_fee = max(0.0, round(prob - fee, 4))  # EV-equivalent prob for Kelly below
         gap_c     = round((prob - ask - fee) * 100)
         net_gap_c = max(0, gap_c - spr)
         edge_ratio = round(gap_c / sigma, 3) if sigma > 0 else 0.0
@@ -1406,6 +1407,7 @@ def detect_combo_signals(all_markets, forecast):
             # Account for 2% Kalshi fee on the combined payout
             # If combined_prob = 0.97 and combined_cost = 0.20, edge = +77.06¢ before fee → +75.48¢ after
             combined_fee = 0.07 * (cost_a * (1 - cost_a) + cost_b * (1 - cost_b))
+            combined_prob_after_fee = max(0.0, round(combined_prob - combined_fee, 4))
             combined_gap_c = round((combined_prob - combined_cost - combined_fee) * 100)
 
             # Spread cost: use worst spread of the two brackets
