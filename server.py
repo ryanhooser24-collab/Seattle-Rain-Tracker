@@ -1797,6 +1797,7 @@ _AT_THREAD   = None
 _AT_LOCK     = _threading.Lock()
 _AT_LOG      = []          # in-memory log, last 500 entries
 _AT_ENABLED  = False       # master on/off — persisted in DB config table
+_AT_ALLSKIP_STREAK = 0     # consecutive cycles with zero gradeable signals
 
 # Default config — overridden by DB config table after first UI save
 _AT_CONFIG = {
@@ -3088,6 +3089,7 @@ def run_auto_trader_cycle(force=False):
 
     total_fills   = 0
     ticker_spent  = {}   # tracks spend per ticker across fills this cycle
+    _cycle_gradeable = 0   # non-skip signals seen this cycle (watchdog)
 
     for horizon in cfg.get("horizons", ["d0", "d1"]):
         for city_key in TEMP_CITIES:
@@ -3107,6 +3109,8 @@ def run_auto_trader_cycle(force=False):
                     continue
 
                 all_markets = result.get("high_markets", []) + result.get("low_markets", []) + result.get("combo_signals", [])
+                _cycle_gradeable += sum(1 for _m in all_markets
+                                        if _m.get("grade") in ("A", "B", "C"))
 
                 # Exit check before new entries — free budget from dead
                 # positions first (exit proceeds don't touch the daily cap)
@@ -3141,6 +3145,18 @@ def run_auto_trader_cycle(force=False):
             except Exception as e:
                 at_log("ERR", f"Error scanning {city_key}/{horizon}: {e}", city=city_key)
 
+    # Watchdog: a healthy system sees SOME gradeable signal within a few
+    # hours. A long all-skip streak = likely silent grading regression
+    # (this exact failure hid for 3 days after the 2026-08-16 fee change).
+    global _AT_ALLSKIP_STREAK
+    if _cycle_gradeable == 0:
+        _AT_ALLSKIP_STREAK += 1
+        if _AT_ALLSKIP_STREAK % 36 == 0:  # every ~3h at 5-min cycles
+            at_log("WARN", f"No gradeable (A/B/C) signals for {_AT_ALLSKIP_STREAK} "
+                           f"consecutive cycles — check grading pipeline for a "
+                           f"silent regression")
+    else:
+        _AT_ALLSKIP_STREAK = 0
     at_log("SCAN", f"Cycle complete — {total_fills} fill(s) placed")
     at_flush_log_to_db()  # batch write cycle entries to DB
 
@@ -8740,8 +8756,9 @@ def _run_background_scan(full=True):
                             if combo.get("grade") in ("A", "B"):
                                 _paper_trade_log(city_key, fc, [combo])
                 total += 1
-            except Exception:
-                pass
+            except Exception as _sce:
+                # Silent pass here hid a 3-day grading outage (2026-08-16).
+                print(f"  scan error {city_key}/{horizon}: {_sce}")
     if full:
         _paper_trade_settle()
         # Real-money results (Patch 2)
