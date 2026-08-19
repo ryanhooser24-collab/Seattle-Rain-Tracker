@@ -7892,17 +7892,17 @@ class Handler(BaseHTTPRequestHandler):
 
                         # 7. Daily realised PnL series for charting
                         cur.execute("""
-                            SELECT day, ROUND(SUM(tp)::numeric, 2),
+                            SELECT d, ROUND(SUM(tp)::numeric, 2),
                                    COUNT(*) FILTER (WHERE tp > 0),
                                    COUNT(*) FILTER (WHERE tp <= 0)
                             FROM (SELECT CASE WHEN target_date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
                                               THEN target_date::date
-                                              ELSE settled_ts::date END day,
+                                              ELSE settled_ts::date END AS d,
                                          ticker, SUM(pnl) tp
                                   FROM live_trades
                                   WHERE is_live = TRUE AND pnl IS NOT NULL
                                   GROUP BY 1, ticker) t
-                            GROUP BY day ORDER BY day
+                            GROUP BY d ORDER BY d
                         """)
                         out["pnl_series"] = [
                             {"date": str(q[0]), "pnl": float(q[1]),
@@ -7953,14 +7953,14 @@ class Handler(BaseHTTPRequestHandler):
                     }
                     # Daily pnl + W/L (per ticker)
                     cur.execute(f"""
-                        SELECT day, ROUND(SUM(tp)::numeric,2),
+                        SELECT d, ROUND(SUM(tp)::numeric,2),
                                COUNT(*) FILTER (WHERE tp > 0),
                                COUNT(*) FILTER (WHERE tp <= 0)
-                        FROM (SELECT {DAY} day, ticker, SUM(pnl) tp
+                        FROM (SELECT {DAY} AS d, ticker, SUM(pnl) tp
                               FROM live_trades
                               WHERE is_live = TRUE AND pnl IS NOT NULL
                               GROUP BY 1, ticker) t
-                        GROUP BY day ORDER BY day
+                        GROUP BY d ORDER BY d
                     """)
                     out["daily"] = [{"date": str(q[0]), "pnl": float(q[1]),
                                      "wins": int(q[2]), "losses": int(q[3])}
