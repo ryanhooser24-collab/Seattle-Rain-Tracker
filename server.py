@@ -7977,7 +7977,7 @@ class Handler(BaseHTTPRequestHandler):
                                ROUND(AVG(CASE WHEN settled_correct THEN (1-yes_ask)/NULLIF(yes_ask,0) ELSE -1 END)::numeric, 3)
                         FROM paper_trades
                         WHERE settled_temp IS NOT NULL AND COALESCE(side,'yes') = 'yes'
-                          AND target_date >= (CURRENT_DATE - 14)::text
+                          AND target_date >= CURRENT_DATE - 14
                           AND yes_ask > 0
                         GROUP BY city HAVING COUNT(*) >= 5 ORDER BY 3 DESC
                     """)
