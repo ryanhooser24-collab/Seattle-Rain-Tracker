@@ -6101,16 +6101,18 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(e)})
 
         elif path == "/auto-trader/kill":
-            # KILL SWITCH — immediately disables engine + live mode, persists to DB.
+            # KILL SWITCH — stops EVERYTHING: forecast engine, live mode, and
+            # the tail strategy. Per-strategy off switches live in the config
+            # POST; this is the emergency stop.
             try:
-                _AT_CONFIG["enabled"] = False
-                _AT_CONFIG["live_mode"] = False
+                for k in ("enabled", "live_mode", "tail_enabled", "tail_live"):
+                    _AT_CONFIG[k] = False
                 try:
                     conn = get_db()
                     if conn:
                         conn.autocommit = True
                         with conn.cursor() as cur:
-                            for k in ("enabled", "live_mode"):
+                            for k in ("enabled", "live_mode", "tail_enabled", "tail_live"):
                                 cur.execute("""
                                     INSERT INTO auto_trader_config (key, value, updated_at)
                                     VALUES (%s, 'false', NOW())
@@ -6119,8 +6121,157 @@ class Handler(BaseHTTPRequestHandler):
                         conn.close()
                 except Exception:
                     pass
-                at_log("KILL", "Kill switch activated — engine and live mode OFF")
-                self.send_json({"ok": True, "enabled": False, "live_mode": False})
+                at_log("KILL", "Kill switch activated — forecast AND tail strategies OFF")
+                self.send_json({"ok": True, "enabled": False, "live_mode": False,
+                                "tail_enabled": False, "tail_live": False})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/debug/strategy-results":
+            # Per-strategy execution + PnL split: 'forecast' (the model-vs-
+            # market grader) vs 'tail' (the lag strategy). Read-only; feeds
+            # the Live tab's two strategy sub-tabs.
+            try:
+                conn = get_db()
+                if not conn:
+                    self.send_json({"ok": False, "error": "No DB"}); return
+                _ensure_live_trades_table(conn)
+                out = {}
+                specs = {
+                    "forecast": "COALESCE(strategy, '') <> 'tail'",
+                    "tail":     "strategy = 'tail'",
+                }
+                with conn.cursor() as cur:
+                    for name, frag in specs.items():
+                        blk = {}
+                        # settled scoreboard (real money only)
+                        cur.execute(f"""
+                            SELECT COUNT(*),
+                                   COUNT(*) FILTER (WHERE settled_correct),
+                                   ROUND(COALESCE(SUM(pnl), 0)::numeric, 2),
+                                   ROUND(COALESCE(SUM(filled_count * avg_fill_price_c / 100.0), 0)::numeric, 2)
+                            FROM live_trades
+                            WHERE is_live = TRUE AND {frag}
+                              AND settled_correct IS NOT NULL
+                              AND COALESCE(filled_count, 0) > 0
+                        """)
+                        r = cur.fetchone()
+                        staked = float(r[3] or 0)
+                        blk["settled"] = {
+                            "n": r[0], "wins": r[1] or 0,
+                            "pnl": float(r[2] or 0), "staked": staked,
+                            "ev_per_dollar": round(float(r[2] or 0) / staked, 3) if staked else None,
+                        }
+                        # daily series for the chart (by settlement target_date)
+                        cur.execute(f"""
+                            SELECT target_date,
+                                   ROUND(COALESCE(SUM(pnl), 0)::numeric, 2),
+                                   COUNT(*) FILTER (WHERE settled_correct),
+                                   COUNT(*) FILTER (WHERE NOT settled_correct),
+                                   ROUND(COALESCE(SUM(filled_count * avg_fill_price_c / 100.0), 0)::numeric, 2)
+                            FROM live_trades
+                            WHERE is_live = TRUE AND {frag}
+                              AND settled_correct IS NOT NULL
+                              AND COALESCE(filled_count, 0) > 0
+                              AND target_date IS NOT NULL
+                            GROUP BY target_date ORDER BY target_date
+                        """)
+                        blk["daily"] = [
+                            {"date": q[0], "pnl": float(q[1] or 0),
+                             "wins": q[2], "losses": q[3],
+                             "staked": float(q[4] or 0)}
+                            for q in cur.fetchall()]
+                        # execution quality (real orders)
+                        cur.execute(f"""
+                            SELECT COUNT(*) FILTER (WHERE fill_status = 'filled'),
+                                   COUNT(*) FILTER (WHERE fill_status = 'partial'),
+                                   COUNT(*) FILTER (WHERE fill_status = 'unfilled'),
+                                   ROUND(AVG(avg_fill_price_c - paper_ask_c)
+                                         FILTER (WHERE COALESCE(filled_count, 0) > 0)::numeric, 2),
+                                   COALESCE(SUM(filled_count), 0),
+                                   COALESCE(SUM(requested_count), 0)
+                            FROM live_trades
+                            WHERE is_live = TRUE AND {frag}
+                        """)
+                        r = cur.fetchone()
+                        req = float(r[5] or 0)
+                        blk["execution"] = {
+                            "filled": r[0], "partial": r[1], "unfilled": r[2],
+                            "avg_slippage_c": float(r[3]) if r[3] is not None else None,
+                            "fill_rate": round(float(r[4] or 0) / req, 3) if req else None,
+                        }
+                        # spend today (real)
+                        cur.execute(f"""
+                            SELECT ROUND(COALESCE(SUM(
+                                CASE WHEN filled_count IS NOT NULL AND avg_fill_price_c IS NOT NULL
+                                     THEN filled_count * avg_fill_price_c / 100.0
+                                     ELSE cost END), 0)::numeric, 2)
+                            FROM live_trades
+                            WHERE is_live = TRUE AND {frag} AND ts::date = CURRENT_DATE
+                        """)
+                        blk["spend_today"] = float(cur.fetchone()[0] or 0)
+                        # open positions
+                        cur.execute(f"""
+                            SELECT ticker, city, filled_count, avg_fill_price_c,
+                                   target_date, z_score, grade
+                            FROM live_trades
+                            WHERE is_live = TRUE AND {frag} AND settled_temp IS NULL
+                              AND pnl IS NULL AND COALESCE(filled_count, 0) > 0
+                            ORDER BY ts DESC LIMIT 30
+                        """)
+                        blk["open"] = [
+                            {"ticker": q[0], "city": q[1], "count": q[2],
+                             "price_c": float(q[3]) if q[3] is not None else None,
+                             "target_date": q[4],
+                             "z": float(q[5]) if q[5] is not None else None,
+                             "grade": q[6]}
+                            for q in cur.fetchall()]
+                        # recent orders (real + sim, so smoke tests are visible)
+                        cur.execute(f"""
+                            SELECT ts, ticker, city, requested_count, filled_count,
+                                   avg_fill_price_c, cost, fill_status, is_live,
+                                   z_score, grade, settled_correct, pnl
+                            FROM live_trades
+                            WHERE {frag}
+                            ORDER BY ts DESC LIMIT 25
+                        """)
+                        blk["recent"] = [
+                            {"ts": str(q[0]), "ticker": q[1], "city": q[2],
+                             "requested": q[3], "filled": q[4],
+                             "price_c": float(q[5]) if q[5] is not None else None,
+                             "cost": float(q[6]) if q[6] is not None else None,
+                             "fill_status": q[7], "live": bool(q[8]),
+                             "z": float(q[9]) if q[9] is not None else None,
+                             "grade": q[10],
+                             "settled_correct": q[11],
+                             "pnl": float(q[12]) if q[12] is not None else None}
+                            for q in cur.fetchall()]
+                        out[name] = blk
+                    # tail tier split (TAIL-A full size vs TAIL-B half size)
+                    cur.execute("""
+                        SELECT grade, COUNT(*),
+                               COUNT(*) FILTER (WHERE settled_correct),
+                               ROUND(COALESCE(SUM(pnl), 0)::numeric, 2),
+                               ROUND(COALESCE(SUM(filled_count * avg_fill_price_c / 100.0), 0)::numeric, 2)
+                        FROM live_trades
+                        WHERE is_live = TRUE AND strategy = 'tail'
+                          AND settled_correct IS NOT NULL
+                          AND COALESCE(filled_count, 0) > 0
+                        GROUP BY grade ORDER BY grade
+                    """)
+                    out["tail"]["tiers"] = [
+                        {"tier": q[0], "n": q[1], "wins": q[2],
+                         "pnl": float(q[3] or 0),
+                         "ev_per_dollar": round(float(q[3] or 0) / float(q[4]), 3) if q[4] else None}
+                        for q in cur.fetchall()]
+                conn.close()
+                out["forecast"]["armed"] = bool(_AT_CONFIG.get("enabled")) and bool(_AT_CONFIG.get("live_mode"))
+                out["forecast"]["cap"] = _AT_CONFIG.get("daily_cap_dollars")
+                out["tail"]["enabled"] = bool(_AT_CONFIG.get("tail_enabled"))
+                out["tail"]["live"] = bool(_AT_CONFIG.get("tail_live"))
+                out["tail"]["cap"] = _AT_CONFIG.get("tail_daily_cap_dollars")
+                out["tail"]["contracts"] = _AT_CONFIG.get("tail_contracts")
+                self.send_json({"ok": True, "strategies": out})
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 

@@ -628,26 +628,51 @@ body{max-width:900px;margin:0 auto;}
 <div id="p-live" style="display:none">
   <div class="main">
 
+    <!-- Strategy sub-tabs -->
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+      <div id="lvt-forecast" onclick="lvSw('forecast')" class="tab active" style="font-size:11px;padding:7px 14px;">FORECAST BASED</div>
+      <div id="lvt-tail" onclick="lvSw('tail')" class="tab" style="font-size:11px;padding:7px 14px;">TAIL LAG</div>
+      <div style="flex:1;"></div>
+      <button onclick="lvKill()" style="padding:7px 14px;font-family:inherit;font-size:10px;letter-spacing:1px;background:var(--no-lt);color:var(--no);border:1px solid var(--no-border);border-radius:4px;cursor:pointer;">KILL — STOP ALL</button>
+    </div>
+
+    <!-- ══ FORECAST STRATEGY ══ -->
+    <div id="lvs-forecast">
+
     <!-- Status -->
     <div class="rf-card">
       <div class="rf-hdr">
-        <div class="rf-hdr-lbl">LIVE TRADING</div>
-        <div id="lv-armed" class="pill">—</div>
+        <div class="rf-hdr-lbl">FORECAST STRATEGY</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <div id="lv-armed" class="pill">—</div>
+          <button id="lv-fc-toggle" onclick="lvForecastToggle()" style="padding:5px 14px;font-family:inherit;font-size:10px;letter-spacing:1px;border-radius:4px;cursor:pointer;border:1px solid var(--border);background:var(--bg);color:var(--ink);">—</button>
+        </div>
       </div>
       <div style="padding:12px 14px;">
+        <div style="font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:12px;">
+          Model-vs-market mispricing. A GFS + ECMWF blend with per-city bias/sigma calibration prices
+          every same-day and next-day high-temp bracket; buys A-grade YES signals where the model
+          probability beats the ask by more than fees + spread. Kelly-sized, momentum entries on
+          forecast jumps, exits when the model gives up (prob &lt; 0.6&times; entry).
+        </div>
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;">
           <div><div style="font-size:10px;color:var(--muted);">SPENT TODAY</div><div id="lv-spent" style="font-size:16px;font-weight:500;">—</div></div>
           <div><div style="font-size:10px;color:var(--muted);">DAILY CAP</div><div id="lv-cap" style="font-size:16px;font-weight:500;">—</div></div>
           <div><div style="font-size:10px;color:var(--muted);">LIVE FILLS TODAY</div><div id="lv-fills" style="font-size:16px;font-weight:500;">—</div></div>
           <div><div style="font-size:10px;color:var(--muted);">SIM FILLS TODAY</div><div id="lv-simfills" style="font-size:16px;font-weight:500;">—</div></div>
         </div>
-        <div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin-bottom:12px;">
+        <div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden;">
           <div id="lv-capbar" style="height:100%;width:0%;background:var(--yes);"></div>
         </div>
-        <div style="display:flex;gap:8px;">
-          <button id="lv-armbtn" onclick="lvArm()" style="flex:1;padding:8px;font-family:inherit;font-size:11px;letter-spacing:1px;background:var(--yes-lt);color:var(--yes);border:1px solid var(--yes-border);border-radius:4px;cursor:pointer;">ARM — GO LIVE</button>
-          <button id="lv-killbtn" onclick="lvKill()" style="flex:1;padding:8px;font-family:inherit;font-size:11px;letter-spacing:1px;background:var(--no-lt);color:var(--no);border:1px solid var(--no-border);border-radius:4px;cursor:pointer;">KILL — STOP ALL</button>
-        </div>
+      </div>
+    </div>
+
+    <!-- Performance over time -->
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">PERFORMANCE — FORECAST</div><div id="lv-fc-tot" style="font-size:13px;font-weight:500;"></div></div>
+      <div style="padding:12px 14px;">
+        <div id="lv-fc-kpi" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;font-size:11px;color:var(--muted);">Loading…</div>
+        <div id="lv-fc-chart" style="font-size:11px;color:var(--muted);"></div>
       </div>
     </div>
 
@@ -752,21 +777,15 @@ body{max-width:900px;margin:0 auto;}
       </div>
     </div>
 
-    <!-- This week -->
-    <div class="rf-card">
-      <div class="rf-hdr"><div class="rf-hdr-lbl">RESULTS — ALL LIVE TRADES</div></div>
-      <div id="lv-week" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
-    </div>
-
     <!-- Open positions -->
     <div class="rf-card">
-      <div class="rf-hdr"><div class="rf-hdr-lbl">OPEN LIVE POSITIONS</div></div>
+      <div class="rf-hdr"><div class="rf-hdr-lbl">OPEN POSITIONS — FORECAST</div></div>
       <div id="lv-open" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
     </div>
 
-    <!-- Recent fills -->
+    <!-- Recent trades -->
     <div class="rf-card">
-      <div class="rf-hdr"><div class="rf-hdr-lbl">RECENT FILLS</div></div>
+      <div class="rf-hdr"><div class="rf-hdr-lbl">TRADES — FORECAST</div></div>
       <div id="lv-recent" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
     </div>
 
@@ -781,6 +800,87 @@ body{max-width:900px;margin:0 auto;}
       <div class="rf-hdr"><div class="rf-hdr-lbl">SETTLEMENT HEALTH</div></div>
       <div id="lv-health" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
     </div>
+
+    </div><!-- /lvs-forecast -->
+
+    <!-- ══ TAIL LAG STRATEGY ══ -->
+    <div id="lvs-tail" style="display:none">
+
+    <!-- Status -->
+    <div class="rf-card">
+      <div class="rf-hdr">
+        <div class="rf-hdr-lbl">TAIL LAG STRATEGY</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <div id="tl-status" class="pill">—</div>
+          <div style="display:flex;border:1px solid var(--border);border-radius:4px;overflow:hidden;">
+            <button id="tl-m-off" onclick="lvTailSet('off')" style="padding:5px 12px;font-family:inherit;font-size:10px;letter-spacing:1px;border:none;cursor:pointer;background:var(--bg);color:var(--muted);">OFF</button>
+            <button id="tl-m-sim" onclick="lvTailSet('sim')" style="padding:5px 12px;font-family:inherit;font-size:10px;letter-spacing:1px;border:none;border-left:1px solid var(--border);cursor:pointer;background:var(--bg);color:var(--muted);">SIM</button>
+            <button id="tl-m-live" onclick="lvTailSet('live')" style="padding:5px 12px;font-family:inherit;font-size:10px;letter-spacing:1px;border:none;border-left:1px solid var(--border);cursor:pointer;background:var(--bg);color:var(--muted);">LIVE</button>
+          </div>
+        </div>
+      </div>
+      <div style="padding:12px 14px;">
+        <div style="font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:12px;">
+          The lag edge: afternoons, the crowd extrapolates the day's trend and abandons open-ended
+          tail brackets the forecast still supports. Buys T-contracts at 3&ndash;10&cent;, noon&ndash;8pm
+          city-local, same-day markets only, when the strike is within z&sigma; of the blend forecast
+          &mdash; z&lt;1 full size (25 ct), z&lt;3 half, z&ge;3 skip. One position per market, holds to
+          settlement, no exits, all 17 cities. Backtest (Apr&ndash;Aug, n=700 full-tier): EV
+          <b style="color:var(--ink);">+8.98/$</b>, 58% win at ~6&cent;, 91/92 up days, out-of-sample +8.35.
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;">
+          <div><div style="font-size:10px;color:var(--muted);">SPENT TODAY</div><div id="tl-spent" style="font-size:16px;font-weight:500;">—</div></div>
+          <div><div style="font-size:10px;color:var(--muted);">DAILY CAP</div><div id="tl-cap" style="font-size:16px;font-weight:500;">—</div></div>
+          <div><div style="font-size:10px;color:var(--muted);">OPEN POSITIONS</div><div id="tl-openct" style="font-size:16px;font-weight:500;">—</div></div>
+          <div><div style="font-size:10px;color:var(--muted);">FILL RATE</div><div id="tl-fillrate" style="font-size:16px;font-weight:500;">—</div></div>
+        </div>
+        <div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden;">
+          <div id="tl-capbar" style="height:100%;width:0%;background:var(--yes);"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Performance over time -->
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">PERFORMANCE — TAIL LAG</div><div id="tl-tot" style="font-size:13px;font-weight:500;"></div></div>
+      <div style="padding:12px 14px;">
+        <div id="tl-kpi" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;font-size:11px;color:var(--muted);">No settled tail trades yet.</div>
+        <div id="tl-tiers" style="font-size:11px;color:var(--muted);margin-bottom:12px;"></div>
+        <div id="tl-chart" style="font-size:11px;color:var(--muted);"></div>
+      </div>
+    </div>
+
+    <!-- Sizing -->
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">SIZING</div>
+        <button onclick="lvTailSaveCfg()" style="padding:4px 12px;font-family:inherit;font-size:10px;letter-spacing:1px;background:var(--rain-lt);color:var(--rain);border:1px solid var(--border);border-radius:4px;cursor:pointer;">SAVE</button>
+      </div>
+      <div style="padding:12px 14px;display:flex;flex-direction:column;gap:10px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+          <div><div style="font-size:12px;">Contracts per position</div><div style="font-size:10px;color:var(--muted);">Full size at z&lt;1; half of this at 1&le;z&lt;3. At ~6&cent; asks, 25 ct &asymp; $1.50/position.</div></div>
+          <input id="tl-cfg-ct" type="number" step="1" min="1" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+          <div><div style="font-size:12px;">Daily cap</div><div style="font-size:10px;color:var(--muted);">Most real dollars the tail strategy may spend per day — separate from the forecast cap.</div></div>
+          <input id="tl-cfg-cap" type="number" step="1" min="0" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+        </div>
+        <div id="tl-cfg-msg" style="font-size:10px;color:var(--muted);"></div>
+      </div>
+    </div>
+
+    <!-- Open positions -->
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">OPEN POSITIONS — TAIL LAG</div></div>
+      <div id="tl-open" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
+    </div>
+
+    <!-- Recent trades -->
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">TRADES — TAIL LAG</div></div>
+      <div id="tl-recent" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
+    </div>
+
+    </div><!-- /lvs-tail -->
 
   </div>
 </div>
@@ -1164,19 +1264,64 @@ function sw(t){
 
 // ── LIVE TAB ─────────────────────────────────────────────────────────────
 function lvFmt$(x){return (x<0?'-$':'$')+Math.abs(x).toFixed(2);}
+let lvStratTab='forecast';
+function lvSw(t){
+  lvStratTab=t;
+  document.getElementById('lvs-forecast').style.display=t==='forecast'?'':'none';
+  document.getElementById('lvs-tail').style.display=t==='tail'?'':'none';
+  document.getElementById('lvt-forecast').className='tab'+(t==='forecast'?' active':'');
+  document.getElementById('lvt-tail').className='tab'+(t==='tail'?' active':'');
+}
+function lvKpi(l,v,c){return '<div style="background:var(--bg);border-radius:6px;padding:10px 12px;"><div style="font-size:9px;letter-spacing:1px;color:var(--muted);">'+l+'</div><div style="font-size:15px;margin-top:4px;color:'+(c||'var(--ink)')+';white-space:nowrap;">'+v+'</div></div>';}
+function lvScoreboard(elId,totId,blk){
+  const s=blk.settled,e=blk.execution;
+  const el=document.getElementById(elId);
+  if(!s||!s.n){
+    el.innerHTML='<div style="grid-column:1/-1;">No settled trades yet'+(e&&(e.filled||e.unfilled)?' — '+e.filled+' filled / '+e.unfilled+' unfilled order(s) awaiting settlement.':'.')+'</div>';
+    document.getElementById(totId).textContent='';
+  }else{
+    el.innerHTML=
+      lvKpi('PNL',(s.pnl<0?'-$':'+$')+Math.abs(s.pnl).toFixed(2),s.pnl>=0?'var(--yes)':'var(--no)')+
+      lvKpi('EV / $ STAKED',s.ev_per_dollar==null?'—':(s.ev_per_dollar>=0?'+':'')+s.ev_per_dollar.toFixed(2))+
+      lvKpi('WIN RATE',s.n?Math.round(100*s.wins/s.n)+'% ('+s.wins+'W/'+(s.n-s.wins)+'L)':'—')+
+      lvKpi('FILL / SLIP',(e.fill_rate!=null?(e.fill_rate*100).toFixed(0)+'%':'—')+' · '+(e.avg_slippage_c!=null?e.avg_slippage_c+'¢':'—'));
+  }
+  renderPnlCombo(blk.daily||[],elId.replace('-kpi','-chart'),totId);
+}
+function lvTradeTable(rows,withZ){
+  if(!rows||!rows.length)return null;
+  return '<table style="width:100%;border-collapse:collapse;font-size:11px;color:var(--ink);">'+
+    '<tr style="color:var(--muted);text-align:left;"><th style="padding:3px 6px;">WHEN</th><th>TICKER</th><th>CT</th><th>PRICE</th><th>COST</th>'+(withZ?'<th>Z</th><th>TIER</th>':'')+'<th></th><th>RESULT</th></tr>'+
+    rows.map(f=>{
+      const res=f.settled_correct==null?'<span style="color:var(--muted);">open</span>'
+        :(f.settled_correct?'<span style="color:var(--yes);">W':'<span style="color:var(--no);">L')+(f.pnl!=null?' '+(f.pnl>=0?'+$':'-$')+Math.abs(f.pnl).toFixed(2):'')+'</span>';
+      return '<tr><td style="padding:3px 6px;white-space:nowrap;">'+String(f.ts).slice(5,16)+'</td><td>'+f.ticker+'</td>'+
+      '<td>'+(f.filled??0)+'/'+(f.requested??0)+'</td><td>'+(f.price_c!=null?f.price_c.toFixed(0)+'¢':'—')+'</td>'+
+      '<td>'+lvFmt$(f.cost||0)+'</td>'+
+      (withZ?'<td>'+(f.z!=null?f.z.toFixed(1):'—')+'</td><td>'+(f.grade||'—').replace('TAIL-','')+'</td>':'')+
+      '<td>'+(f.live?'<span style="color:var(--yes);">LIVE</span>':'<span style="color:var(--muted);">sim</span>')+'</td>'+
+      '<td>'+res+'</td></tr>';
+    }).join('')+'</table>';
+}
 async function loadLive(){
   try{
-    const [live,cfgR,resR]=await Promise.all([
+    const [live,cfgR,resR,stratR]=await Promise.all([
       fetch(SERVER+'/debug/live').then(r=>r.json()),
       fetch(SERVER+'/auto-trader/config').then(r=>r.json()),
-      fetch(SERVER+'/debug/live-results').then(r=>r.json()).catch(()=>null)
+      fetch(SERVER+'/debug/live-results').then(r=>r.json()).catch(()=>null),
+      fetch(SERVER+'/debug/strategy-results').then(r=>r.json()).catch(()=>null)
     ]);
     const cfg=cfgR.config||{};
-    // status
+    const S=stratR&&stratR.ok?stratR.strategies:null;
+    // ── forecast status ──
     const armed=live.live_mode&&live.enabled;
     const el=document.getElementById('lv-armed');
     el.textContent=armed?'LIVE — ARMED':'OFF';
     el.className='pill '+(armed?'pill-ok':'pill-err');
+    const fcBtn=document.getElementById('lv-fc-toggle');
+    fcBtn.textContent=armed?'TURN OFF':'TURN ON';
+    fcBtn.style.background=armed?'var(--no-lt)':'var(--yes-lt)';
+    fcBtn.style.color=armed?'var(--no)':'var(--yes)';
     document.getElementById('lv-spent').textContent=lvFmt$(live.spent_today||0);
     document.getElementById('lv-cap').textContent=lvFmt$(live.daily_cap||0);
     document.getElementById('lv-fills').textContent=live.live_fills_today??0;
@@ -1185,6 +1330,52 @@ async function loadLive(){
     const bar=document.getElementById('lv-capbar');
     bar.style.width=pct+'%';
     bar.style.background=pct>=90?'var(--no)':pct>=60?'var(--warn)':'var(--yes)';
+    // ── forecast analytics / tables ──
+    if(S){
+      lvScoreboard('lv-fc-kpi','lv-fc-tot',S.forecast);
+      const op=document.getElementById('lv-open');
+      op.innerHTML=(S.forecast.open&&S.forecast.open.length)?
+        '<table style="width:100%;border-collapse:collapse;font-size:11px;color:var(--ink);">'+
+        '<tr style="color:var(--muted);text-align:left;"><th style="padding:3px 6px;">TICKER</th><th>CT</th><th>PRICE</th><th>TARGET</th></tr>'+
+        S.forecast.open.map(o=>'<tr><td style="padding:3px 6px;">'+o.ticker+'</td><td>'+o.count+'</td><td>'+(o.price_c!=null?o.price_c+'¢':'—')+'</td><td>'+(o.target_date||'—')+'</td></tr>').join('')+'</table>'
+        :'None.';
+      document.getElementById('lv-recent').innerHTML=lvTradeTable(S.forecast.recent,false)||'No trades yet.';
+      // ── tail tab ──
+      const T=S.tail;
+      const mode=!T.enabled?'off':(T.live?'live':'sim');
+      const st=document.getElementById('tl-status');
+      st.textContent=mode==='off'?'OFF':mode==='sim'?'SIMULATING':'LIVE — ARMED';
+      st.className='pill '+(mode==='live'?'pill-ok':mode==='sim'?'pill-warn':'pill-err');
+      [['off','tl-m-off'],['sim','tl-m-sim'],['live','tl-m-live']].forEach(([m,id])=>{
+        const b=document.getElementById(id);
+        const on=m===mode;
+        b.style.background=on?(m==='live'?'var(--yes-lt)':m==='sim'?'var(--rain-lt)':'var(--no-lt)'):'var(--bg)';
+        b.style.color=on?(m==='live'?'var(--yes)':m==='sim'?'var(--rain)':'var(--no)'):'var(--muted)';
+      });
+      document.getElementById('tl-spent').textContent=lvFmt$(T.spend_today||0);
+      document.getElementById('tl-cap').textContent=lvFmt$(T.cap||0);
+      document.getElementById('tl-openct').textContent=(T.open||[]).length;
+      document.getElementById('tl-fillrate').textContent=T.execution&&T.execution.fill_rate!=null?(T.execution.fill_rate*100).toFixed(0)+'%':'—';
+      const tpct=T.cap?Math.min(100,100*(T.spend_today||0)/T.cap):0;
+      const tbar=document.getElementById('tl-capbar');
+      tbar.style.width=tpct+'%';
+      tbar.style.background=tpct>=90?'var(--no)':tpct>=60?'var(--warn)':'var(--yes)';
+      lvScoreboard('tl-kpi','tl-tot',T);
+      const tt=document.getElementById('tl-tiers');
+      tt.innerHTML=(T.tiers&&T.tiers.length)?T.tiers.map(t=>
+        '<span style="margin-right:14px;">'+(t.tier||'?').replace('TAIL-','tier ')+': '+
+        (t.ev_per_dollar!=null?((t.ev_per_dollar>=0?'+':'')+t.ev_per_dollar.toFixed(2)+'/$'):'—')+
+        ' · '+t.wins+'W/'+(t.n-t.wins)+'L</span>').join(''):'';
+      if(document.getElementById('tl-cfg-ct')!==document.activeElement)document.getElementById('tl-cfg-ct').value=T.contracts??'';
+      if(document.getElementById('tl-cfg-cap')!==document.activeElement)document.getElementById('tl-cfg-cap').value=T.cap??'';
+      const tOp=document.getElementById('tl-open');
+      tOp.innerHTML=(T.open&&T.open.length)?
+        '<table style="width:100%;border-collapse:collapse;font-size:11px;color:var(--ink);">'+
+        '<tr style="color:var(--muted);text-align:left;"><th style="padding:3px 6px;">TICKER</th><th>CT</th><th>PRICE</th><th>Z</th><th>TIER</th><th>TARGET</th></tr>'+
+        T.open.map(o=>'<tr><td style="padding:3px 6px;">'+o.ticker+'</td><td>'+o.count+'</td><td>'+(o.price_c!=null?o.price_c+'¢':'—')+'</td><td>'+(o.z!=null?o.z.toFixed(1):'—')+'</td><td>'+(o.grade||'—').replace('TAIL-','')+'</td><td>'+(o.target_date||'—')+'</td></tr>').join('')+'</table>'
+        :'None.';
+      document.getElementById('tl-recent').innerHTML=lvTradeTable(T.recent,true)||'No trades yet — entries appear noon–8pm local per city.';
+    }
     // settings
     document.getElementById('lv-cfg-cap').value=cfg.daily_cap_dollars??'';
     document.getElementById('lv-cfg-fill').value=cfg.max_per_fill??'';
@@ -1203,42 +1394,14 @@ async function loadLive(){
     document.getElementById('lv-cfg-exiton').value=(cfg.exit_enabled===false)?'off':'on';
     document.getElementById('lv-cfg-exitfrac').value=cfg.exit_prob_frac??'';
     lvCfgLoaded=cfg;
-    // results
     const R=resR&&resR.ok?resR.results:null;
-    const wk=document.getElementById('lv-week');
-    if(R&&R.live_pnl&&R.execution){
-      const p=R.live_pnl,e=R.execution;
-      wk.innerHTML=
-        '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;color:var(--ink);">'+
-        '<div><div style="font-size:10px;color:var(--muted);">STAKED</div><div style="font-size:15px;font-weight:500;">'+lvFmt$(p.staked)+'</div></div>'+
-        '<div><div style="font-size:10px;color:var(--muted);">PNL</div><div style="font-size:15px;font-weight:500;color:'+(p.total_pnl>=0?'var(--yes)':'var(--no)')+'">'+lvFmt$(p.total_pnl)+'</div></div>'+
-        '<div><div style="font-size:10px;color:var(--muted);">RETURN / $</div><div style="font-size:15px;font-weight:500;">'+(p.ev_per_dollar>=0?'+':'')+(p.ev_per_dollar*100).toFixed(0)+'&cent;</div></div>'+
-        '<div><div style="font-size:10px;color:var(--muted);">WINS</div><div style="font-size:15px;font-weight:500;">'+p.wins+' / '+p.settled+'</div></div>'+
-        '</div>'+
-        '<div style="margin-top:10px;font-size:11px;color:var(--muted);">Fill rate '+
-        (e.fill_rate!=null?(e.fill_rate*100).toFixed(0)+'%':'—')+
-        ' &middot; avg slippage '+(e.avg_slippage_c!=null?e.avg_slippage_c+'&cent;':'—')+
-        ' &middot; orders: '+e.filled+' filled, '+e.partial+' partial, '+e.unfilled+' unfilled</div>';
-    } else if(R&&R.note){
-      wk.textContent='No live trades yet.';
-    } else {
-      wk.textContent=(resR&&resR.error)?('Results unavailable: '+resR.error):'No settled live trades yet.';
+    // fallback if the strategy endpoint failed entirely
+    if(!S){
+      document.getElementById('lv-fc-kpi').textContent=(stratR&&stratR.error)?('Results unavailable: '+stratR.error):'Results unavailable.';
+      document.getElementById('lv-open').textContent='—';
+      document.getElementById('lv-recent').textContent='—';
+      document.getElementById('tl-kpi').textContent='Results unavailable.';
     }
-    // pnl chart
-    // open positions
-    const op=document.getElementById('lv-open');
-    if(R&&R.open_live&&R.open_live.length){
-      op.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:11px;color:var(--ink);">'+
-        '<tr style="color:var(--muted);text-align:left;"><th style="padding:3px 6px;">TICKER</th><th>CT</th><th>PRICE</th><th>TARGET</th></tr>'+
-        R.open_live.map(o=>'<tr><td style="padding:3px 6px;">'+o.ticker+'</td><td>'+o.count+'</td><td>'+(o.price_c!=null?o.price_c+'&cent;':'—')+'</td><td>'+(o.target_date||'—')+'</td></tr>').join('')+'</table>';
-    } else op.textContent='None.';
-    // recent fills
-    const rc=document.getElementById('lv-recent');
-    if(live.recent_fills&&live.recent_fills.length){
-      rc.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:11px;color:var(--ink);">'+
-        '<tr style="color:var(--muted);text-align:left;"><th style="padding:3px 6px;">WHEN</th><th>TICKER</th><th>CT</th><th>COST</th><th>SLIP</th><th></th></tr>'+
-        live.recent_fills.map(f=>'<tr><td style="padding:3px 6px;white-space:nowrap;">'+String(f.ts).slice(5,16)+'</td><td>'+f.ticker+'</td><td>'+f.count+'</td><td>'+lvFmt$(f.cost||0)+'</td><td>'+(f.slip_c!=null?f.slip_c+'&cent;':'—')+'</td><td>'+(f.live?'<span style="color:var(--yes);">LIVE</span>':'<span style="color:var(--muted);">sim</span>')+'</td></tr>').join('')+'</table>';
-    } else rc.textContent='No fills yet.';
     // slippage by city
     const sl=document.getElementById('lv-slip');
     if(R&&R.slippage_by_city&&R.slippage_by_city.length){
@@ -1254,8 +1417,39 @@ async function loadLive(){
         (h.abandoned_rows!=null?' &middot; <span style="color:var(--ink);">'+h.abandoned_rows+'</span> abandoned':'');
     } else hh.textContent='—';
   }catch(e){
-    document.getElementById('lv-week').textContent='Load error: '+e.message;
+    document.getElementById('lv-fc-kpi').textContent='Load error: '+e.message;
   }
+}
+async function lvForecastToggle(){
+  const armed=document.getElementById('lv-armed').textContent.indexOf('ARMED')>=0;
+  if(armed){
+    if(!confirm('Turn OFF the forecast strategy? No new forecast orders will be placed.'))return;
+    await fetch(SERVER+'/auto-trader/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:false,live_mode:false})});
+  }else{
+    if(!confirm('Turn ON the forecast strategy? Real money orders will be placed.'))return;
+    await fetch(SERVER+'/auto-trader/go-live');
+  }
+  loadLive();
+}
+async function lvTailSet(mode){
+  if(mode==='live'&&!confirm('Set the tail lag strategy LIVE? Real money orders will be placed (up to the tail daily cap).'))return;
+  const body=mode==='off'?{tail_enabled:false,tail_live:false}
+            :mode==='sim'?{tail_enabled:true,tail_live:false}
+            :{tail_enabled:true,tail_live:true};
+  await fetch(SERVER+'/auto-trader/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  loadLive();
+}
+async function lvTailSaveCfg(){
+  const msg=document.getElementById('tl-cfg-msg');
+  try{
+    const body={
+      tail_contracts:parseInt(document.getElementById('tl-cfg-ct').value)||25,
+      tail_daily_cap_dollars:parseFloat(document.getElementById('tl-cfg-cap').value)||25
+    };
+    const r=await fetch(SERVER+'/auto-trader/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(x=>x.json());
+    msg.textContent=r.ok?'Saved.':'Save failed: '+(r.error||'?');
+    setTimeout(()=>{msg.textContent='';},4000);
+  }catch(e){msg.textContent='Save failed: '+e.message;}
 }
 function renderPnlCombo(series,elId,totId){
   const el=document.getElementById(elId);
@@ -1363,10 +1557,6 @@ function lvToggleAdv(btn){
   const open=el.style.display==='none';
   el.style.display=open?'flex':'none';
   btn.innerHTML=(open?'&#9662;':'&#9656;')+' Advanced';
-}
-async function lvArm(){
-  if(!confirm('Arm live trading? Real money orders will be placed.'))return;
-  await fetch(SERVER+'/auto-trader/go-live');loadLive();
 }
 async function lvKill(){
   await fetch(SERVER+'/auto-trader/kill');loadLive();
