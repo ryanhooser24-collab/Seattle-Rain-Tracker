@@ -1832,25 +1832,28 @@ _AT_CONFIG = {
     # Applies only when live_mode is True — paper/calibration keeps running on
     # every city so sample sizes continue to build where the edge is unproven.
     "live_city_whitelist": [],
-    # ── Tail (lag) strategy — validated 2026-08-24 on 93k settled snapshots ──
-    # Buy open-ended T-brackets at 3-10¢, noon-8pm city-local, same-day markets
-    # only, one position per ticker, hold to settlement. Sized by z = distance
-    # of the strike beyond the blend forecast in sigmas: the crowd abandons
-    # tails the model still supports. Backtest: z<1 EV +8.98/$ (n=700, train
-    # +9.7 / test +8.4, 91/92 up days); 1≤z<3 +3.1/$ (half size); z≥3 dead.
-    # Runs on ALL cities (every city backtested positive) — the main trader's
-    # whitelist, exits, and caps do not apply.
+    # ── Tail (lag) strategy — hybrid schedule, validated 2026-08-24 on 93k
+    # settled snapshots (94 days: EV +6.89/$, +$7.00/day per contract-unit,
+    # train +7.55 / test +6.39, 93/94 up days, worst day -$1.75 at 25 ct).
+    # Buy open-ended T-brackets the model still supports (z = strike distance
+    # beyond blend forecast in sigmas) — the crowd abandons them too early.
+    # MORNING (start..11h local): ask 3-15¢, z<3; weight (z<1?1:0.5)×(≤10¢?1:0.4).
+    # AFTERNOON (12h..end): ask 3-10¢; z<1 full size even as a top-up on a
+    # filled morning position (top-up EV +9.06 — the market keeps lagging);
+    # 1≤z<3 half size only when no morning fill; z≥3 skip. One filled position
+    # per ticker per phase, hold to settlement. Runs on ALL cities — the main
+    # trader's whitelist, exits, and caps do not apply.
     "tail_enabled":           False,
     "tail_live":              False,  # False = simulate fills; True = REAL orders
     "tail_min_ask_c":         3,
-    "tail_max_ask_c":         10,
-    "tail_hour_start":        12,     # city-local hour, inclusive
+    "tail_max_ask_c":         15,     # morning band; afternoon clamps to 10¢
+    "tail_hour_start":        6,      # city-local hour, inclusive
     "tail_hour_end":          19,     # city-local hour, inclusive
     "tail_z_full":            1.0,    # z below this → full size
     "tail_z_half":            3.0,    # z below this → half size; above → skip
-    "tail_contracts":         25,     # contracts per full-size position
-    "tail_daily_cap_dollars": 25.0,   # tail-only cap, separate from main trader
-    "tail_max_attempts":      3,      # unfilled IOC attempts per ticker before giving up
+    "tail_contracts":         50,     # contracts per full-size position
+    "tail_daily_cap_dollars": 100.0,  # tail-only cap; mean stake ~$50/d at 50 ct
+    "tail_max_attempts":      3,      # unfilled IOC attempts per ticker+phase
 }
 
 
@@ -3236,32 +3239,52 @@ def _tail_spend_today():
 
 def _tail_ticker_state(ticker):
     """
-    (has_fill, attempts) for one ticker under the tail strategy.
+    Per-phase state for one ticker under the tail strategy:
+    (am_filled, pm_filled, am_attempts, pm_attempts).
+    AM rows carry grade 'TAIL-AM-*'; PM rows 'TAIL-PM-*' or 'TAIL-TOP'.
     A ticker embeds its date, so no date filter is needed. Fail-closed:
-    on DB error report has_fill=True so we never double-enter blind.
+    on DB error report both phases filled so we never double-enter blind.
     """
     try:
         conn = get_db()
-        if not conn: return True, 99
+        if not conn: return True, True, 99, 99
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT COUNT(*), COALESCE(SUM(COALESCE(filled_count, 0)), 0)
+                SELECT grade, COALESCE(filled_count, 0)
                 FROM live_trades WHERE strategy = 'tail' AND ticker = %s
             """, (ticker,))
-            attempts, filled = cur.fetchone()
+            rows = cur.fetchall()
         conn.close()
-        return (int(filled or 0) > 0), int(attempts or 0)
+        am_f = pm_f = False
+        am_a = pm_a = 0
+        for g, filled in rows:
+            is_am = (g or "").startswith("TAIL-AM")
+            if is_am:
+                am_a += 1
+                am_f = am_f or int(filled or 0) > 0
+            else:
+                pm_a += 1
+                pm_f = pm_f or int(filled or 0) > 0
+        return am_f, pm_f, am_a, pm_a
     except Exception:
-        return True, 99
+        return True, True, 99, 99
 
 
 def run_tail_trader_cycle():
     """
-    One tail-strategy pass. Entry rules mirror the backtest exactly:
-    same-day (d0) high markets, open-ended T-brackets, ask 3-10¢, city-local
-    hour 12-19, z = strike distance beyond blend forecast in sigmas
-    (z < tail_z_full → full size, z < tail_z_half → half, else skip),
-    one filled position per ticker, hold to settlement — no exits.
+    One tail-strategy pass — the two-entry HYBRID schedule (backtested
+    2026-08-24 on 94 days, hybrid EV +6.89/$, +$7.00/day per contract-unit,
+    train +7.55 / test +6.39, every month positive, 93/94 up days):
+
+      MORNING phase (tail_hour_start..11 city-local): ask 3-15¢, z<3.
+        weight = (z<1 ? 1.0 : 0.5) × (ask ≤ 10¢ ? 1.0 : 0.4)   [AM +5.50/$]
+      AFTERNOON phase (12..tail_hour_end): ask 3-10¢ only.
+        z<1 → full size, allowed even on top of a filled morning position
+        (the market KEEPS lagging: top-up EV +9.06, fresh PM +8.19);
+        1≤z<3 → half size, only if no morning fill.  z≥3 → skip.
+
+    Same-day (d0) high markets, open-ended T-brackets only, one filled
+    position per ticker per phase, hold to settlement — no exits.
     """
     import pytz
     from datetime import datetime as _dt
@@ -3272,14 +3295,14 @@ def run_tail_trader_cycle():
 
     is_live   = bool(cfg.get("tail_live", False))
     min_ask   = int(cfg.get("tail_min_ask_c", 3)) / 100.0
-    max_ask   = int(cfg.get("tail_max_ask_c", 10)) / 100.0
-    h0        = int(cfg.get("tail_hour_start", 12))
+    am_max_ask = int(cfg.get("tail_max_ask_c", 15)) / 100.0
+    pm_max_ask = min(am_max_ask, 0.10)   # afternoon band tested at 3-10c only
+    h0        = int(cfg.get("tail_hour_start", 6))
     h1        = int(cfg.get("tail_hour_end", 19))
     z_full    = float(cfg.get("tail_z_full", 1.0))
     z_half    = float(cfg.get("tail_z_half", 3.0))
     full_ct   = max(1, int(cfg.get("tail_contracts", 25)))
-    half_ct   = max(1, full_ct // 2)
-    cap       = float(cfg.get("tail_daily_cap_dollars", 25.0))
+    cap       = float(cfg.get("tail_daily_cap_dollars", 50.0))
     max_att   = int(cfg.get("tail_max_attempts", 3))
 
     fills = 0
@@ -3302,6 +3325,8 @@ def run_tail_trader_cycle():
             if target != local_now.strftime("%Y-%m-%d"):
                 continue  # belt & braces: d0 must be today, city-local
 
+            am = local_now.hour < 12   # phase boundary fixed at noon (backtest)
+
             for m in result.get("high_markets", []):
                 ticker = m.get("ticker") or ""
                 if not re.search(r"-T[0-9]", ticker):
@@ -3313,7 +3338,7 @@ def run_tail_trader_cycle():
                 if not one_sided:
                     continue
                 ask = m.get("yes_ask")
-                if not ask or not (min_ask <= float(ask) <= max_ask):
+                if not ask or not (min_ask <= float(ask) <= (am_max_ask if am else pm_max_ask)):
                     continue
                 ask = float(ask)
 
@@ -3325,12 +3350,25 @@ def run_tail_trader_cycle():
                 z = d / float(sigma)
                 if z >= z_half:
                     continue
-                count = full_ct if z < z_full else half_ct
-                tier  = "TAIL-A" if z < z_full else "TAIL-B"
 
-                has_fill, attempts = _tail_ticker_state(ticker)
-                if has_fill or attempts >= max_att:
-                    continue
+                am_f, pm_f, am_a, pm_a = _tail_ticker_state(ticker)
+                if am:
+                    if am_f or am_a >= max_att:
+                        continue
+                    weight = (1.0 if z < z_full else 0.5) * (1.0 if ask <= 0.10 else 0.4)
+                    tier = "TAIL-AM-A" if z < z_full else "TAIL-AM-B"
+                else:
+                    if pm_f or pm_a >= max_att:
+                        continue
+                    if z < z_full:
+                        weight = 1.0
+                        tier = "TAIL-TOP" if am_f else "TAIL-PM-A"
+                    elif not am_f:
+                        weight = 0.5
+                        tier = "TAIL-PM-B"
+                    else:
+                        continue  # 1<=z<3 top-ups were not backtested — skip
+                count = max(1, int(round(full_ct * weight)))
 
                 ask_c = round(ask * 100)
                 projected = count * ask
@@ -3380,7 +3418,7 @@ def run_tail_trader_cycle():
                                         entry_prob=m.get("model_prob"),
                                         strategy="tail", z_score=round(z, 2))
                         at_log("WARN", f"TAIL {ticker} no fill at {ask_c}¢ — "
-                                       f"attempt {attempts + 1}/{max_att}",
+                                       f"attempt {(am_a if am else pm_a) + 1}/{max_att}",
                                ticker=ticker, city=city_key)
                         continue
                     if _fill_status == "partial":

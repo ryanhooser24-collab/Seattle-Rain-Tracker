@@ -821,12 +821,14 @@ body{max-width:900px;margin:0 auto;}
       </div>
       <div style="padding:12px 14px;">
         <div style="font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:12px;">
-          The lag edge: afternoons, the crowd extrapolates the day's trend and abandons open-ended
-          tail brackets the forecast still supports. Buys T-contracts at 3&ndash;10&cent;, noon&ndash;8pm
-          city-local, same-day markets only, when the strike is within z&sigma; of the blend forecast
-          &mdash; z&lt;1 full size (25 ct), z&lt;3 half, z&ge;3 skip. One position per market, holds to
-          settlement, no exits, all 17 cities. Backtest (Apr&ndash;Aug, n=700 full-tier): EV
-          <b style="color:var(--ink);">+8.98/$</b>, 58% win at ~6&cent;, 91/92 up days, out-of-sample +8.35.
+          The lag edge: the crowd abandons open-ended tail brackets the forecast still supports
+          (z = strike distance beyond the blend forecast in sigmas). Two-entry hybrid on same-day
+          markets, all 17 cities: <b style="color:var(--ink);">morning</b> (6&ndash;11h local) buys
+          3&ndash;15&cent; at z&lt;3, sized by tier; <b style="color:var(--ink);">afternoon</b>
+          (12&ndash;19h) buys 3&ndash;10&cent; at z&lt;1 full size &mdash; even as a top-up on a filled
+          morning position, because the market keeps lagging (top-up EV +9.06/$). Holds to settlement,
+          no exits. Backtest (Apr&ndash;Aug, 94 days, n=2,064): EV <b style="color:var(--ink);">+6.89/$</b>,
+          +$7.00/day per contract-unit, train +7.55 / test +6.39, 93/94 up days, worst day &minus;$1.75.
         </div>
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;">
           <div><div style="font-size:10px;color:var(--muted);">SPENT TODAY</div><div id="tl-spent" style="font-size:16px;font-weight:500;">—</div></div>
@@ -857,7 +859,7 @@ body{max-width:900px;margin:0 auto;}
       </div>
       <div style="padding:12px 14px;display:flex;flex-direction:column;gap:10px;">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
-          <div><div style="font-size:12px;">Contracts per position</div><div style="font-size:10px;color:var(--muted);">Full size at z&lt;1; half of this at 1&le;z&lt;3. At ~6&cent; asks, 25 ct &asymp; $1.50/position.</div></div>
+          <div><div style="font-size:12px;">Contracts per position</div><div style="font-size:10px;color:var(--muted);">Base (full) size; tiers scale down from it (z&ge;1 &times;0.5, morning 11&ndash;15&cent; &times;0.4). THE knob for scaling: 25 ct &asymp; $25/day staked, backtest EV &asymp; +$175/day.</div></div>
           <input id="tl-cfg-ct" type="number" step="1" min="1" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
         </div>
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
