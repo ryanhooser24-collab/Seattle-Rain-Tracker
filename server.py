@@ -9047,6 +9047,18 @@ def start_background_scan_scheduler():
 
 if __name__ == "__main__":
     ensure_tables()
+    # Self-migrate live_trades at boot (idempotent autocommit DDL). Spend/exit
+    # queries reference the newest columns (e.g. strategy) before any lazy
+    # _live_trade_log call would add them — without this, a fresh deploy
+    # fails closed on _live_spend_today until someone hits the migrate URL.
+    try:
+        _boot_conn = get_db()
+        if _boot_conn:
+            _ensure_live_trades_table(_boot_conn)
+            _boot_conn.close()
+            print("  ✅ live_trades schema ensured at boot")
+    except Exception as _be:
+        print(f"  ⚠️  boot live_trades migration: {_be}")
     start_settlement_scheduler()       # auto-settle yesterday's temp snapshots each morning
     maybe_auto_calibrate()             # calibrate bias/σ on startup (non-blocking)
     at_load_config_from_db()           # restore auto-trader config from DB
