@@ -1832,6 +1832,25 @@ _AT_CONFIG = {
     # Applies only when live_mode is True — paper/calibration keeps running on
     # every city so sample sizes continue to build where the edge is unproven.
     "live_city_whitelist": [],
+    # ── Tail (lag) strategy — validated 2026-08-24 on 93k settled snapshots ──
+    # Buy open-ended T-brackets at 3-10¢, noon-8pm city-local, same-day markets
+    # only, one position per ticker, hold to settlement. Sized by z = distance
+    # of the strike beyond the blend forecast in sigmas: the crowd abandons
+    # tails the model still supports. Backtest: z<1 EV +8.98/$ (n=700, train
+    # +9.7 / test +8.4, 91/92 up days); 1≤z<3 +3.1/$ (half size); z≥3 dead.
+    # Runs on ALL cities (every city backtested positive) — the main trader's
+    # whitelist, exits, and caps do not apply.
+    "tail_enabled":           False,
+    "tail_live":              False,  # False = simulate fills; True = REAL orders
+    "tail_min_ask_c":         3,
+    "tail_max_ask_c":         10,
+    "tail_hour_start":        12,     # city-local hour, inclusive
+    "tail_hour_end":          19,     # city-local hour, inclusive
+    "tail_z_full":            1.0,    # z below this → full size
+    "tail_z_half":            3.0,    # z below this → half size; above → skip
+    "tail_contracts":         25,     # contracts per full-size position
+    "tail_daily_cap_dollars": 25.0,   # tail-only cap, separate from main trader
+    "tail_max_attempts":      3,      # unfilled IOC attempts per ticker before giving up
 }
 
 
@@ -1913,6 +1932,8 @@ def _ensure_live_trades_table(conn):
             "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS lo_temp NUMERIC(5,1)",
             "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS hi_temp NUMERIC(5,1)",
             "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS pnl NUMERIC(10,2)",
+            "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS strategy TEXT",
+            "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS z_score NUMERIC(6,2)",
             "CREATE INDEX IF NOT EXISTS ix_live_trades_settle "
             "ON live_trades (city, target_date) WHERE settled_temp IS NULL",
         ):
@@ -1929,7 +1950,7 @@ def _live_trade_log(ticker, city, side, count, paper_ask_c, order_ask_c, cost,
                     order_id=None, requested_count=None, filled_count=None,
                     fill_status=None, avg_fill_price_c=None,
                     target_date=None, lo_temp=None, hi_temp=None,
-                    entry_prob=None, momentum=None):
+                    entry_prob=None, momentum=None, strategy=None, z_score=None):
     """
     Log every fill (real or simulated) with the slippage measurement:
     slippage_c = order price - paper price (BBO at signal scan time).
@@ -1946,16 +1967,16 @@ def _live_trade_log(ticker, city, side, count, paper_ask_c, order_ask_c, cost,
                  cost, is_live, grade, net_gap_c, hours_to_cutoff, order_resp,
                  order_id, requested_count, filled_count, fill_status,
                  avg_fill_price_c, target_date, lo_temp, hi_temp, entry_prob,
-                 momentum_entry)
+                 momentum_entry, strategy, z_score)
                 VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,
-                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                        %s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             """, (ticker, city, side, count, paper_ask_c, order_ask_c,
                   (order_ask_c - paper_ask_c) if (order_ask_c is not None and paper_ask_c is not None) else None,
                   cost, is_live, grade, net_gap_c, htc,
                   json.dumps(order_resp) if order_resp else None,
                   order_id, requested_count, filled_count, fill_status,
                   avg_fill_price_c, target_date, lo_temp, hi_temp, entry_prob,
-                  bool(momentum)))
+                  bool(momentum), strategy, z_score))
         conn.commit()
         conn.close()
     except Exception as e:
@@ -1979,6 +2000,7 @@ def _live_spend_today():
                     END
                 ), 0) FROM live_trades
                 WHERE is_live = TRUE AND ts::date = CURRENT_DATE
+                  AND COALESCE(strategy, '') <> 'tail'
             """)
             v = float(cur.fetchone()[0] or 0)
         conn.close()
@@ -2542,6 +2564,7 @@ def at_check_exits(city_key, markets, cfg):
                 WHERE is_live = TRUE AND COALESCE(exited, FALSE) = FALSE
                   AND settled_temp IS NULL AND pnl IS NULL
                   AND city = %s AND entry_prob IS NOT NULL
+                  AND COALESCE(strategy, '') <> 'tail'
                   AND ticker = ANY(%s)
                 GROUP BY ticker
             """, (city_key, list(view.keys())))
@@ -2736,7 +2759,11 @@ def fetch_full_orderbook_liq(ticker, mu, sigma, lo, hi, min_edge_ratio=0.07):
 
 
 def at_get_open_positions():
-    """Return list of open weather position tickers and city counts."""
+    """
+    Return list of open weather position tickers and city counts.
+    Open TAIL-strategy positions are excluded — they'd otherwise consume the
+    main trader's max_positions budget (~8 tails open on a typical afternoon).
+    """
     try:
         r = requests.get(
             f"{KALSHI_BASE}/portfolio/positions",
@@ -2746,8 +2773,23 @@ def at_get_open_positions():
         if not r.ok:
             return [], {}
         positions = r.json().get("market_positions", [])
+        tail_open = set()
+        try:
+            conn = get_db()
+            if conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT DISTINCT ticker FROM live_trades
+                        WHERE strategy = 'tail' AND is_live = TRUE
+                          AND settled_temp IS NULL AND pnl IS NULL
+                    """)
+                    tail_open = {row[0] for row in cur.fetchall()}
+                conn.close()
+        except Exception:
+            pass
         weather = [p for p in positions
-                   if re.search(r"RAIN|KXHIGH|KXLOWT|KXLOWS", p.get("ticker", ""))]
+                   if re.search(r"RAIN|KXHIGH|KXLOWT|KXLOWS", p.get("ticker", ""))
+                   and p.get("ticker") not in tail_open]
         city_counts = {}
         for p in weather:
             t = p.get("ticker", "")
@@ -3161,6 +3203,212 @@ def run_auto_trader_cycle(force=False):
     at_flush_log_to_db()  # batch write cycle entries to DB
 
 
+# ══════════════════════════════════════════════════════════════════════════
+#  TAIL (LAG) STRATEGY — buy abandoned open-ended tails the model supports
+#  Validated 2026-08-24 on 93k settled temp_snapshots (see _AT_CONFIG notes).
+#  Completely independent of the main trader: own enable/live flags, own
+#  daily cap, no whitelist/exits/max_positions, hold to settlement.
+# ══════════════════════════════════════════════════════════════════════════
+
+def _tail_spend_today():
+    """Real dollars filled by the tail strategy today (UTC). Fail-closed."""
+    try:
+        conn = get_db()
+        if not conn: return 999999.0
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COALESCE(SUM(
+                    CASE
+                        WHEN filled_count IS NOT NULL AND avg_fill_price_c IS NOT NULL
+                            THEN filled_count * avg_fill_price_c / 100.0
+                        ELSE cost
+                    END
+                ), 0) FROM live_trades
+                WHERE is_live = TRUE AND strategy = 'tail'
+                  AND ts::date = CURRENT_DATE
+            """)
+            v = float(cur.fetchone()[0] or 0)
+        conn.close()
+        return v
+    except Exception:
+        return 999999.0  # fail-closed: unknown spend = cap hit
+
+
+def _tail_ticker_state(ticker):
+    """
+    (has_fill, attempts) for one ticker under the tail strategy.
+    A ticker embeds its date, so no date filter is needed. Fail-closed:
+    on DB error report has_fill=True so we never double-enter blind.
+    """
+    try:
+        conn = get_db()
+        if not conn: return True, 99
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(*), COALESCE(SUM(COALESCE(filled_count, 0)), 0)
+                FROM live_trades WHERE strategy = 'tail' AND ticker = %s
+            """, (ticker,))
+            attempts, filled = cur.fetchone()
+        conn.close()
+        return (int(filled or 0) > 0), int(attempts or 0)
+    except Exception:
+        return True, 99
+
+
+def run_tail_trader_cycle():
+    """
+    One tail-strategy pass. Entry rules mirror the backtest exactly:
+    same-day (d0) high markets, open-ended T-brackets, ask 3-10¢, city-local
+    hour 12-19, z = strike distance beyond blend forecast in sigmas
+    (z < tail_z_full → full size, z < tail_z_half → half, else skip),
+    one filled position per ticker, hold to settlement — no exits.
+    """
+    import pytz
+    from datetime import datetime as _dt
+
+    cfg = dict(_AT_CONFIG)
+    if not cfg.get("tail_enabled", False):
+        return
+
+    is_live   = bool(cfg.get("tail_live", False))
+    min_ask   = int(cfg.get("tail_min_ask_c", 3)) / 100.0
+    max_ask   = int(cfg.get("tail_max_ask_c", 10)) / 100.0
+    h0        = int(cfg.get("tail_hour_start", 12))
+    h1        = int(cfg.get("tail_hour_end", 19))
+    z_full    = float(cfg.get("tail_z_full", 1.0))
+    z_half    = float(cfg.get("tail_z_half", 3.0))
+    full_ct   = max(1, int(cfg.get("tail_contracts", 25)))
+    half_ct   = max(1, full_ct // 2)
+    cap       = float(cfg.get("tail_daily_cap_dollars", 25.0))
+    max_att   = int(cfg.get("tail_max_attempts", 3))
+
+    fills = 0
+    for city_key, ccfg in TEMP_CITIES.items():
+        try:
+            local_now = _dt.utcnow().replace(tzinfo=pytz.utc).astimezone(
+                pytz.timezone(ccfg["tz"]))
+            if not (h0 <= local_now.hour <= h1):
+                continue
+
+            result = scan_temp_city(city_key, "d0")
+            if not result.get("ok"):
+                continue
+            fc = result.get("forecast", {})
+            best  = fc.get("best_high")
+            sigma = fc.get("sigma")
+            if best is None or not sigma or float(sigma) <= 0:
+                continue
+            target = fc.get("target_date", "")
+            if target != local_now.strftime("%Y-%m-%d"):
+                continue  # belt & braces: d0 must be today, city-local
+
+            for m in result.get("high_markets", []):
+                ticker = m.get("ticker") or ""
+                if not re.search(r"-T[0-9]", ticker):
+                    continue
+                if m.get("ticker_date") and m.get("ticker_date") != target:
+                    continue
+                lo, hi = m.get("lo_temp"), m.get("hi_temp")
+                one_sided = (lo is None) != (hi is None)
+                if not one_sided:
+                    continue
+                ask = m.get("yes_ask")
+                if not ask or not (min_ask <= float(ask) <= max_ask):
+                    continue
+                ask = float(ask)
+
+                # z: how far the strike sits beyond the forecast, in sigmas,
+                # measured toward the losing direction (same as backtest)
+                strike = hi if hi is not None else lo
+                d = (float(best) - float(strike)) if hi is not None \
+                    else (float(strike) - float(best))
+                z = d / float(sigma)
+                if z >= z_half:
+                    continue
+                count = full_ct if z < z_full else half_ct
+                tier  = "TAIL-A" if z < z_full else "TAIL-B"
+
+                has_fill, attempts = _tail_ticker_state(ticker)
+                if has_fill or attempts >= max_att:
+                    continue
+
+                ask_c = round(ask * 100)
+                projected = count * ask
+                if is_live:
+                    spent = _tail_spend_today()
+                    if spent + projected > cap:
+                        at_log("SKIP", f"TAIL daily cap: ${spent:.2f} spent, "
+                                       f"cap ${cap:.2f} — done for today")
+                        at_flush_log_to_db()
+                        return
+
+                _order_id    = None
+                _filled      = count
+                _avg_px_c    = float(ask_c)
+                _fill_status = "simulated"
+                order        = {"simulated": True}
+
+                if is_live:
+                    ok, order, err = at_place_order(ticker, "yes", count, ask_c)
+                    if not ok:
+                        at_log("ERR", f"TAIL order failed for {ticker}: {err}",
+                               ticker=ticker, city=city_key)
+                        continue
+                    _o = (order or {}).get("order", order) or {}
+                    _order_id = _o.get("order_id") or _o.get("id")
+                    if _o.get("fill_count") is not None:
+                        _filled = int(float(_o["fill_count"]))
+                        _px = _o.get("average_fill_price")
+                        if _px is not None:
+                            _avg_px_c = float(_px) * 100.0
+                        _fill_status = ("unfilled" if _filled <= 0 else
+                                        "filled" if _filled >= count else "partial")
+                    else:
+                        _filled, _conf_px, _fill_status = at_confirm_fill(
+                            _order_id, ticker, count)
+                        if _conf_px is not None:
+                            _avg_px_c = float(_conf_px)
+                    if _fill_status in ("unfilled",) or not _filled:
+                        at_cancel_order(_order_id)
+                        # Log the attempt (filled 0) so max_att can stop retries
+                        _live_trade_log(ticker, city_key, "yes", 0, ask_c, ask_c,
+                                        0.0, is_live, order_resp=order, grade=tier,
+                                        order_id=_order_id, requested_count=count,
+                                        filled_count=0, fill_status="unfilled",
+                                        avg_fill_price_c=None, target_date=target,
+                                        lo_temp=lo, hi_temp=hi,
+                                        entry_prob=m.get("model_prob"),
+                                        strategy="tail", z_score=round(z, 2))
+                        at_log("WARN", f"TAIL {ticker} no fill at {ask_c}¢ — "
+                                       f"attempt {attempts + 1}/{max_att}",
+                               ticker=ticker, city=city_key)
+                        continue
+                    if _fill_status == "partial":
+                        at_cancel_order(_order_id)
+
+                _actual_cost = round(_filled * (_avg_px_c / 100.0), 2)
+                _live_trade_log(ticker, city_key, "yes", _filled, ask_c, ask_c,
+                                _actual_cost, is_live, order_resp=order, grade=tier,
+                                order_id=_order_id, requested_count=count,
+                                filled_count=_filled, fill_status=_fill_status,
+                                avg_fill_price_c=_avg_px_c, target_date=target,
+                                lo_temp=lo, hi_temp=hi,
+                                entry_prob=m.get("model_prob"),
+                                strategy="tail", z_score=round(z, 2))
+                at_log("FILL" if is_live else "SIM",
+                       f"TAIL {tier} {ticker} {_filled}/{count}x @ {_avg_px_c:.1f}¢ "
+                       f"(z={z:+.2f}, {_fill_status})"
+                       + ("" if is_live else " [simulated]"),
+                       ticker=ticker, city=city_key)
+                fills += 1
+        except Exception as e:
+            at_log("ERR", f"TAIL error scanning {city_key}: {e}", city=city_key)
+
+    if fills:
+        at_log("SCAN", f"TAIL cycle complete — {fills} position(s) entered")
+    at_flush_log_to_db()
+
+
 def _auto_trader_scheduler():
     """Background thread — runs run_auto_trader_cycle() every scan_interval seconds."""
     import time as _t
@@ -3171,6 +3419,12 @@ def _auto_trader_scheduler():
                 run_auto_trader_cycle()
         except Exception as e:
             at_log("ERR", f"Scheduler error: {e}")
+        try:
+            if _AT_CONFIG.get("tail_enabled", False):
+                run_tail_trader_cycle()
+        except Exception as e:
+            at_log("ERR", f"Tail scheduler error: {e}")
+            at_flush_log_to_db()
         interval = _AT_CONFIG.get("scan_interval", 300)
         _t.sleep(interval)
 
@@ -7052,6 +7306,8 @@ class Handler(BaseHTTPRequestHandler):
                     "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS exit_price_c NUMERIC(6,2)",
                     "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS exit_ts TIMESTAMPTZ",
                     "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS momentum_entry BOOLEAN DEFAULT FALSE",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS strategy TEXT",
+                    "ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS z_score NUMERIC(6,2)",
                     "ALTER TABLE temp_snapshots ADD COLUMN IF NOT EXISTS settle_abandoned BOOLEAN DEFAULT FALSE",
                     "CREATE INDEX IF NOT EXISTS idx_live_trades_ts ON live_trades (ts)",
                 ]
