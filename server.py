@@ -2607,6 +2607,7 @@ def at_check_exits(city_key, markets, cfg):
                         pnl = ROUND((COALESCE(filled_count, "count") * %s - cost)::numeric, 2)
                     WHERE ticker = %s AND is_live = TRUE
                       AND COALESCE(exited, FALSE) = FALSE AND pnl IS NULL
+                      AND COALESCE(strategy, '') <> 'tail'
                 """, (px_c, px_c / 100.0, ticker))
             conn.commit()
             conn.close()
@@ -6392,11 +6393,14 @@ class Handler(BaseHTTPRequestHandler):
                         """)
                     conn.autocommit = False
                     with conn.cursor() as cur:
+                        # Forecast-strategy view only — tail rows are reported
+                        # by /debug/strategy-results and the Tail Lag tab.
                         cur.execute("""
                             SELECT COALESCE(SUM(cost) FILTER (WHERE is_live), 0),
                                    COUNT(*) FILTER (WHERE is_live),
                                    COUNT(*) FILTER (WHERE NOT is_live)
                             FROM live_trades WHERE ts::date = CURRENT_DATE
+                              AND COALESCE(strategy, '') <> 'tail'
                         """)
                         r = cur.fetchone()
                         out["spent_today"] = float(r[0]); out["live_fills_today"] = r[1]
@@ -6405,6 +6409,7 @@ class Handler(BaseHTTPRequestHandler):
                             SELECT COUNT(*), ROUND(AVG(slippage_c)::numeric,2),
                                    ROUND(AVG(ABS(slippage_c))::numeric,2)
                             FROM live_trades WHERE slippage_c IS NOT NULL
+                              AND COALESCE(strategy, '') <> 'tail'
                         """)
                         r = cur.fetchone()
                         out["slippage"] = {"n": r[0], "avg_c": float(r[1] or 0),
@@ -6412,7 +6417,9 @@ class Handler(BaseHTTPRequestHandler):
                         cur.execute("""
                             SELECT ts, ticker, city, count, paper_ask_c, order_ask_c,
                                    slippage_c, cost, is_live, grade
-                            FROM live_trades ORDER BY ts DESC LIMIT 25
+                            FROM live_trades
+                            WHERE COALESCE(strategy, '') <> 'tail'
+                            ORDER BY ts DESC LIMIT 25
                         """)
                         out["recent_fills"] = [
                             {"ts": str(r[0]), "ticker": r[1], "city": r[2], "count": r[3],
