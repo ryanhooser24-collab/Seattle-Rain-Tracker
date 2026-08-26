@@ -1851,8 +1851,9 @@ _AT_CONFIG = {
     "tail_hour_end":          19,     # city-local hour, inclusive
     "tail_z_full":            1.0,    # z below this → full size
     "tail_z_half":            3.0,    # z below this → half size; above → skip
-    "tail_contracts":         50,     # contracts per full-size position
-    "tail_daily_cap_dollars": 100.0,  # tail-only cap; mean stake ~$50/d at 50 ct
+    "tail_position_dollars":  10.0,   # worst-case $ per full-weight position (z<0 ×1.5, z≥1 ×0.5)
+    "tail_ev_floor":          1.0,    # walk the book while marginal EV/$ ≥ this
+    "tail_daily_cap_dollars": 100.0,  # tail-only cap, worst-case accounting
     "tail_max_attempts":      3,      # unfilled IOC attempts per ticker+phase
 }
 
@@ -3237,6 +3238,36 @@ def _tail_spend_today():
         return 999999.0  # fail-closed: unknown spend = cap hit
 
 
+# Empirical win probability by (quoted-ask band, z tier) — measured on settled
+# same-day tail entries (6-19h local, temp_snapshots through 2026-08-24).
+# Drives the book-walk frontier: value remains while (p - price - fee)/price
+# clears tail_ev_floor. Sample sizes 37-208 per cell.
+_TAIL_P = {
+    ("2-4",  "z<0"): 0.599, ("2-4",  "0-1"): 0.186, ("2-4",  "1-2"): 0.155, ("2-4",  "2-3"): 0.083,
+    ("5-7",  "z<0"): 0.673, ("5-7",  "0-1"): 0.364, ("5-7",  "1-2"): 0.186, ("5-7",  "2-3"): 0.132,
+    ("8-10", "z<0"): 0.653, ("8-10", "0-1"): 0.297, ("8-10", "1-2"): 0.286, ("8-10", "2-3"): 0.200,
+    ("11-15","z<0"): 0.747, ("11-15","0-1"): 0.408, ("11-15","1-2"): 0.396, ("11-15","2-3"): 0.375,
+}
+
+def _tail_p_hat(ask, z):
+    """Win-prob estimate for a tail quoted at `ask` (dollars) with z-distance `z`."""
+    c = ask * 100
+    band = ("2-4" if c <= 4.5 else "5-7" if c <= 7.5 else
+            "8-10" if c <= 10.5 else "11-15" if c <= 15.5 else None)
+    tier = ("z<0" if z < 0 else "0-1" if z < 1 else "1-2" if z < 2 else
+            "2-3" if z < 3 else None)
+    if band is None or tier is None:
+        return None
+    return _TAIL_P[(band, tier)]
+
+def _tail_frontier_c(p, ev_floor):
+    """Max price (cents) still worth paying: (p - a - fee(a))/a >= ev_floor."""
+    a = p / (1 + ev_floor)
+    for _ in range(3):
+        a = (p - 0.07 * a * (1 - a)) / (1 + ev_floor)
+    return int(a * 100)  # round DOWN to the cent
+
+
 def _tail_ticker_state(ticker):
     """
     Per-phase state for one ticker under the tail strategy:
@@ -3276,12 +3307,18 @@ def run_tail_trader_cycle():
     2026-08-24 on 94 days, hybrid EV +6.89/$, +$7.00/day per contract-unit,
     train +7.55 / test +6.39, every month positive, 93/94 up days):
 
-      MORNING phase (tail_hour_start..11 city-local): ask 3-15¢, z<3.
-        weight = (z<1 ? 1.0 : 0.5) × (ask ≤ 10¢ ? 1.0 : 0.4)   [AM +5.50/$]
-      AFTERNOON phase (12..tail_hour_end): ask 3-10¢ only.
-        z<1 → full size, allowed even on top of a filled morning position
-        (the market KEEPS lagging: top-up EV +9.06, fresh PM +8.19);
-        1≤z<3 → half size, only if no morning fill.  z≥3 → skip.
+      MORNING phase (tail_hour_start..11 city-local): quoted ask 3-15¢, z<3.
+      AFTERNOON phase (12..tail_hour_end): quoted ask 3-10¢ only; z<1
+        allowed even on top of a filled morning position (top-up EV +9.06 —
+        the market keeps lagging); 1≤z<3 only if no morning fill; z≥3 skip.
+
+    BOOK WALK (2026-08-25): instead of taking only the best-ask level, each
+    entry bids the VALUE FRONTIER — the highest price at which the marginal
+    contract still clears tail_ev_floor of EV, given the empirical win prob
+    for (quoted band, z tier) from _TAIL_P. One IOC at the frontier sweeps
+    every resting level under it at those levels' own prices. Sizing is
+    dollars per position (tail_position_dollars × z-tier weight: z<0 ×1.5,
+    z<1 ×1.0, z<3 ×0.5), worst-case bounded by count × limit.
 
     Same-day (d0) high markets, open-ended T-brackets only, one filled
     position per ticker per phase, hold to settlement — no exits.
@@ -3301,7 +3338,8 @@ def run_tail_trader_cycle():
     h1        = int(cfg.get("tail_hour_end", 19))
     z_full    = float(cfg.get("tail_z_full", 1.0))
     z_half    = float(cfg.get("tail_z_half", 3.0))
-    full_ct   = max(1, int(cfg.get("tail_contracts", 25)))
+    pos_base  = float(cfg.get("tail_position_dollars", 10.0))
+    ev_floor  = float(cfg.get("tail_ev_floor", 1.0))
     cap       = float(cfg.get("tail_daily_cap_dollars", 50.0))
     max_att   = int(cfg.get("tail_max_attempts", 3))
 
@@ -3355,23 +3393,36 @@ def run_tail_trader_cycle():
                 if am:
                     if am_f or am_a >= max_att:
                         continue
-                    weight = (1.0 if z < z_full else 0.5) * (1.0 if ask <= 0.10 else 0.4)
+                    weight = 1.5 if z < 0 else (1.0 if z < z_full else 0.5)
                     tier = "TAIL-AM-A" if z < z_full else "TAIL-AM-B"
                 else:
                     if pm_f or pm_a >= max_att:
                         continue
                     if z < z_full:
-                        weight = 1.0
+                        weight = 1.5 if z < 0 else 1.0
                         tier = "TAIL-TOP" if am_f else "TAIL-PM-A"
                     elif not am_f:
                         weight = 0.5
                         tier = "TAIL-PM-B"
                     else:
                         continue  # 1<=z<3 top-ups were not backtested — skip
-                count = max(1, int(round(full_ct * weight)))
 
+                # ── book walk: bid the frontier, not the best ask ──────────
+                # p_hat is keyed to the QUOTED ask (the market's information
+                # state); the limit sweeps every resting level priced under
+                # the frontier in one IOC. Weather settlement is exogenous —
+                # taking depth cannot move the outcome.
+                p_hat = _tail_p_hat(ask, z)
+                if p_hat is None:
+                    continue
+                limit_c = _tail_frontier_c(p_hat, ev_floor)
                 ask_c = round(ask * 100)
-                projected = count * ask
+                limit_c = max(limit_c, ask_c)      # never below the quote we validated
+                limit_c = min(limit_c, 45)         # hard sanity ceiling
+                pos_dollars = pos_base * weight
+                count = max(1, int(pos_dollars / (limit_c / 100.0)))
+
+                projected = count * (limit_c / 100.0)   # worst case: all at limit
                 if is_live:
                     spent = _tail_spend_today()
                     if spent + projected > cap:
@@ -3387,7 +3438,7 @@ def run_tail_trader_cycle():
                 order        = {"simulated": True}
 
                 if is_live:
-                    ok, order, err = at_place_order(ticker, "yes", count, ask_c)
+                    ok, order, err = at_place_order(ticker, "yes", count, limit_c)
                     if not ok:
                         at_log("ERR", f"TAIL order failed for {ticker}: {err}",
                                ticker=ticker, city=city_key)
@@ -3409,7 +3460,7 @@ def run_tail_trader_cycle():
                     if _fill_status in ("unfilled",) or not _filled:
                         at_cancel_order(_order_id)
                         # Log the attempt (filled 0) so max_att can stop retries
-                        _live_trade_log(ticker, city_key, "yes", 0, ask_c, ask_c,
+                        _live_trade_log(ticker, city_key, "yes", 0, ask_c, limit_c,
                                         0.0, is_live, order_resp=order, grade=tier,
                                         order_id=_order_id, requested_count=count,
                                         filled_count=0, fill_status="unfilled",
@@ -3417,7 +3468,7 @@ def run_tail_trader_cycle():
                                         lo_temp=lo, hi_temp=hi,
                                         entry_prob=m.get("model_prob"),
                                         strategy="tail", z_score=round(z, 2))
-                        at_log("WARN", f"TAIL {ticker} no fill at {ask_c}¢ — "
+                        at_log("WARN", f"TAIL {ticker} no fill up to {limit_c}¢ — "
                                        f"attempt {(am_a if am else pm_a) + 1}/{max_att}",
                                ticker=ticker, city=city_key)
                         continue
@@ -3425,7 +3476,7 @@ def run_tail_trader_cycle():
                         at_cancel_order(_order_id)
 
                 _actual_cost = round(_filled * (_avg_px_c / 100.0), 2)
-                _live_trade_log(ticker, city_key, "yes", _filled, ask_c, ask_c,
+                _live_trade_log(ticker, city_key, "yes", _filled, ask_c, limit_c,
                                 _actual_cost, is_live, order_resp=order, grade=tier,
                                 order_id=_order_id, requested_count=count,
                                 filled_count=_filled, fill_status=_fill_status,
@@ -3435,8 +3486,8 @@ def run_tail_trader_cycle():
                                 strategy="tail", z_score=round(z, 2))
                 at_log("FILL" if is_live else "SIM",
                        f"TAIL {tier} {ticker} {_filled}/{count}x @ {_avg_px_c:.1f}¢ "
-                       f"(z={z:+.2f}, {_fill_status})"
-                       + ("" if is_live else " [simulated]"),
+                       f"(quote {ask_c}¢, walked to {limit_c}¢, z={z:+.2f}, "
+                       f"{_fill_status})" + ("" if is_live else " [simulated]"),
                        ticker=ticker, city=city_key)
                 fills += 1
         except Exception as e:
@@ -6308,7 +6359,8 @@ class Handler(BaseHTTPRequestHandler):
                 out["tail"]["enabled"] = bool(_AT_CONFIG.get("tail_enabled"))
                 out["tail"]["live"] = bool(_AT_CONFIG.get("tail_live"))
                 out["tail"]["cap"] = _AT_CONFIG.get("tail_daily_cap_dollars")
-                out["tail"]["contracts"] = _AT_CONFIG.get("tail_contracts")
+                out["tail"]["position_dollars"] = _AT_CONFIG.get("tail_position_dollars")
+                out["tail"]["ev_floor"] = _AT_CONFIG.get("tail_ev_floor")
                 self.send_json({"ok": True, "strategies": out})
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})

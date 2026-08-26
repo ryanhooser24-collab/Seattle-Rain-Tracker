@@ -828,6 +828,9 @@ body{max-width:900px;margin:0 auto;}
           <b style="color:var(--ink);">afternoon</b> 3&ndash;10&cent;, all 17 cities &mdash; only
           when the forecast backs them, and hold to settlement. Backtest (94 days, 2,064 trades):
           <b style="color:var(--ink);">+$6.89 per $1</b>, up 93 of 94 days, worst day &minus;$1.75.
+          Each buy <b style="color:var(--ink);">walks the book</b>: it takes not just the cheapest
+          price but every offer under the "still worth it" line for that setup &mdash; when the
+          forecast makes a long-shot a 60&ndash;75% favorite, that line sits around 20&ndash;30&cent;.
         </div>
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;">
           <div><div style="font-size:10px;color:var(--muted);">SPENT TODAY</div><div id="tl-spent" style="font-size:16px;font-weight:500;">—</div></div>
@@ -858,11 +861,15 @@ body{max-width:900px;margin:0 auto;}
       </div>
       <div style="padding:12px 14px;display:flex;flex-direction:column;gap:10px;">
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
-          <div><div style="font-size:12px;">Contracts per position</div><div style="font-size:10px;color:var(--muted);">Base (full) size; tiers scale down from it (z&ge;1 &times;0.5, morning 11&ndash;15&cent; &times;0.4). THE knob for scaling: 25 ct &asymp; $25/day staked, backtest EV &asymp; +$175/day.</div></div>
-          <input id="tl-cfg-ct" type="number" step="1" min="1" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+          <div><div style="font-size:12px;">Dollars per position</div><div style="font-size:10px;color:var(--muted);">Worst-case $ per full-weight position; z-tier weights scale it (z&lt;0 &times;1.5, 1&le;z&lt;3 &times;0.5). THE aggression knob &mdash; each entry sweeps every ask level under the value frontier up to this many dollars.</div></div>
+          <input id="tl-cfg-pos" type="number" step="1" min="1" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
         </div>
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
-          <div><div style="font-size:12px;">Daily cap</div><div style="font-size:10px;color:var(--muted);">Most real dollars the tail strategy may spend per day — separate from the forecast cap.</div></div>
+          <div><div style="font-size:12px;">EV floor (walk depth)</div><div style="font-size:10px;color:var(--muted);">Walk the book while the marginal contract still clears this EV per dollar. 1.0 = every marginal dollar expects to double. Lower = deeper walks, more capacity, thinner marginal edge.</div></div>
+          <input id="tl-cfg-floor" type="number" step="0.1" min="0.1" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
+        </div>
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
+          <div><div style="font-size:12px;">Daily cap</div><div style="font-size:10px;color:var(--muted);">Most real dollars the tail strategy may spend per day (worst-case accounting) — separate from the forecast cap.</div></div>
           <input id="tl-cfg-cap" type="number" step="1" min="0" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
         </div>
         <div id="tl-cfg-msg" style="font-size:10px;color:var(--muted);"></div>
@@ -1367,7 +1374,8 @@ async function loadLive(){
         '<span style="margin-right:14px;">'+(t.tier||'?').replace('TAIL-','tier ')+': '+
         (t.ev_per_dollar!=null?((t.ev_per_dollar>=0?'+':'')+t.ev_per_dollar.toFixed(2)+'/$'):'—')+
         ' · '+t.wins+'W/'+(t.n-t.wins)+'L</span>').join(''):'';
-      if(document.getElementById('tl-cfg-ct')!==document.activeElement)document.getElementById('tl-cfg-ct').value=T.contracts??'';
+      if(document.getElementById('tl-cfg-pos')!==document.activeElement)document.getElementById('tl-cfg-pos').value=T.position_dollars??'';
+      if(document.getElementById('tl-cfg-floor')!==document.activeElement)document.getElementById('tl-cfg-floor').value=T.ev_floor??'';
       if(document.getElementById('tl-cfg-cap')!==document.activeElement)document.getElementById('tl-cfg-cap').value=T.cap??'';
       const tOp=document.getElementById('tl-open');
       tOp.innerHTML=(T.open&&T.open.length)?
@@ -1444,8 +1452,9 @@ async function lvTailSaveCfg(){
   const msg=document.getElementById('tl-cfg-msg');
   try{
     const body={
-      tail_contracts:parseInt(document.getElementById('tl-cfg-ct').value)||25,
-      tail_daily_cap_dollars:parseFloat(document.getElementById('tl-cfg-cap').value)||25
+      tail_position_dollars:parseFloat(document.getElementById('tl-cfg-pos').value)||10,
+      tail_ev_floor:parseFloat(document.getElementById('tl-cfg-floor').value)||1.0,
+      tail_daily_cap_dollars:parseFloat(document.getElementById('tl-cfg-cap').value)||50
     };
     const r=await fetch(SERVER+'/auto-trader/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(x=>x.json());
     msg.textContent=r.ok?'Saved.':'Save failed: '+(r.error||'?');
