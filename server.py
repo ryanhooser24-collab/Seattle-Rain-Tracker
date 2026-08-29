@@ -2176,6 +2176,10 @@ def _live_trade_settle():
                 UPDATE live_trades lt
                 SET settled_temp    = ts.settled_temp,
                     settled_correct = CASE
+                        -- zero-fill attempt rows (logged so max_attempts can
+                        -- count them) carry no position: never stamp a
+                        -- win/loss on them or they poison win-rate stats
+                        WHEN COALESCE(lt.filled_count, lt."count", 0) = 0 THEN NULL
                         WHEN COALESCE(lt.side, 'yes') = 'no' THEN
                             CASE
                                 WHEN lt.lo_temp IS NULL AND lt.hi_temp IS NOT NULL
@@ -2221,6 +2225,15 @@ def _live_trade_settle():
                   AND avg_fill_price_c IS NOT NULL
                   AND pnl IS NULL
             """)
+
+            # One-time-but-idempotent repair: zero-fill rows settled before
+            # the CASE above existed still carry settled_correct=true
+            cur.execute("""
+                UPDATE live_trades
+                SET settled_correct = NULL
+                WHERE COALESCE(filled_count, "count", 0) = 0
+                  AND settled_correct IS NOT NULL
+            """)
         conn.commit()
         conn.close()
         return n
@@ -2258,6 +2271,12 @@ def fetch_acis_daily(nws_station, date_str):
 
     Returns {"ok": bool, "high": float, "low": float} or {"ok": False, ...}.
     """
+    # temp_snapshots.target_date is a DATE column, so callers hand this a
+    # datetime.date — requests' json= serializer raises on it, and the
+    # blanket except below ate that error, so ACIS backfill never settled
+    # anything (every call returned ok:False).
+    if hasattr(date_str, "strftime"):
+        date_str = date_str.strftime("%Y-%m-%d")
     sid_variants = [nws_station]
     if nws_station.startswith("K") and len(nws_station) == 4:
         sid_variants.append(nws_station[1:])   # KSEA -> SEA (ThreadEx)
