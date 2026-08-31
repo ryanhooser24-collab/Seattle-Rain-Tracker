@@ -1864,6 +1864,27 @@ _AT_CONFIG = {
     "tail_ev_floor":          1.0,    # walk the book while marginal EV/$ ≥ this
     "tail_daily_cap_dollars": 100.0,  # tail-only cap, worst-case accounting
     "tail_max_attempts":      3,      # unfilled IOC attempts per ticker+phase
+
+    # ── Gap rule — replaced the tail sleeve 2026-08-31 (tail_* keys above are
+    # legacy; their enabled/live/sizing values are carried into gap_* once at
+    # config load when no gap_* value is stored). Full-data backtest settled
+    # against IEM NWS-CLI truth: buy day-of brackets whose floor is 0-1F above
+    # the station's running high, 13-18h city-local, quoted 3-15c, vol>=100 —
+    # ROI +3.36/$ raw, +2.0 under +4c slippage stress, all 17 cities positive.
+    "gap_enabled":            False,
+    "gap_live":               False,  # False = simulate fills; True = REAL orders
+    "gap_min_ask_c":          3,
+    "gap_max_ask_c":          15,     # >15c still wins but ROI decays (15-20c +1.3)
+    "gap_hour_start":         13,     # city-local hour, inclusive (14-18h is the engine)
+    "gap_hour_end":           18,     # inclusive; nothing qualifies after 19h
+    "gap_min":                0.0,    # bracket floor minus running high, F
+    "gap_max":                1.0,
+    "gap_min_volume":         100,    # 24h contracts; edge concentrates on liquid books
+    "gap_position_dollars":   10.0,   # worst-case $ per position
+    "gap_ev_floor":           1.0,    # walk the book while marginal EV/$ >= this
+    "gap_daily_cap_dollars":  100.0,  # gap-only cap, worst-case accounting
+    "gap_max_attempts":       3,      # unfilled IOC attempts per ticker per day
+    "gap_obs_max_age_min":    90,     # skip a city when its newest ob is older
 }
 
 
@@ -1971,7 +1992,7 @@ def _live_trade_log(ticker, city, side, count, paper_ask_c, order_ask_c, cost,
     """
     try:
         conn = get_db()
-        if not conn: return
+        if not conn: return False
         _ensure_live_trades_table(conn)
         with conn.cursor() as cur:
             cur.execute("""
@@ -1992,8 +2013,10 @@ def _live_trade_log(ticker, city, side, count, paper_ask_c, order_ask_c, cost,
                   bool(momentum), strategy, z_score))
         conn.commit()
         conn.close()
+        return True
     except Exception as e:
         print(f"  ⚠️  _live_trade_log error: {e}")
+        return False
 
 
 def _live_spend_today():
@@ -2013,7 +2036,7 @@ def _live_spend_today():
                     END
                 ), 0) FROM live_trades
                 WHERE is_live = TRUE AND ts::date = CURRENT_DATE
-                  AND COALESCE(strategy, '') <> 'tail'
+                  AND COALESCE(strategy, '') NOT IN ('tail', 'gap')
             """)
             v = float(cur.fetchone()[0] or 0)
         conn.close()
@@ -2763,7 +2786,7 @@ def at_check_exits(city_key, markets, cfg):
                 WHERE is_live = TRUE AND COALESCE(exited, FALSE) = FALSE
                   AND settled_temp IS NULL AND pnl IS NULL
                   AND city = %s AND entry_prob IS NOT NULL
-                  AND COALESCE(strategy, '') <> 'tail'
+                  AND COALESCE(strategy, '') NOT IN ('tail', 'gap')
                   AND ticker = ANY(%s)
                 GROUP BY ticker
             """, (city_key, list(view.keys())))
@@ -2802,7 +2825,7 @@ def at_check_exits(city_key, markets, cfg):
                         pnl = ROUND((COALESCE(filled_count, "count") * %s - cost)::numeric, 2)
                     WHERE ticker = %s AND is_live = TRUE
                       AND COALESCE(exited, FALSE) = FALSE AND pnl IS NULL
-                      AND COALESCE(strategy, '') <> 'tail'
+                      AND COALESCE(strategy, '') NOT IN ('tail', 'gap')
                 """, (px_c, px_c / 100.0, ticker))
             conn.commit()
             conn.close()
@@ -2980,7 +3003,7 @@ def at_get_open_positions():
                 with conn.cursor() as cur:
                     cur.execute("""
                         SELECT DISTINCT ticker FROM live_trades
-                        WHERE strategy = 'tail' AND is_live = TRUE
+                        WHERE strategy IN ('tail', 'gap') AND is_live = TRUE
                           AND settled_temp IS NULL AND pnl IS NULL
                     """)
                     tail_open = {row[0] for row in cur.fetchall()}
@@ -3410,8 +3433,16 @@ def run_auto_trader_cycle(force=False):
 #  daily cap, no whitelist/exits/max_positions, hold to settlement.
 # ══════════════════════════════════════════════════════════════════════════
 
-def _tail_spend_today():
-    """Real dollars filled by the tail strategy today (UTC). Fail-closed."""
+# In-process insurance against a live fill whose DB write failed: the ticker
+# and cost are remembered here so dedup and the daily cap still see them.
+_GAP_RUNTIME_FILLED = set()   # tickers live-filled this process
+_GAP_RUNTIME_SPEND  = {"date": None, "dollars": 0.0}
+
+
+def _gap_spend_today(target_date):
+    """Real dollars filled by the gap strategy (legacy tail rows included) for
+    the given city-local target date. Keyed on target_date, not the UTC insert
+    date, so the cap cannot reset mid-window for Pacific cities. Fail-closed."""
     try:
         conn = get_db()
         if not conn: return 999999.0
@@ -3424,44 +3455,30 @@ def _tail_spend_today():
                         ELSE cost
                     END
                 ), 0) FROM live_trades
-                WHERE is_live = TRUE AND strategy = 'tail'
-                  AND ts::date = CURRENT_DATE
-            """)
+                WHERE is_live = TRUE AND strategy IN ('tail', 'gap')
+                  AND target_date::text = %s
+            """, (target_date,))
             v = float(cur.fetchone()[0] or 0)
         conn.close()
+        if _GAP_RUNTIME_SPEND["date"] == target_date:
+            v += _GAP_RUNTIME_SPEND["dollars"]
         return v
     except Exception:
         return 999999.0  # fail-closed: unknown spend = cap hit
 
 
-# Empirical win probability by (quoted-ask band, z tier) — measured on settled
-# same-day tail entries (6-19h local). Rebuilt 2026-08-30 on rows whose
-# target_date matches the ticker-embedded date (the original 2026-08-24 table
-# was inflated by wrong-date settlements — 10k+ tickers had snapshot rows
-# stamped with an adjacent day's target_date and were graded against the wrong
-# day's actual). z recomputed with sigma floored at 1.0°F to match the fixed
-# calibration. Sample sizes 166-545 ticker-days per cell.
-# Drives the book-walk frontier: value remains while (p - price - fee)/price
-# clears tail_ev_floor.
-_TAIL_P = {
-    ("2-4",  "z<0"): 0.279, ("2-4",  "0-1"): 0.117, ("2-4",  "1-2"): 0.093, ("2-4",  "2-3"): 0.059,
-    ("5-7",  "z<0"): 0.340, ("5-7",  "0-1"): 0.190, ("5-7",  "1-2"): 0.170, ("5-7",  "2-3"): 0.120,
-    ("8-10", "z<0"): 0.452, ("8-10", "0-1"): 0.312, ("8-10", "1-2"): 0.229, ("8-10", "2-3"): 0.166,
-    ("11-15","z<0"): 0.542, ("11-15","0-1"): 0.407, ("11-15","1-2"): 0.335, ("11-15","2-3"): 0.261,
-}
+# Empirical win probability by city-local ENTRY HOUR for gap-rule entries
+# (bracket floor 0-1F above the running high, quoted 3-15c). Measured on the
+# 2026-08-31 full-data backtest (302k hourly entries Apr-Aug, settled against
+# IEM NWS-CLI truth, wrong-date rows excluded by ticker-derived dating):
+# observed win rates 12/32/69/70/52/37% for 13..18h — table below is shrunk
+# toward zero so the book walk never pays for the backtest's optimism.
+# Drives the walk frontier: value remains while (p - price - fee)/price
+# clears gap_ev_floor.
+_GAP_P = {13: 0.10, 14: 0.25, 15: 0.50, 16: 0.50, 17: 0.40, 18: 0.28}
 
-def _tail_p_hat(ask, z):
-    """Win-prob estimate for a tail quoted at `ask` (dollars) with z-distance `z`."""
-    c = ask * 100
-    band = ("2-4" if c <= 4.5 else "5-7" if c <= 7.5 else
-            "8-10" if c <= 10.5 else "11-15" if c <= 15.5 else None)
-    tier = ("z<0" if z < 0 else "0-1" if z < 1 else "1-2" if z < 2 else
-            "2-3" if z < 3 else None)
-    if band is None or tier is None:
-        return None
-    return _TAIL_P[(band, tier)]
 
-def _tail_frontier_c(p, ev_floor):
+def _frontier_c(p, ev_floor):
     """Max price (cents) still worth paying: (p - a - fee(a))/a >= ev_floor."""
     a = p / (1 + ev_floor)
     for _ in range(3):
@@ -3469,81 +3486,141 @@ def _tail_frontier_c(p, ev_floor):
     return int(a * 100)  # round DOWN to the cent
 
 
-def _tail_ticker_state(ticker):
-    """
-    Per-phase state for one ticker under the tail strategy:
-    (am_filled, pm_filled, am_attempts, pm_attempts).
-    AM rows carry grade 'TAIL-AM-*'; PM rows 'TAIL-PM-*' or 'TAIL-TOP'.
-    A ticker embeds its date, so no date filter is needed. Fail-closed:
-    on DB error report both phases filled so we never double-enter blind.
-    """
+def _gap_ticker_state(ticker, is_live):
+    """(filled, attempts) for one ticker under the gap strategy, within the
+    given mode — sim rows must not block live entries or vice versa. A ticker
+    embeds its date, so no date filter is needed. Fail-closed: on DB error
+    report filled so we never double-enter blind."""
+    if is_live and ticker in _GAP_RUNTIME_FILLED:
+        return True, 99  # live fill whose DB write failed — never re-enter
     try:
         conn = get_db()
-        if not conn: return True, True, 99, 99
+        if not conn: return True, 99
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT grade, COALESCE(filled_count, 0)
-                FROM live_trades WHERE strategy = 'tail' AND ticker = %s
-            """, (ticker,))
+                SELECT COALESCE(filled_count, 0)
+                FROM live_trades
+                WHERE strategy = 'gap' AND ticker = %s AND is_live = %s
+            """, (ticker, is_live))
             rows = cur.fetchall()
         conn.close()
-        am_f = pm_f = False
-        am_a = pm_a = 0
-        for g, filled in rows:
-            is_am = (g or "").startswith("TAIL-AM")
-            if is_am:
-                am_a += 1
-                am_f = am_f or int(filled or 0) > 0
-            else:
-                pm_a += 1
-                pm_f = pm_f or int(filled or 0) > 0
-        return am_f, pm_f, am_a, pm_a
+        filled = any(int(r[0] or 0) > 0 for r in rows)
+        return filled, len(rows)
     except Exception:
-        return True, True, 99, 99
+        return True, 99
 
 
-def run_tail_trader_cycle():
+_GAP_OBS_CACHE = {}   # city_key -> {"ts": epoch, "run_high": F, "ob_age_min": m}
+_GAP_OBS_TTL   = 600  # re-fetch obs every 10 min per city
+
+
+def fetch_running_high(city_key, now_local):
+    """Today's running high (F) at the settlement station from IEM 5-minute
+    ASOS obs, midnight-to-now city-local. Returns (run_high, ob_age_min) or
+    (None, None). Cached per city for _GAP_OBS_TTL seconds."""
+    import time as _t
+    c = _GAP_OBS_CACHE.get(city_key)
+    if c and _t.time() - c["ts"] < c.get("ttl", _GAP_OBS_TTL):
+        age = c["ob_age_min"]
+        if age is not None:
+            age += round((_t.time() - c["ts"]) / 60)  # age while cached
+        return c["run_high"], age
+    cfg = TEMP_CITIES.get(city_key) or {}
+    stn = (cfg.get("nws_station") or "").lstrip("K")
+    if not stn:
+        return None, None
+    try:
+        url = (
+            f"https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
+            f"?station={stn}&data=tmpf"
+            f"&year1={now_local.year}&month1={now_local.month:02d}&day1={now_local.day:02d}"
+            f"&hour1=0&min1=0"
+            f"&year2={now_local.year}&month2={now_local.month:02d}&day2={now_local.day:02d}"
+            f"&hour2={now_local.hour}&min2={now_local.minute}"
+            f"&tz={cfg.get('tz', 'America/Chicago')}"
+            f"&format=onlycomma&latlon=no&direct=no&report_type=1&report_type=3"
+        )
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=8)
+        r.raise_for_status()
+        run_high = None
+        last_valid = None
+        for line in r.text.strip().split("\n"):
+            parts = line.strip().split(",")
+            if len(parts) < 3 or parts[0] in ("station",) or line.startswith("#"):
+                continue
+            t = parts[2]
+            if t in ("M", "T", ""):
+                continue
+            try:
+                v = float(t)
+            except ValueError:
+                continue
+            run_high = v if run_high is None or v > run_high else run_high
+            last_valid = parts[1]
+        ob_age_min = None
+        if last_valid:
+            from datetime import datetime as _dt2
+            try:
+                ob_dt = _dt2.strptime(last_valid, "%Y-%m-%d %H:%M")
+                ob_age_min = round((now_local.replace(tzinfo=None) - ob_dt).total_seconds() / 60)
+            except Exception:
+                pass
+        _GAP_OBS_CACHE[city_key] = {"ts": _t.time(), "run_high": run_high,
+                                    "ob_age_min": ob_age_min,
+                                    # empty responses retry sooner
+                                    "ttl": _GAP_OBS_TTL if run_high is not None else 120}
+        return run_high, ob_age_min
+    except Exception as e:
+        at_log("WARN", f"GAP obs fetch failed for {city_key}: {e}", city=city_key)
+        return None, None
+
+
+def run_gap_trader_cycle():
     """
-    One tail-strategy pass — the two-entry HYBRID schedule (backtested
-    2026-08-24 on 94 days, hybrid EV +6.89/$, +$7.00/day per contract-unit,
-    train +7.55 / test +6.39, every month positive, 93/94 up days):
+    One gap-rule pass — the strategy that replaced the tail-lag sleeve
+    (2026-08-31; the tail sleeve is this same trade restricted to open-ended
+    T-brackets, so 'tail'-tagged history counts as gap history).
 
-      MORNING phase (tail_hour_start..11 city-local): quoted ask 3-15¢, z<3.
-      AFTERNOON phase (12..tail_hour_end): quoted ask 3-10¢ only; z<1
-        allowed even on top of a filled morning position (top-up EV +9.06 —
-        the market keeps lagging); 1≤z<3 only if no morning fill; z≥3 skip.
+    THE RULE: in the afternoon the market anchors on the thermometer's
+    current reading while the day's high typically climbs another 1-2F
+    (NWS settles on 1-minute data that catches spikes hourly obs miss).
+    Brackets whose floor sits 0-1F above the running high win 28-32%
+    but trade at ~6-8c. Buy them; hold to settlement; no exits.
 
-    BOOK WALK (2026-08-25): instead of taking only the best-ask level, each
-    entry bids the VALUE FRONTIER — the highest price at which the marginal
-    contract still clears tail_ev_floor of EV, given the empirical win prob
-    for (quoted band, z tier) from _TAIL_P. One IOC at the frontier sweeps
-    every resting level under it at those levels' own prices. Sizing is
-    dollars per position (tail_position_dollars × z-tier weight:
-    z<1 ×1.0, z<3 ×0.5), worst-case bounded by count × limit. z<0 entries
-    are gated off unless tail_allow_z_neg (see _AT_CONFIG note).
+    Backtest (full-data 2026-08-31, settled vs IEM NWS-CLI truth): 799
+    ticker-days, ROI +3.36/$ at quoted+0.6c, even/odd day halves +3.48/+3.24,
+    all 17 cities positive, ROI intact under vol>=1000 gating (+3.45) and
+    +4c adverse slippage (+2.0). Entry-hour curve: 13h ~flat, 14h +2.2,
+    15-18h +6.2..6.8, dead after 19h — hence the 13..18 window.
 
-    Same-day (d0) high markets, open-ended T-brackets only, one filled
-    position per ticker per phase, hold to settlement — no exits.
+    Entry: d0 HIGH brackets with a floor (B-brackets and >X tails), quoted
+    gap_min_ask_c..gap_max_ask_c, volume_24h >= gap_min_volume, bracket floor
+    minus running high in [gap_min, gap_max] F, fresh obs only. One FILLED
+    position per ticker per day, gap_max_attempts unfilled IOCs max. Each
+    entry walks the book to the _GAP_P/_frontier_c value frontier (bounded
+    by quote+8c and 20c) — weather settlement is exogenous, taking depth
+    cannot move the outcome.
     """
     import pytz
     from datetime import datetime as _dt
 
     cfg = dict(_AT_CONFIG)
-    if not cfg.get("tail_enabled", False):
+    if not cfg.get("gap_enabled", False):
         return
 
-    is_live   = bool(cfg.get("tail_live", False))
-    min_ask   = int(cfg.get("tail_min_ask_c", 3)) / 100.0
-    am_max_ask = int(cfg.get("tail_max_ask_c", 15)) / 100.0
-    pm_max_ask = min(am_max_ask, 0.10)   # afternoon band tested at 3-10c only
-    h0        = int(cfg.get("tail_hour_start", 6))
-    h1        = int(cfg.get("tail_hour_end", 19))
-    z_full    = float(cfg.get("tail_z_full", 1.0))
-    z_half    = float(cfg.get("tail_z_half", 3.0))
-    pos_base  = float(cfg.get("tail_position_dollars", 10.0))
-    ev_floor  = float(cfg.get("tail_ev_floor", 1.0))
-    cap       = float(cfg.get("tail_daily_cap_dollars", 50.0))
-    max_att   = int(cfg.get("tail_max_attempts", 3))
+    is_live   = bool(cfg.get("gap_live", False))
+    min_ask   = int(cfg.get("gap_min_ask_c", 3)) / 100.0
+    max_ask   = int(cfg.get("gap_max_ask_c", 15)) / 100.0
+    h0        = int(cfg.get("gap_hour_start", 13))
+    h1        = int(cfg.get("gap_hour_end", 18))
+    g_lo      = float(cfg.get("gap_min", 0.0))
+    g_hi      = float(cfg.get("gap_max", 1.0))
+    min_vol   = int(cfg.get("gap_min_volume", 100))
+    pos_base  = float(cfg.get("gap_position_dollars", 10.0))
+    ev_floor  = float(cfg.get("gap_ev_floor", 1.0))
+    cap       = float(cfg.get("gap_daily_cap_dollars", 100.0))
+    max_att   = int(cfg.get("gap_max_attempts", 3))
+    max_age   = int(cfg.get("gap_obs_max_age_min", 90))
 
     fills = 0
     for city_key, ccfg in TEMP_CITIES.items():
@@ -3553,88 +3630,66 @@ def run_tail_trader_cycle():
             if not (h0 <= local_now.hour <= h1):
                 continue
 
+            run_high, ob_age = fetch_running_high(city_key, local_now)
+            if run_high is None:
+                continue
+            if ob_age is None or ob_age > max_age:
+                at_log("SKIP", f"GAP {city_key}: obs stale or age unknown "
+                               f"({ob_age} min)", city=city_key)
+                continue
+
             result = scan_temp_city(city_key, "d0")
             if not result.get("ok"):
                 continue
             fc = result.get("forecast", {})
-            best  = fc.get("best_high")
-            sigma = fc.get("sigma")
-            if best is None or not sigma or float(sigma) <= 0:
-                continue
             target = fc.get("target_date", "")
             if target != local_now.strftime("%Y-%m-%d"):
                 continue  # belt & braces: d0 must be today, city-local
 
-            am = local_now.hour < 12   # phase boundary fixed at noon (backtest)
-
             for m in result.get("high_markets", []):
                 ticker = m.get("ticker") or ""
-                if not re.search(r"-T[0-9]", ticker):
+                if not ticker or ticker.startswith("COMBO:"):
                     continue
                 if m.get("ticker_date") and m.get("ticker_date") != target:
                     continue
-                lo, hi = m.get("lo_temp"), m.get("hi_temp")
-                one_sided = (lo is None) != (hi is None)
-                if not one_sided:
-                    continue
+                lo = m.get("lo_temp")
+                if lo is None:
+                    continue  # '<X' brackets have no floor above the run high
                 ask = m.get("yes_ask")
-                if not ask or not (min_ask <= float(ask) <= (am_max_ask if am else pm_max_ask)):
+                if not ask or not (min_ask <= float(ask) <= max_ask):
                     continue
                 ask = float(ask)
-
-                # z: how far the strike sits beyond the forecast, in sigmas,
-                # measured toward the losing direction (same as backtest)
-                strike = hi if hi is not None else lo
-                d = (float(best) - float(strike)) if hi is not None \
-                    else (float(strike) - float(best))
-                z = d / float(sigma)
-                if z >= z_half:
+                if int(m.get("volume_24h") or 0) < min_vol:
                     continue
-                if z < 0 and not cfg.get("tail_allow_z_neg", False):
-                    continue  # tier gated off — see _AT_CONFIG note
 
-                am_f, pm_f, am_a, pm_a = _tail_ticker_state(ticker)
-                if am:
-                    if am_f or am_a >= max_att:
-                        continue
-                    weight = 1.0 if z < z_full else 0.5
-                    tier = "TAIL-AM-A" if z < z_full else "TAIL-AM-B"
-                else:
-                    if pm_f or pm_a >= max_att:
-                        continue
-                    if z < z_full:
-                        weight = 1.0
-                        tier = "TAIL-TOP" if am_f else "TAIL-PM-A"
-                    elif not am_f:
-                        weight = 0.5
-                        tier = "TAIL-PM-B"
-                    else:
-                        continue  # 1<=z<3 top-ups were not backtested — skip
+                gap = float(lo) - float(run_high)
+                if not (g_lo <= gap <= g_hi):
+                    continue
 
-                # ── book walk: bid the frontier, not the best ask ──────────
-                # p_hat is keyed to the QUOTED ask (the market's information
-                # state); the limit sweeps every resting level priced under
-                # the frontier in one IOC. Weather settlement is exogenous —
-                # taking depth cannot move the outcome.
-                p_hat = _tail_p_hat(ask, z)
+                filled_before, attempts = _gap_ticker_state(ticker, is_live)
+                if filled_before or attempts >= max_att:
+                    continue
+
+                p_hat = _GAP_P.get(local_now.hour)
                 if p_hat is None:
                     continue
-                limit_c = _tail_frontier_c(p_hat, ev_floor)
-                ask_c = round(ask * 100)
-                limit_c = max(limit_c, ask_c)      # never below the quote we validated
-                limit_c = min(limit_c, 45)         # hard sanity ceiling
-                pos_dollars = pos_base * weight
-                count = max(1, int(pos_dollars / (limit_c / 100.0)))
+                ask_c   = round(ask * 100)
+                limit_c = _frontier_c(p_hat, ev_floor)
+                if ask_c > limit_c:
+                    continue  # quoted ask itself fails the EV floor — no entry
+                limit_c = min(limit_c, ask_c + 8, 20)  # bounded walk (backtest +4c-stress held)
+                count = max(1, int(pos_base / (limit_c / 100.0)))
 
                 projected = count * (limit_c / 100.0)   # worst case: all at limit
                 if is_live:
-                    spent = _tail_spend_today()
+                    spent = _gap_spend_today(target)
                     if spent + projected > cap:
-                        at_log("SKIP", f"TAIL daily cap: ${spent:.2f} spent, "
+                        at_log("SKIP", f"GAP daily cap: ${spent:.2f} spent, "
                                        f"cap ${cap:.2f} — done for today")
                         at_flush_log_to_db()
                         return
 
+                tier = "GAP-1" if gap >= 0.5 else "GAP-0"
                 _order_id    = None
                 _filled      = count
                 _avg_px_c    = float(ask_c)
@@ -3644,7 +3699,7 @@ def run_tail_trader_cycle():
                 if is_live:
                     ok, order, err = at_place_order(ticker, "yes", count, limit_c)
                     if not ok:
-                        at_log("ERR", f"TAIL order failed for {ticker}: {err}",
+                        at_log("ERR", f"GAP order failed for {ticker}: {err}",
                                ticker=ticker, city=city_key)
                         continue
                     _o = (order or {}).get("order", order) or {}
@@ -3669,36 +3724,48 @@ def run_tail_trader_cycle():
                                         order_id=_order_id, requested_count=count,
                                         filled_count=0, fill_status="unfilled",
                                         avg_fill_price_c=None, target_date=target,
-                                        lo_temp=lo, hi_temp=hi,
+                                        lo_temp=lo, hi_temp=m.get("hi_temp"),
                                         entry_prob=m.get("model_prob"),
-                                        strategy="tail", z_score=round(z, 2))
-                        at_log("WARN", f"TAIL {ticker} no fill up to {limit_c}¢ — "
-                                       f"attempt {(am_a if am else pm_a) + 1}/{max_att}",
+                                        strategy="gap", z_score=round(gap, 2))
+                        at_log("WARN", f"GAP {ticker} no fill up to {limit_c}¢ — "
+                                       f"attempt {attempts + 1}/{max_att}",
                                ticker=ticker, city=city_key)
                         continue
                     if _fill_status == "partial":
                         at_cancel_order(_order_id)
 
                 _actual_cost = round(_filled * (_avg_px_c / 100.0), 2)
-                _live_trade_log(ticker, city_key, "yes", _filled, ask_c, limit_c,
+                _logged = _live_trade_log(ticker, city_key, "yes", _filled, ask_c, limit_c,
                                 _actual_cost, is_live, order_resp=order, grade=tier,
                                 order_id=_order_id, requested_count=count,
                                 filled_count=_filled, fill_status=_fill_status,
                                 avg_fill_price_c=_avg_px_c, target_date=target,
-                                lo_temp=lo, hi_temp=hi,
+                                lo_temp=lo, hi_temp=m.get("hi_temp"),
                                 entry_prob=m.get("model_prob"),
-                                strategy="tail", z_score=round(z, 2))
+                                strategy="gap", z_score=round(gap, 2))
+                if is_live and _logged is False and _filled:
+                    # DB write failed for a real fill — remember it in-process
+                    # so dedup and the daily cap still account for it.
+                    _GAP_RUNTIME_FILLED.add(ticker)
+                    if _GAP_RUNTIME_SPEND["date"] != target:
+                        _GAP_RUNTIME_SPEND["date"] = target
+                        _GAP_RUNTIME_SPEND["dollars"] = 0.0
+                    _GAP_RUNTIME_SPEND["dollars"] += _actual_cost
+                    at_log("ERR", f"GAP fill for {ticker} NOT logged to DB — "
+                                  f"tracked in-process only", ticker=ticker,
+                           city=city_key)
                 at_log("FILL" if is_live else "SIM",
-                       f"TAIL {tier} {ticker} {_filled}/{count}x @ {_avg_px_c:.1f}¢ "
-                       f"(quote {ask_c}¢, walked to {limit_c}¢, z={z:+.2f}, "
-                       f"{_fill_status})" + ("" if is_live else " [simulated]"),
+                       f"GAP {tier} {ticker} {_filled}/{count}x @ {_avg_px_c:.1f}¢ "
+                       f"(quote {ask_c}¢, walked to {limit_c}¢, run high {run_high:.1f}F, "
+                       f"gap {gap:+.1f}F, {_fill_status})"
+                       + ("" if is_live else " [simulated]"),
                        ticker=ticker, city=city_key)
                 fills += 1
         except Exception as e:
-            at_log("ERR", f"TAIL error scanning {city_key}: {e}", city=city_key)
+            at_log("ERR", f"GAP error scanning {city_key}: {e}", city=city_key)
 
     if fills:
-        at_log("SCAN", f"TAIL cycle complete — {fills} position(s) entered")
+        at_log("SCAN", f"GAP cycle complete — {fills} position(s) entered")
     at_flush_log_to_db()
 
 
@@ -3713,10 +3780,10 @@ def _auto_trader_scheduler():
         except Exception as e:
             at_log("ERR", f"Scheduler error: {e}")
         try:
-            if _AT_CONFIG.get("tail_enabled", False):
-                run_tail_trader_cycle()
+            if _AT_CONFIG.get("gap_enabled", False):
+                run_gap_trader_cycle()
         except Exception as e:
-            at_log("ERR", f"Tail scheduler error: {e}")
+            at_log("ERR", f"Gap scheduler error: {e}")
             at_flush_log_to_db()
         interval = _AT_CONFIG.get("scan_interval", 300)
         _t.sleep(interval)
@@ -3758,6 +3825,21 @@ def at_load_config_from_db():
                     _AT_CONFIG[key] = __import__("json").loads(val)
                 else:
                     _AT_CONFIG[key] = val
+        # Legacy carry-over: the gap rule replaced the tail sleeve 2026-08-31.
+        # When the DB has a stored tail_* value but no stored gap_* value,
+        # inherit it so an operator's enabled/live/sizing choices survive the
+        # rename. Stored gap_* values always win.
+        stored = {k for k, _ in rows}
+        # gap_live is deliberately NOT inherited: arming a different strategy
+        # with real money requires an explicit LIVE click in the dashboard.
+        for gap_key, tail_key in (
+                ("gap_enabled", "tail_enabled"),
+                ("gap_position_dollars", "tail_position_dollars"),
+                ("gap_ev_floor", "tail_ev_floor"),
+                ("gap_daily_cap_dollars", "tail_daily_cap_dollars"),
+                ("gap_max_attempts", "tail_max_attempts")):
+            if gap_key not in stored and tail_key in stored:
+                _AT_CONFIG[gap_key] = _AT_CONFIG[tail_key]
     except Exception as e:
         print(f"  ⚠️  at_load_config_from_db: {e}")
 
@@ -6447,14 +6529,16 @@ class Handler(BaseHTTPRequestHandler):
             # the tail strategy. Per-strategy off switches live in the config
             # POST; this is the emergency stop.
             try:
-                for k in ("enabled", "live_mode", "tail_enabled", "tail_live"):
+                for k in ("enabled", "live_mode", "gap_enabled", "gap_live",
+                          "tail_enabled", "tail_live"):
                     _AT_CONFIG[k] = False
                 try:
                     conn = get_db()
                     if conn:
                         conn.autocommit = True
                         with conn.cursor() as cur:
-                            for k in ("enabled", "live_mode", "tail_enabled", "tail_live"):
+                            for k in ("enabled", "live_mode", "gap_enabled", "gap_live",
+                                      "tail_enabled", "tail_live"):
                                 cur.execute("""
                                     INSERT INTO auto_trader_config (key, value, updated_at)
                                     VALUES (%s, 'false', NOW())
@@ -6463,9 +6547,9 @@ class Handler(BaseHTTPRequestHandler):
                         conn.close()
                 except Exception:
                     pass
-                at_log("KILL", "Kill switch activated — forecast AND tail strategies OFF")
+                at_log("KILL", "Kill switch activated — forecast AND gap strategies OFF")
                 self.send_json({"ok": True, "enabled": False, "live_mode": False,
-                                "tail_enabled": False, "tail_live": False})
+                                "gap_enabled": False, "gap_live": False})
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
@@ -6480,8 +6564,9 @@ class Handler(BaseHTTPRequestHandler):
                 _ensure_live_trades_table(conn)
                 out = {}
                 specs = {
-                    "forecast": "COALESCE(strategy, '') <> 'tail'",
-                    "tail":     "strategy = 'tail'",
+                    "forecast": "COALESCE(strategy, '') NOT IN ('tail', 'gap')",
+                    # 'gap' includes legacy tail rows — same trade, generalized
+                    "gap":      "strategy IN ('tail', 'gap')",
                 }
                 with conn.cursor() as cur:
                     for name, frag in specs.items():
@@ -6589,19 +6674,20 @@ class Handler(BaseHTTPRequestHandler):
                              "pnl": float(q[12]) if q[12] is not None else None}
                             for q in cur.fetchall()]
                         out[name] = blk
-                    # tail tier split (TAIL-A full size vs TAIL-B half size)
+                    # tier split: GAP-0/GAP-1 (bracket floor at/one above the
+                    # running high) plus legacy TAIL-* tiers from the retired sleeve
                     cur.execute("""
                         SELECT grade, COUNT(*),
                                COUNT(*) FILTER (WHERE settled_correct),
                                ROUND(COALESCE(SUM(pnl), 0)::numeric, 2),
                                ROUND(COALESCE(SUM(filled_count * avg_fill_price_c / 100.0), 0)::numeric, 2)
                         FROM live_trades
-                        WHERE is_live = TRUE AND strategy = 'tail'
+                        WHERE is_live = TRUE AND strategy IN ('tail', 'gap')
                           AND settled_correct IS NOT NULL
                           AND COALESCE(filled_count, 0) > 0
                         GROUP BY grade ORDER BY grade
                     """)
-                    out["tail"]["tiers"] = [
+                    out["gap"]["tiers"] = [
                         {"tier": q[0], "n": q[1], "wins": q[2],
                          "pnl": float(q[3] or 0),
                          "ev_per_dollar": round(float(q[3] or 0) / float(q[4]), 3) if q[4] else None}
@@ -6609,11 +6695,11 @@ class Handler(BaseHTTPRequestHandler):
                 conn.close()
                 out["forecast"]["armed"] = bool(_AT_CONFIG.get("enabled")) and bool(_AT_CONFIG.get("live_mode"))
                 out["forecast"]["cap"] = _AT_CONFIG.get("daily_cap_dollars")
-                out["tail"]["enabled"] = bool(_AT_CONFIG.get("tail_enabled"))
-                out["tail"]["live"] = bool(_AT_CONFIG.get("tail_live"))
-                out["tail"]["cap"] = _AT_CONFIG.get("tail_daily_cap_dollars")
-                out["tail"]["position_dollars"] = _AT_CONFIG.get("tail_position_dollars")
-                out["tail"]["ev_floor"] = _AT_CONFIG.get("tail_ev_floor")
+                out["gap"]["enabled"] = bool(_AT_CONFIG.get("gap_enabled"))
+                out["gap"]["live"] = bool(_AT_CONFIG.get("gap_live"))
+                out["gap"]["cap"] = _AT_CONFIG.get("gap_daily_cap_dollars")
+                out["gap"]["position_dollars"] = _AT_CONFIG.get("gap_position_dollars")
+                out["gap"]["ev_floor"] = _AT_CONFIG.get("gap_ev_floor")
                 self.send_json({"ok": True, "strategies": out})
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
@@ -6652,7 +6738,7 @@ class Handler(BaseHTTPRequestHandler):
                                    COUNT(*) FILTER (WHERE is_live),
                                    COUNT(*) FILTER (WHERE NOT is_live)
                             FROM live_trades WHERE ts::date = CURRENT_DATE
-                              AND COALESCE(strategy, '') <> 'tail'
+                              AND COALESCE(strategy, '') NOT IN ('tail', 'gap')
                         """)
                         r = cur.fetchone()
                         out["spent_today"] = float(r[0]); out["live_fills_today"] = r[1]
@@ -6661,7 +6747,7 @@ class Handler(BaseHTTPRequestHandler):
                             SELECT COUNT(*), ROUND(AVG(slippage_c)::numeric,2),
                                    ROUND(AVG(ABS(slippage_c))::numeric,2)
                             FROM live_trades WHERE slippage_c IS NOT NULL
-                              AND COALESCE(strategy, '') <> 'tail'
+                              AND COALESCE(strategy, '') NOT IN ('tail', 'gap')
                         """)
                         r = cur.fetchone()
                         out["slippage"] = {"n": r[0], "avg_c": float(r[1] or 0),
@@ -6670,7 +6756,7 @@ class Handler(BaseHTTPRequestHandler):
                             SELECT ts, ticker, city, count, paper_ask_c, order_ask_c,
                                    slippage_c, cost, is_live, grade
                             FROM live_trades
-                            WHERE COALESCE(strategy, '') <> 'tail'
+                            WHERE COALESCE(strategy, '') NOT IN ('tail', 'gap')
                             ORDER BY ts DESC LIMIT 25
                         """)
                         out["recent_fills"] = [
