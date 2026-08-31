@@ -821,18 +821,14 @@ body{max-width:900px;margin:0 auto;}
       </div>
       <div style="padding:12px 14px;">
         <div style="font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:12px;">
-          By early afternoon the market treats the current temperature as final &mdash; but the
-          day's high usually climbs another <b style="color:var(--ink);">1&ndash;2&deg;F</b>, and
-          NWS settles on 1-minute data that catches spikes the hourly readings miss. We buy any
-          bracket whose floor sits <b style="color:var(--ink);">0&ndash;1&deg;F above the station's
-          running high</b> &mdash; 1&ndash;7pm local, 3&ndash;15&cent;, volume-checked, all 17
-          cities &mdash; and hold to settlement. This generalizes the old tail-lag sleeve
-          (open-ended brackets only) to <b style="color:var(--ink);">every bracket</b>: ~10&times;
-          the signals, no forecast model in the loop. Full-data backtest settled against official
-          NWS CLI records: <b style="color:var(--ink);">+$3.36 per $1</b> (+$2.00 even with 4&cent;
-          adverse fills), positive in all 17 cities, edge strongest on the most liquid books.
-          Each buy <b style="color:var(--ink);">walks the book</b>: it sweeps every offer under
-          the &quot;still worth it&quot; line for that hour of day.
+          In the afternoon, buy cheap brackets sitting just above today's current high &mdash;
+          because temperatures almost always climb another degree or two, and
+          <b style="color:var(--ink);">the market forgets that</b>. Brackets 0&ndash;1&deg;F above
+          the running high win <b style="color:var(--ink);">28&ndash;32%</b> but trade at
+          ~7&cent;. Rules: 1&ndash;7pm local, never pay more than 20&cent;, all 17 cities, hold
+          to settlement. Backtest vs official NWS records:
+          <b style="color:var(--ink);">+$3.42 per $1</b>, positive in every city, both data
+          halves agree. Replaces the tail-lag sleeve (same trade, ~10&times; the signals).
         </div>
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;">
           <div><div style="font-size:10px;color:var(--muted);">SPENT TODAY</div><div id="tl-spent" style="font-size:16px;font-weight:500;">—</div></div>

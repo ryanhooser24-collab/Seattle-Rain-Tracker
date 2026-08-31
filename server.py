@@ -1874,7 +1874,11 @@ _AT_CONFIG = {
     "gap_enabled":            False,
     "gap_live":               False,  # False = simulate fills; True = REAL orders
     "gap_min_ask_c":          3,
-    "gap_max_ask_c":          15,     # >15c still wins but ROI decays (15-20c +1.3)
+    "gap_max_ask_c":          20,     # validated optimum: total pnl peaks at a 20c
+                                      # ceiling (73.0k vs 67.8k at 10c) and declines
+                                      # above it — pricier entries cannibalize better
+                                      # cheap entries on the same ticker later in the
+                                      # day. Never pay more than 20c.
     "gap_hour_start":         13,     # city-local hour, inclusive (14-18h is the engine)
     "gap_hour_end":           18,     # inclusive; nothing qualifies after 19h
     "gap_min":                0.0,    # bracket floor minus running high, F
