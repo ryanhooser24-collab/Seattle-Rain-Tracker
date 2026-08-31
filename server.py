@@ -2322,6 +2322,140 @@ def fetch_acis_daily(nws_station, date_str):
     return {"ok": False, "error": f"no ACIS data for {nws_station} on {date_str}"}
 
 
+
+_TICKER_DATE_RE = None
+def ticker_target_date(ticker):
+    """Authoritative target date parsed from the ticker itself
+    (e.g. KXHIGHAUS-26AUG29-B97.5 -> '2026-08-29'). Kalshi lists adjacent-day
+    tickers in one market list, so the scan's forecast target_date is NOT a
+    safe stamp — 29% of pre-2026-08-31 rows carried the wrong date. Returns
+    None when the ticker has no parseable date (e.g. COMBO rows)."""
+    global _TICKER_DATE_RE
+    import re as _re
+    if _TICKER_DATE_RE is None:
+        _TICKER_DATE_RE = _re.compile(r"-(\d{2})([A-Z]{3})(\d{2})-")
+    m = _TICKER_DATE_RE.search(ticker or "")
+    if not m:
+        return None
+    _mon = {"JAN":1,"FEB":2,"MAR":3,"APR":4,"MAY":5,"JUN":6,
+            "JUL":7,"AUG":8,"SEP":9,"OCT":10,"NOV":11,"DEC":12}.get(m.group(2))
+    if not _mon:
+        return None
+    return f"20{m.group(1)}-{_mon:02d}-{int(m.group(3)):02d}"
+
+
+def run_ticker_date_repair(apply=False):
+    """One-shot historical repair of the wrong-date bug: set target_date to
+    the ticker-derived date wherever they disagree, and clear settlement
+    fields on rows whose date moved (they were settled against the wrong
+    day's CLI). Dry-run by default; apply=True writes. Safe to re-run —
+    converges to zero repairs."""
+    conn = get_db()
+    if not conn:
+        return {"ok": False, "error": "No DB"}
+    # target_date is DATE in most tables but TEXT in live_trades — compare on
+    # ::text (DATE casts to 'YYYY-MM-DD') and assign the text form (implicit
+    # text->date assignment cast covers the DATE columns).
+    parsed = ("to_char(to_date(substring(ticker from"
+              " '-(\\d{2}[A-Z]{3}\\d{2})-'), 'YYMONDD'), 'YYYY-MM-DD')")
+    guard  = "ticker ~ '-\\d{2}[A-Z]{3}\\d{2}-'"
+    tables = {
+        "temp_snapshots":        True,   # has settled fields
+        "calibration_snapshots": True,
+        "paper_trades":          True,
+        "live_trades":           True,
+        "price_history":         False,  # no settled fields
+        "book_snapshots":        False,
+    }
+    out = {"ok": True, "applied": bool(apply), "tables": {}}
+    try:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            for tbl, has_settle in tables.items():
+                try:
+                    cur.execute(
+                        f"SELECT count(*) FROM {tbl} "
+                        f"WHERE {guard} AND target_date::text IS DISTINCT FROM {parsed}")
+                    mismatched = cur.fetchone()[0]
+                    fixed = cleared = 0
+                    if apply and mismatched:
+                        if has_settle:
+                            cur.execute(
+                                f"UPDATE {tbl} SET settled_temp = NULL, "
+                                f"settled_correct = NULL, settled_ts = NULL "
+                                f"WHERE {guard} AND target_date::text IS DISTINCT FROM {parsed} "
+                                f"AND settled_temp IS NOT NULL")
+                            cleared = cur.rowcount
+                        cur.execute(
+                            f"UPDATE {tbl} SET target_date = {parsed} "
+                            f"WHERE {guard} AND target_date::text IS DISTINCT FROM {parsed}")
+                        fixed = cur.rowcount
+                    out["tables"][tbl] = {"mismatched": mismatched,
+                                          "fixed": fixed, "settle_cleared": cleared}
+                except Exception as te:
+                    conn.rollback()
+                    out["tables"][tbl] = {"error": str(te)}
+                    continue
+            if apply:
+                conn.commit()
+    except Exception as e:
+        conn.rollback()
+        out = {"ok": False, "error": str(e), "partial": out.get("tables", {})}
+    finally:
+        conn.close()
+    return out
+
+
+def run_apply_settlements(truth_rows, force=False):
+    """Apply authoritative NWS-CLI daily highs to unsettled (or, with force,
+    disagreeing) HIGH-market rows. truth_rows: [{city, date, high}, ...].
+    settled_correct = CLI integer inside [round(lo), round(hi)] with open
+    bounds for tails. Used after run_ticker_date_repair to re-settle the
+    rows whose dates moved."""
+    conn = get_db()
+    if not conn:
+        return {"ok": False, "error": "No DB"}
+    specs = [
+        ("temp_snapshots",        "market_type = 'high'"),
+        ("calibration_snapshots", "TRUE"),
+        ("paper_trades",          "TRUE"),
+        ("live_trades",           "TRUE"),
+    ]
+    cond = "(settled_temp IS NULL)" if not force else \
+           "(settled_temp IS NULL OR settled_temp IS DISTINCT FROM %(high)s)"
+    out = {"ok": True, "force": bool(force), "rows_in": len(truth_rows), "tables": {}}
+    try:
+        conn.autocommit = False
+        with conn.cursor() as cur:
+            for tbl, extra in specs:
+                n = 0
+                try:
+                    for r in truth_rows:
+                        cur.execute(
+                            f"UPDATE {tbl} SET settled_temp = %(high)s, "
+                            f"settled_ts = COALESCE(settled_ts, NOW()), "
+                            f"settled_correct = ("
+                            f"  (lo_temp IS NULL OR %(high)s >= round(lo_temp)) "
+                            f"  AND (hi_temp IS NULL OR %(high)s <= round(hi_temp))) "
+                            f"WHERE city = %(city)s AND target_date = %(date)s "
+                            f"AND {extra} AND {cond}",
+                            {"city": r["city"], "date": r["date"],
+                             "high": int(r["high"])})
+                        n += cur.rowcount
+                    out["tables"][tbl] = {"updated": n}
+                except Exception as te:
+                    conn.rollback()
+                    out["tables"][tbl] = {"error": str(te)}
+                    continue
+            conn.commit()
+    except Exception as e:
+        conn.rollback()
+        out = {"ok": False, "error": str(e), "partial": out.get("tables", {})}
+    finally:
+        conn.close()
+    return out
+
+
 def run_settlement_backfill(days=None, abandon=True, force=False):
     """
     Retry every unsettled (city, target_date) older than yesterday and inside
@@ -5426,6 +5560,45 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         at_log("SCAN", "Auto-trader disabled via UI")
                 self.send_json({"ok": True, "config": _AT_CONFIG})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+        elif path == "/admin/repair-ticker-dates":
+            # One-shot repair of the wrong-date bug across all logging tables.
+            # Body: {"token": QUERY_TOKEN, "apply": true|false (default false)}
+            # Dry-run reports per-table mismatch counts without writing.
+            import os as _os
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body   = json.loads(self.rfile.read(length).decode()) if length else {}
+                expected = _os.environ.get("QUERY_TOKEN", "")
+                if not expected:
+                    self.send_json({"ok": False, "error": "QUERY_TOKEN not set in environment"})
+                elif body.get("token", "") != expected:
+                    self.send_json({"ok": False, "error": "Invalid token"})
+                else:
+                    self.send_json(run_ticker_date_repair(apply=bool(body.get("apply"))))
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+        elif path == "/admin/apply-settlements":
+            # Apply authoritative NWS-CLI daily highs (e.g. from the IEM
+            # archive) to HIGH-market rows left unsettled by the date repair.
+            # Body: {"token": ..., "force": bool, "rows": [{"city","date","high"}]}
+            import os as _os
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body   = json.loads(self.rfile.read(length).decode()) if length else {}
+                expected = _os.environ.get("QUERY_TOKEN", "")
+                rows = body.get("rows") or []
+                if not expected:
+                    self.send_json({"ok": False, "error": "QUERY_TOKEN not set in environment"})
+                elif body.get("token", "") != expected:
+                    self.send_json({"ok": False, "error": "Invalid token"})
+                elif not isinstance(rows, list) or not rows or not all(
+                        isinstance(r, dict) and r.get("city") and r.get("date")
+                        and isinstance(r.get("high"), (int, float)) for r in rows):
+                    self.send_json({"ok": False, "error": "rows must be [{city,date,high},...]"})
+                else:
+                    self.send_json(run_apply_settlements(rows, force=bool(body.get("force"))))
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
         elif path == "/admin/query":
@@ -9065,7 +9238,7 @@ def _book_snapshot_log(city_key, fc, signals, max_fetches=12):
                 if ob is None: continue
                 rows.append((
                     city_key, ticker,
-                    m.get("target_date") or fc.get("target_date"),
+                    ticker_target_date(ticker) or m.get("target_date") or fc.get("target_date"),
                     m.get("side", "yes"), m.get("grade"),
                     m.get("model_prob"), m.get("mu"), m.get("sigma"),
                     m.get("net_gap_c"), m.get("hours_to_cutoff"),
@@ -9123,7 +9296,9 @@ def _paper_trade_log(city_key, fc, markets):
                 row = (
                     city_key,
                     fc.get("nws_station"),
-                    fc.get("target_date"),
+                    # Ticker is authoritative for the date — the fc target
+                    # stamped 29% of historical rows with the adjacent day.
+                    ticker_target_date(m["ticker"]) or fc.get("target_date"),
                     fc.get("horizon"),
                     m["ticker"],
                     m.get("bracket_label"),
