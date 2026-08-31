@@ -1610,7 +1610,12 @@ def scan_temp_city(city_key, horizon="d1"):
                                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                                     ON CONFLICT DO NOTHING
                                 """, (
-                                    city_key, cfg["nws_station"], fc["target_date"], horizon, mtype,
+                                    # target_date from the ticker itself, not the scan's
+                                    # forecast target — Kalshi lists adjacent-day tickers,
+                                    # and stamping fc target_date settled 10k+ tickers
+                                    # against the wrong day's actual (found 2026-08-30).
+                                    city_key, cfg["nws_station"],
+                                    m.get("ticker_date") or fc["target_date"], horizon, mtype,
                                     m["ticker"], m.get("bracket_label"),
                                     m.get("lo_temp"), m.get("hi_temp"),
                                     fc.get("gfs_high"),  fc.get("ecmwf_high"),  fc.get("best_high"),
@@ -1851,7 +1856,11 @@ _AT_CONFIG = {
     "tail_hour_end":          19,     # city-local hour, inclusive
     "tail_z_full":            1.0,    # z below this → full size
     "tail_z_half":            3.0,    # z below this → half size; above → skip
-    "tail_position_dollars":  10.0,   # worst-case $ per full-weight position (z<0 ×1.5, z≥1 ×0.5)
+    "tail_position_dollars":  10.0,   # worst-case $ per full-weight position (z≥1 ×0.5)
+    "tail_allow_z_neg":       False,  # z<0 gated off 2026-08-30: tier's backtest
+                                      # win probs were inflated by wrong-date
+                                      # settlements (0.60-0.75 dirty vs 0.28-0.54
+                                      # clean); live 1/16. Re-enable only with data.
     "tail_ev_floor":          1.0,    # walk the book while marginal EV/$ ≥ this
     "tail_daily_cap_dollars": 100.0,  # tail-only cap, worst-case accounting
     "tail_max_attempts":      3,      # unfilled IOC attempts per ticker+phase
@@ -3259,14 +3268,19 @@ def _tail_spend_today():
 
 
 # Empirical win probability by (quoted-ask band, z tier) — measured on settled
-# same-day tail entries (6-19h local, temp_snapshots through 2026-08-24).
+# same-day tail entries (6-19h local). Rebuilt 2026-08-30 on rows whose
+# target_date matches the ticker-embedded date (the original 2026-08-24 table
+# was inflated by wrong-date settlements — 10k+ tickers had snapshot rows
+# stamped with an adjacent day's target_date and were graded against the wrong
+# day's actual). z recomputed with sigma floored at 1.0°F to match the fixed
+# calibration. Sample sizes 166-545 ticker-days per cell.
 # Drives the book-walk frontier: value remains while (p - price - fee)/price
-# clears tail_ev_floor. Sample sizes 37-208 per cell.
+# clears tail_ev_floor.
 _TAIL_P = {
-    ("2-4",  "z<0"): 0.599, ("2-4",  "0-1"): 0.186, ("2-4",  "1-2"): 0.155, ("2-4",  "2-3"): 0.083,
-    ("5-7",  "z<0"): 0.673, ("5-7",  "0-1"): 0.364, ("5-7",  "1-2"): 0.186, ("5-7",  "2-3"): 0.132,
-    ("8-10", "z<0"): 0.653, ("8-10", "0-1"): 0.297, ("8-10", "1-2"): 0.286, ("8-10", "2-3"): 0.200,
-    ("11-15","z<0"): 0.747, ("11-15","0-1"): 0.408, ("11-15","1-2"): 0.396, ("11-15","2-3"): 0.375,
+    ("2-4",  "z<0"): 0.279, ("2-4",  "0-1"): 0.117, ("2-4",  "1-2"): 0.093, ("2-4",  "2-3"): 0.059,
+    ("5-7",  "z<0"): 0.340, ("5-7",  "0-1"): 0.190, ("5-7",  "1-2"): 0.170, ("5-7",  "2-3"): 0.120,
+    ("8-10", "z<0"): 0.452, ("8-10", "0-1"): 0.312, ("8-10", "1-2"): 0.229, ("8-10", "2-3"): 0.166,
+    ("11-15","z<0"): 0.542, ("11-15","0-1"): 0.407, ("11-15","1-2"): 0.335, ("11-15","2-3"): 0.261,
 }
 
 def _tail_p_hat(ask, z):
@@ -3337,8 +3351,9 @@ def run_tail_trader_cycle():
     contract still clears tail_ev_floor of EV, given the empirical win prob
     for (quoted band, z tier) from _TAIL_P. One IOC at the frontier sweeps
     every resting level under it at those levels' own prices. Sizing is
-    dollars per position (tail_position_dollars × z-tier weight: z<0 ×1.5,
-    z<1 ×1.0, z<3 ×0.5), worst-case bounded by count × limit.
+    dollars per position (tail_position_dollars × z-tier weight:
+    z<1 ×1.0, z<3 ×0.5), worst-case bounded by count × limit. z<0 entries
+    are gated off unless tail_allow_z_neg (see _AT_CONFIG note).
 
     Same-day (d0) high markets, open-ended T-brackets only, one filled
     position per ticker per phase, hold to settlement — no exits.
@@ -3408,18 +3423,20 @@ def run_tail_trader_cycle():
                 z = d / float(sigma)
                 if z >= z_half:
                     continue
+                if z < 0 and not cfg.get("tail_allow_z_neg", False):
+                    continue  # tier gated off — see _AT_CONFIG note
 
                 am_f, pm_f, am_a, pm_a = _tail_ticker_state(ticker)
                 if am:
                     if am_f or am_a >= max_att:
                         continue
-                    weight = 1.5 if z < 0 else (1.0 if z < z_full else 0.5)
+                    weight = 1.0 if z < z_full else 0.5
                     tier = "TAIL-AM-A" if z < z_full else "TAIL-AM-B"
                 else:
                     if pm_f or pm_a >= max_att:
                         continue
                     if z < z_full:
-                        weight = 1.5 if z < 0 else 1.0
+                        weight = 1.0
                         tier = "TAIL-TOP" if am_f else "TAIL-PM-A"
                     elif not am_f:
                         weight = 0.5
@@ -3877,16 +3894,26 @@ def maybe_auto_calibrate():
                 bc_rmse_ecmwf = _bc_rmse(errs_ecmwf, eb) if not ecmwf_is_mirror else 99.0
                 bc_rmse_blend = _bc_rmse(errs_blend, bb)
 
+                # Data-leak guard (2026-08-30): a D+1 bc_rmse under 1.0°F is not
+                # skill, it's the "forecast" series mirroring the verification
+                # archive (ECMWF ran 0.32-0.97°F over 71 days in 10/17 cities and
+                # slipped past the 0.3 mirror check, collapsing σ_d0 to ~0.2°F and
+                # inflating live z to ±9σ). Exclude any such model from selection.
                 candidates = {
                     "gfs":   (bc_rmse_gfs,   gb, gr),
                     "ecmwf": (bc_rmse_ecmwf, eb, er),
                     "blend": (bc_rmse_blend, bb, br),
                 }
+                candidates = {k: (99.0 if v[0] < 1.0 else v[0], v[1], v[2])
+                              for k, v in candidates.items()}
                 best_model = min(candidates, key=lambda k: candidates[k][0])
                 best_bc_rmse, best_bias, best_rmse = candidates[best_model]
+                if best_bc_rmse >= 90:
+                    best_model, best_bias = "average", 0.0
 
-                # σ_d1 = RMSE of the best model (already bias-corrected = bc_rmse)
-                σ_d1 = round(best_bc_rmse, 2) if best_bc_rmse < 90 else cfg["σ_d1"]
+                # σ_d1 = RMSE of the best model (already bias-corrected = bc_rmse),
+                # floored at 1.0°F — sub-degree day-ahead RMSE is leakage, not skill.
+                σ_d1 = max(round(best_bc_rmse, 2), 1.0) if best_bc_rmse < 90 else cfg["σ_d1"]
 
                 _TEMP_BIAS_CACHE[city_key] = {
                     "gfs_bias":       gb,
