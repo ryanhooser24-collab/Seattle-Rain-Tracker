@@ -2359,19 +2359,26 @@ def run_ticker_date_repair(apply=False):
     parsed = ("to_char(to_date(substring(ticker from"
               " '-(\\d{2}[A-Z]{3}\\d{2})-'), 'YYMONDD'), 'YYYY-MM-DD')")
     guard  = "ticker ~ '-\\d{2}[A-Z]{3}\\d{2}-'"
+    # Per table: (settle-clear SET clause or None, target_date is DATE-typed).
+    # temp_snapshots has settle_source/settle_abandoned instead of settled_ts;
+    # live_trades stores target_date as TEXT (no ::date cast on assignment).
     tables = {
-        "temp_snapshots":        True,   # has settled fields
-        "calibration_snapshots": True,
-        "paper_trades":          True,
-        "live_trades":           True,
-        "price_history":         False,  # no settled fields
-        "book_snapshots":        False,
+        "temp_snapshots":        ("settled_temp = NULL, settled_correct = NULL, "
+                                  "settle_source = NULL, settle_abandoned = FALSE", True),
+        "calibration_snapshots": ("settled_temp = NULL, settled_correct = NULL, "
+                                  "settled_ts = NULL", True),
+        "paper_trades":          ("settled_temp = NULL, settled_correct = NULL, "
+                                  "settled_ts = NULL", True),
+        "live_trades":           ("settled_temp = NULL, settled_correct = NULL, "
+                                  "settled_ts = NULL", False),
+        "price_history":         (None, True),   # no settled fields
+        "book_snapshots":        (None, True),
     }
     out = {"ok": True, "applied": bool(apply), "tables": {}}
     try:
         conn.autocommit = False
         with conn.cursor() as cur:
-            for tbl, has_settle in tables.items():
+            for tbl, (settle_clear, is_date_col) in tables.items():
                 try:
                     cur.execute(
                         f"SELECT count(*) FROM {tbl} "
@@ -2379,15 +2386,15 @@ def run_ticker_date_repair(apply=False):
                     mismatched = cur.fetchone()[0]
                     fixed = cleared = 0
                     if apply and mismatched:
-                        if has_settle:
+                        if settle_clear:
                             cur.execute(
-                                f"UPDATE {tbl} SET settled_temp = NULL, "
-                                f"settled_correct = NULL, settled_ts = NULL "
+                                f"UPDATE {tbl} SET {settle_clear} "
                                 f"WHERE {guard} AND target_date::text IS DISTINCT FROM {parsed} "
                                 f"AND settled_temp IS NOT NULL")
                             cleared = cur.rowcount
+                        assign = f"({parsed})::date" if is_date_col else parsed
                         cur.execute(
-                            f"UPDATE {tbl} SET target_date = {parsed} "
+                            f"UPDATE {tbl} SET target_date = {assign} "
                             f"WHERE {guard} AND target_date::text IS DISTINCT FROM {parsed}")
                         fixed = cur.rowcount
                     out["tables"][tbl] = {"mismatched": mismatched,
@@ -2415,11 +2422,14 @@ def run_apply_settlements(truth_rows, force=False):
     conn = get_db()
     if not conn:
         return {"ok": False, "error": "No DB"}
+    # temp_snapshots has settle_source/settle_abandoned instead of settled_ts.
     specs = [
-        ("temp_snapshots",        "market_type = 'high'"),
-        ("calibration_snapshots", "TRUE"),
-        ("paper_trades",          "TRUE"),
-        ("live_trades",           "TRUE"),
+        ("temp_snapshots",        "market_type = 'high'",
+         "settle_source = COALESCE(settle_source, 'iem_cli_backfill'), "
+         "settle_abandoned = FALSE"),
+        ("calibration_snapshots", "TRUE", "settled_ts = COALESCE(settled_ts, NOW())"),
+        ("paper_trades",          "TRUE", "settled_ts = COALESCE(settled_ts, NOW())"),
+        ("live_trades",           "TRUE", "settled_ts = COALESCE(settled_ts, NOW())"),
     ]
     cond = "(settled_temp IS NULL)" if not force else \
            "(settled_temp IS NULL OR settled_temp IS DISTINCT FROM %(high)s)"
@@ -2427,13 +2437,13 @@ def run_apply_settlements(truth_rows, force=False):
     try:
         conn.autocommit = False
         with conn.cursor() as cur:
-            for tbl, extra in specs:
+            for tbl, extra, ts_set in specs:
                 n = 0
                 try:
                     for r in truth_rows:
                         cur.execute(
                             f"UPDATE {tbl} SET settled_temp = %(high)s, "
-                            f"settled_ts = COALESCE(settled_ts, NOW()), "
+                            f"{ts_set}, "
                             f"settled_correct = ("
                             f"  (lo_temp IS NULL OR %(high)s >= round(lo_temp)) "
                             f"  AND (hi_temp IS NULL OR %(high)s <= round(hi_temp))) "
