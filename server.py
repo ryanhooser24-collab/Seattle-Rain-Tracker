@@ -2384,8 +2384,30 @@ def run_ticker_date_repair(apply=False):
                         f"SELECT count(*) FROM {tbl} "
                         f"WHERE {guard} AND target_date::text IS DISTINCT FROM {parsed}")
                     mismatched = cur.fetchone()[0]
-                    fixed = cleared = 0
+                    fixed = cleared = deduped = 0
                     if apply and mismatched:
+                        # calibration_snapshots/paper_trades enforce one row
+                        # per (ticker, target_date, side); when a correctly
+                        # dated row already exists, the mis-dated row is a
+                        # duplicate — delete it instead of re-dating into a
+                        # unique-index collision.
+                        if tbl in ("calibration_snapshots", "paper_trades"):
+                            # Delete a mis-dated row when (a) a correctly dated
+                            # row already exists for its ticker/side, or (b) an
+                            # older mis-dated sibling will claim the corrected
+                            # date first — every ticker has exactly one correct
+                            # date, so at most one row may survive re-dating.
+                            parsed_a = parsed.replace("ticker", "a.ticker", 1)
+                            cur.execute(
+                                f"DELETE FROM {tbl} a "
+                                f"WHERE a.ticker ~ '-\\d{{2}}[A-Z]{{3}}\\d{{2}}-' "
+                                f"AND a.target_date::text IS DISTINCT FROM {parsed_a} "
+                                f"AND EXISTS (SELECT 1 FROM {tbl} b "
+                                f"  WHERE b.ticker = a.ticker "
+                                f"  AND COALESCE(b.side, 'yes') = COALESCE(a.side, 'yes') "
+                                f"  AND b.id <> a.id "
+                                f"  AND (b.target_date::text = {parsed_a} OR b.id < a.id))")
+                            deduped = cur.rowcount
                         if settle_clear:
                             cur.execute(
                                 f"UPDATE {tbl} SET {settle_clear} "
@@ -2398,7 +2420,8 @@ def run_ticker_date_repair(apply=False):
                             f"WHERE {guard} AND target_date::text IS DISTINCT FROM {parsed}")
                         fixed = cur.rowcount
                     out["tables"][tbl] = {"mismatched": mismatched,
-                                          "fixed": fixed, "settle_cleared": cleared}
+                                          "fixed": fixed, "settle_cleared": cleared,
+                                          "dupes_deleted": deduped}
                 except Exception as te:
                     conn.rollback()
                     out["tables"][tbl] = {"error": str(te)}
