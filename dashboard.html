@@ -572,7 +572,7 @@ body{max-width:900px;margin:0 auto;}
     <!-- Strategy sub-tabs -->
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
       <div id="lvt-forecast" onclick="lvSw('forecast')" class="tab active" style="font-size:11px;padding:7px 14px;">FORECAST BASED</div>
-      <div id="lvt-tail" onclick="lvSw('tail')" class="tab" style="font-size:11px;padding:7px 14px;">GAP RULE</div>
+      <div id="lvt-tail" onclick="lvSw('tail')" class="tab" style="font-size:11px;padding:7px 14px;">NEXT DEGREE UP</div>
       <div style="flex:1;"></div>
       <button onclick="lvKill()" style="padding:7px 14px;font-family:inherit;font-size:10px;letter-spacing:1px;background:var(--no-lt);color:var(--no);border:1px solid var(--no-border);border-radius:4px;cursor:pointer;">KILL — STOP ALL</button>
     </div>
@@ -744,13 +744,13 @@ body{max-width:900px;margin:0 auto;}
 
     </div><!-- /lvs-forecast -->
 
-    <!-- ══ GAP RULE STRATEGY ══ -->
+    <!-- ══ NEXT DEGREE UP STRATEGY ══ -->
     <div id="lvs-tail" style="display:none">
 
     <!-- Status -->
     <div class="rf-card">
       <div class="rf-hdr">
-        <div class="rf-hdr-lbl">GAP RULE STRATEGY</div>
+        <div class="rf-hdr-lbl">NEXT DEGREE UP</div>
         <div style="display:flex;align-items:center;gap:8px;">
           <div id="tl-status" class="pill">—</div>
           <div style="display:flex;border:1px solid var(--border);border-radius:4px;overflow:hidden;">
@@ -785,9 +785,9 @@ body{max-width:900px;margin:0 auto;}
 
     <!-- Performance over time -->
     <div class="rf-card">
-      <div class="rf-hdr"><div class="rf-hdr-lbl">PERFORMANCE — GAP RULE</div><div id="tl-tot" style="font-size:13px;font-weight:500;"></div></div>
+      <div class="rf-hdr"><div class="rf-hdr-lbl">PERFORMANCE — NEXT DEGREE UP</div><div id="tl-tot" style="font-size:13px;font-weight:500;"></div></div>
       <div style="padding:12px 14px;">
-        <div id="tl-kpi" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;font-size:11px;color:var(--muted);">No settled gap trades yet.</div>
+        <div id="tl-kpi" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;font-size:11px;color:var(--muted);">No settled trades yet.</div>
         <div id="tl-chart" style="font-size:11px;color:var(--muted);"></div>
       </div>
     </div>
@@ -807,7 +807,7 @@ body{max-width:900px;margin:0 auto;}
           <input id="tl-cfg-floor" type="number" step="0.1" min="0.1" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
         </div>
         <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
-          <div><div style="font-size:12px;">Daily cap</div><div style="font-size:10px;color:var(--muted);">Most real dollars the gap strategy may spend per day (worst-case accounting) — separate from the forecast cap.</div></div>
+          <div><div style="font-size:12px;">Daily cap</div><div style="font-size:10px;color:var(--muted);">Most real dollars Next Degree Up may spend per day (worst-case accounting) — separate from the forecast cap.</div></div>
           <input id="tl-cfg-cap" type="number" step="1" min="0" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
         </div>
         <div id="tl-cfg-msg" style="font-size:10px;color:var(--muted);"></div>
@@ -816,13 +816,13 @@ body{max-width:900px;margin:0 auto;}
 
     <!-- Open positions -->
     <div class="rf-card">
-      <div class="rf-hdr"><div class="rf-hdr-lbl">OPEN POSITIONS — GAP RULE</div></div>
+      <div class="rf-hdr"><div class="rf-hdr-lbl">OPEN POSITIONS — NEXT DEGREE UP</div></div>
       <div id="tl-open" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
     </div>
 
     <!-- Recent trades -->
     <div class="rf-card">
-      <div class="rf-hdr"><div class="rf-hdr-lbl">TRADES — GAP RULE</div></div>
+      <div class="rf-hdr"><div class="rf-hdr-lbl">TRADES — NEXT DEGREE UP</div></div>
       <div id="tl-recent" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
     </div>
 
@@ -1373,7 +1373,7 @@ async function lvForecastToggle(){
   loadLive();
 }
 async function lvTailSet(mode){
-  if(mode==='live'&&!confirm('Set the gap rule strategy LIVE? Real money orders will be placed (up to the gap daily cap).'))return;
+  if(mode==='live'&&!confirm('Set Next Degree Up LIVE? Real money orders will be placed (up to its daily cap).'))return;
   const body=mode==='off'?{gap_enabled:false,gap_live:false}
             :mode==='sim'?{gap_enabled:true,gap_live:false}
             :{gap_enabled:true,gap_live:true};
@@ -1415,28 +1415,35 @@ function renderPnlCombo(series,elId,totId){
   s+='<line x1="'+PL+'" y1="'+zero.toFixed(1)+'" x2="'+(W-PR)+'" y2="'+zero.toFixed(1)+'" stroke="var(--border)"/>';
   [hi-pad,(hi-pad)/2].forEach(v=>{
     if(Math.abs(v)>0.01)s+='<line x1="'+PL+'" y1="'+Y(v).toFixed(1)+'" x2="'+(W-PR)+'" y2="'+Y(v).toFixed(1)+'" stroke="var(--border)" stroke-dasharray="2 4" opacity="0.5"/>'+
-      '<text x="'+(PL-6)+'" y="'+(Y(v)+3.5).toFixed(1)+'" text-anchor="end" font-size="9" fill="var(--muted)">$'+v.toFixed(0)+'</text>';
+      '<text x="'+(PL-6)+'" y="'+(Y(v)+3.5).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--muted)">$'+v.toFixed(0)+'</text>';
   });
-  s+='<text x="'+(PL-6)+'" y="'+(zero+3.5).toFixed(1)+'" text-anchor="end" font-size="9" fill="var(--muted)">$0</text>';
-  // daily bars + labels — drop W/L detail, then thin labels, when slots get narrow
-  const full=slot>=52, none=slot<26;
-  const lstep=none?Math.max(1,Math.ceil(30/slot)):1;
+  s+='<text x="'+(PL-6)+'" y="'+(zero+3.5).toFixed(1)+'" text-anchor="end" font-size="10" fill="var(--muted)">$0</text>';
+  // daily bars — labels drawn only when they physically fit their slot;
+  // full detail lives in a hover tooltip on each column
+  const FS=10.5, CHW=FS*0.62; // DM Mono ~0.6em per char
+  const wlFits=(('+$0 0W/0L').length+4)*CHW<=slot;
+  const lstep=Math.max(1,Math.ceil((6*CHW+4)/slot)); // "+$999" must fit lstep slots
   pts.forEach((p,i)=>{
     const x=Xc(i)-bw/2, y=p.day>=0?Y(p.day):zero, h=Math.abs(zero-Y(p.day));
     if(Math.abs(p.day)>0.005)s+='<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw+'" height="'+Math.max(1,h).toFixed(1)+'" rx="2" fill="'+(p.day>=0?'var(--yes)':'var(--no)')+'" opacity="0.75"/>';
     if((n-1-i)%lstep!==0)return;
-    const lbl=(p.day>=0?'+':'-')+'$'+Math.abs(p.day).toFixed(0)+(full?' '+p.w+'W/'+p.l+'L':'');
+    const lbl=(p.day>=0?'+':'-')+'$'+Math.abs(p.day).toFixed(0)+(wlFits?' '+p.w+'W/'+p.l+'L':'');
     const ly=p.day>=0?Y(p.day)-5:zero-5;
-    s+='<text x="'+Xc(i).toFixed(1)+'" y="'+ly.toFixed(1)+'" text-anchor="middle" font-size="8.5" fill="var(--muted)">'+lbl+'</text>';
+    s+='<text x="'+Xc(i).toFixed(1)+'" y="'+ly.toFixed(1)+'" text-anchor="middle" font-size="'+FS+'" fill="var(--muted)">'+lbl+'</text>';
   });
   // cumulative line on top
   const line=pts.map((p,i)=>(i?'L':'M')+Xc(i).toFixed(1)+' '+Y(p.v).toFixed(1)).join(' ');
   s+='<path d="'+line+'" fill="none" stroke="var(--ink)" stroke-width="1.5"/>';
   s+=pts.map((p,i)=>'<circle cx="'+Xc(i).toFixed(1)+'" cy="'+Y(p.v).toFixed(1)+'" r="2.5" fill="var(--ink)"/>').join('');
+  // topmost transparent hit rects — hover anywhere in a column for full detail
+  s+=pts.map((p,i)=>{
+    const tip=p.date+' · '+(p.day>=0?'+':'-')+'$'+Math.abs(p.day).toFixed(2)+' · '+p.w+'W/'+p.l+'L · cum '+(p.v>=0?'+':'-')+'$'+Math.abs(p.v).toFixed(2);
+    return '<rect data-tip="'+tip+'" x="'+(Xc(i)-slot/2).toFixed(1)+'" y="0" width="'+slot.toFixed(1)+'" height="'+H+'" fill="transparent"/>';
+  }).join('');
   // x labels (thin if crowded)
   const step=Math.ceil(n/8);
   pts.forEach((p,i)=>{
-    if(i===n-1||(i%step===0&&n-1-i>=step))s+='<text x="'+Xc(i).toFixed(1)+'" y="'+(H-8)+'" text-anchor="middle" font-size="9" fill="var(--muted)">'+p.date.slice(5)+'</text>';
+    if(i===n-1||(i%step===0&&n-1-i>=step))s+='<text x="'+Xc(i).toFixed(1)+'" y="'+(H-8)+'" text-anchor="middle" font-size="10" fill="var(--muted)">'+p.date.slice(5)+'</text>';
   });
   s+='</svg>';
   el.innerHTML=s+'<div style="font-size:9px;color:var(--muted);margin-top:4px;">bars = day PnL with wins/losses · line = cumulative</div>';
@@ -2566,7 +2573,7 @@ loadData();
     </div>
 
     <div class="rf-card">
-      <div class="rf-hdr"><div class="rf-hdr-lbl">DAILY PNL + CUMULATIVE</div><div class="rf-hdr-val" style="font-size:10px;color:var(--muted);">settled trades · forecast + gap combined</div></div>
+      <div class="rf-hdr"><div class="rf-hdr-lbl">DAILY PNL + CUMULATIVE</div><div class="rf-hdr-val" style="font-size:10px;color:var(--muted);">settled trades · forecast + next degree up combined</div></div>
       <div id="rp-daily" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
     </div>
 
