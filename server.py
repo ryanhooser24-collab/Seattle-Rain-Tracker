@@ -8795,6 +8795,7 @@ class Handler(BaseHTTPRequestHandler):
                         FROM (SELECT ticker, SUM(pnl) tp, SUM(cost) tc
                               FROM live_trades
                               WHERE is_live = TRUE AND pnl IS NOT NULL
+                                AND settled_correct IS NOT NULL
                               GROUP BY ticker) t
                     """)
                     r = cur.fetchone()
@@ -8823,6 +8824,7 @@ class Handler(BaseHTTPRequestHandler):
                         FROM (SELECT {DAY} AS d, ticker, SUM(pnl) tp
                               FROM live_trades
                               WHERE is_live = TRUE AND pnl IS NOT NULL
+                                AND settled_correct IS NOT NULL
                               GROUP BY 1, ticker) t
                         GROUP BY d ORDER BY d
                     """)
@@ -8833,6 +8835,7 @@ class Handler(BaseHTTPRequestHandler):
                     cur.execute("""
                         SELECT city, ROUND(SUM(pnl)::numeric,2)
                         FROM live_trades WHERE is_live = TRUE AND pnl IS NOT NULL
+                          AND settled_correct IS NOT NULL
                         GROUP BY city ORDER BY 2 DESC
                     """)
                     out["city_live"] = [{"city": q[0], "pnl": float(q[1])} for q in cur.fetchall()]

@@ -189,55 +189,6 @@ body{max-width:900px;margin:0 auto;}
 .place-btn:disabled{background:var(--muted);cursor:not-allowed;}
 .place-btn.active{background:var(--rain);}
 
-/* POSITIONS TAB */
-.bal-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;}
-@media(max-width:600px){.bal-grid{grid-template-columns:1fr 1fr;}}
-.bal-card{background:var(--paper);border:0.5px solid var(--border);border-radius:6px;padding:12px 14px;}
-.bal-lbl{font-size:9px;letter-spacing:1.5px;text-transform:uppercase;color:var(--muted);margin-bottom:4px;}
-.bal-val{font-size:22px;font-style:italic;line-height:1;}
-.bal-sub{font-size:9px;color:var(--muted);margin-top:3px;}
-.pos-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}
-@media(max-width:600px){.pos-grid{grid-template-columns:1fr;}}
-.pos-card{background:var(--paper);border:0.5px solid var(--border);border-radius:8px;overflow:hidden;}
-.pos-hdr{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;border-bottom:0.5px solid var(--border);}
-.pos-strike{font-size:13px;font-weight:500;}
-.pos-badge{font-size:10px;font-weight:500;padding:2px 7px;border-radius:3px;}
-.pb-yes{background:var(--yes-lt);color:var(--yes);}
-.pb-no{background:var(--no-lt);color:var(--no);}
-.pos-body{padding:12px 14px;}
-.pos-stats{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin-bottom:10px;}
-.pos-stat{text-align:center;}
-.psl{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:2px;}
-.psv{font-size:13px;font-weight:500;}
-.c-profit{color:var(--yes);}
-.c-loss{color:var(--no);}
-.c-blue{color:var(--rain);}
-.thesis-box{background:var(--bg);border-radius:4px;padding:8px 10px;margin-bottom:8px;font-size:10px;color:var(--muted);line-height:1.5;}
-.thesis-box strong{color:var(--ink);font-weight:500;}
-.drift-row{display:flex;align-items:center;gap:8px;margin-bottom:4px;}
-.drift-lbl{font-size:9px;color:var(--muted);min-width:100px;}
-.drift-bw{flex:1;height:5px;background:var(--bg);border-radius:3px;overflow:hidden;}
-.drift-bar{height:100%;border-radius:3px;}
-.d-good{background:var(--yes);}
-.d-warn{background:#EF9F27;}
-.d-bad{background:var(--no);}
-.drift-val{font-size:9px;font-weight:500;min-width:36px;text-align:right;}
-.drift-note{font-size:9px;color:var(--muted);margin-bottom:8px;}
-.targets{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:8px;}
-.target-box{border:0.5px solid var(--border);border-radius:4px;padding:7px 10px;}
-.tgt-lbl{font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);margin-bottom:3px;}
-.tgt-val{font-size:15px;font-weight:500;}
-.tgt-profit .tgt-val{color:var(--yes);}
-.tgt-stop .tgt-val{color:var(--no);}
-.tgt-sub{font-size:9px;color:var(--muted);margin-top:2px;}
-.sig-pill{display:inline-block;font-size:10px;padding:3px 10px;border-radius:3px;margin-bottom:8px;}
-.sig-exit{background:var(--yes-lt);color:var(--yes);}
-.sig-watch{background:var(--warn-lt);color:var(--warn);}
-.pos-btns{display:flex;gap:6px;}
-.pos-btn{flex:1;padding:7px;font-size:9px;letter-spacing:1px;cursor:pointer;border-radius:3px;border:0.5px solid var(--border);background:var(--bg);color:var(--ink);font-family:inherit;}
-.pos-btn-yes{border-color:var(--yes);color:var(--yes);background:var(--yes-lt);}
-.pos-btn-no{border-color:var(--no);color:var(--no);background:var(--no-lt);}
-
 /* AUTO-TRADER TAB */
 .at-stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;}
 .at-stat{background:var(--bg);border-radius:6px;padding:10px 12px;}
@@ -460,7 +411,6 @@ body{max-width:900px;margin:0 auto;}
 <div class="tabs">
   <div class="tab active" id="t-scan" onclick="sw('scan')">Scanner</div>
   <div class="tab" id="t-dash" onclick="sw('dash')">Rainfall Tracker</div>
-  <div class="tab" id="t-pos" onclick="sw('pos')">Positions</div>
   <div class="tab" id="t-live" onclick="sw('live')">Live</div>
   <div class="tab" id="t-analysis" onclick="sw('analysis')">Performance</div>
 </div>
@@ -608,15 +558,6 @@ body{max-width:900px;margin:0 auto;}
     <div class="footer">
       NWS CLI daily report (settlement) · Open-Meteo GFS/ECMWF best_match (hourly + 10-day) · IEM ASOS gap fill · Kalshi prediction markets<br>
       RAINM Feb 4 2026 · Trace = 0.00" · First complete DCR governs settlement
-    </div>
-  </div>
-</div>
-
-<!-- POSITIONS -->
-<div id="p-pos" style="display:none">
-  <div class="main">
-    <div id="portfolio-wrap">
-      <div class="scan-loading">Loading portfolio...</div>
     </div>
   </div>
 </div>
@@ -847,7 +788,6 @@ body{max-width:900px;margin:0 auto;}
       <div class="rf-hdr"><div class="rf-hdr-lbl">PERFORMANCE — GAP RULE</div><div id="tl-tot" style="font-size:13px;font-weight:500;"></div></div>
       <div style="padding:12px 14px;">
         <div id="tl-kpi" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;font-size:11px;color:var(--muted);">No settled gap trades yet.</div>
-        <div id="tl-tiers" style="font-size:11px;color:var(--muted);margin-bottom:12px;"></div>
         <div id="tl-chart" style="font-size:11px;color:var(--muted);"></div>
       </div>
     </div>
@@ -1254,7 +1194,7 @@ function toggleTheme(){
   });
 })();
 function sw(t){
-  ['scan','dash','pos','live','analysis'].forEach(x=>{
+  ['scan','dash','live','analysis'].forEach(x=>{
     const p=document.getElementById('p-'+x)||document.getElementById('s-'+x);
     if(p)p.style.display=x===t?'block':'none';
     const tb=document.getElementById('t-'+x);
@@ -1263,7 +1203,6 @@ function sw(t){
   if(t==='scan'&&!scanCache&&currentScanMode==='rain')loadScanner();
   if(t==='scan'&&!tempScanCache&&currentScanMode==='temp')loadTempScanner();
   if(t==='scan'&&currentScanMode==='temp')loadTempStatus();
-  if(t==='pos')loadPortfolio();
   if(t==='live')loadLive();
   if(t==='analysis')loadReports();
 }
@@ -1367,11 +1306,6 @@ async function loadLive(){
       tbar.style.width=tpct+'%';
       tbar.style.background=tpct>=90?'var(--no)':tpct>=60?'var(--warn)':'var(--yes)';
       lvScoreboard('tl-kpi','tl-tot',T);
-      const tt=document.getElementById('tl-tiers');
-      tt.innerHTML=(T.tiers&&T.tiers.length)?T.tiers.map(t=>
-        '<span style="margin-right:14px;">'+(t.tier||'?').replace('GAP-0','gap +0\u00B0F').replace('GAP-1','gap +1\u00B0F').replace('TAIL-','tail ')+': '+
-        (t.ev_per_dollar!=null?((t.ev_per_dollar>=0?'+':'')+t.ev_per_dollar.toFixed(2)+'/$'):'—')+
-        ' · '+t.wins+'W/'+(t.n-t.wins)+'L</span>').join(''):'';
       if(document.getElementById('tl-cfg-pos')!==document.activeElement)document.getElementById('tl-cfg-pos').value=T.position_dollars??'';
       if(document.getElementById('tl-cfg-floor')!==document.activeElement)document.getElementById('tl-cfg-floor').value=T.ev_floor??'';
       if(document.getElementById('tl-cfg-cap')!==document.activeElement)document.getElementById('tl-cfg-cap').value=T.cap??'';
@@ -1484,11 +1418,14 @@ function renderPnlCombo(series,elId,totId){
       '<text x="'+(PL-6)+'" y="'+(Y(v)+3.5).toFixed(1)+'" text-anchor="end" font-size="9" fill="var(--muted)">$'+v.toFixed(0)+'</text>';
   });
   s+='<text x="'+(PL-6)+'" y="'+(zero+3.5).toFixed(1)+'" text-anchor="end" font-size="9" fill="var(--muted)">$0</text>';
-  // daily bars + W/L labels
+  // daily bars + labels — drop W/L detail, then thin labels, when slots get narrow
+  const full=slot>=52, none=slot<26;
+  const lstep=none?Math.max(1,Math.ceil(30/slot)):1;
   pts.forEach((p,i)=>{
     const x=Xc(i)-bw/2, y=p.day>=0?Y(p.day):zero, h=Math.abs(zero-Y(p.day));
     if(Math.abs(p.day)>0.005)s+='<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw+'" height="'+Math.max(1,h).toFixed(1)+'" rx="2" fill="'+(p.day>=0?'var(--yes)':'var(--no)')+'" opacity="0.75"/>';
-    const lbl=(p.day>=0?'+':'-')+'$'+Math.abs(p.day).toFixed(0)+' '+p.w+'W/'+p.l+'L';
+    if((n-1-i)%lstep!==0)return;
+    const lbl=(p.day>=0?'+':'-')+'$'+Math.abs(p.day).toFixed(0)+(full?' '+p.w+'W/'+p.l+'L':'');
     const ly=p.day>=0?Y(p.day)-5:zero-5;
     s+='<text x="'+Xc(i).toFixed(1)+'" y="'+ly.toFixed(1)+'" text-anchor="middle" font-size="8.5" fill="var(--muted)">'+lbl+'</text>';
   });
@@ -1499,7 +1436,7 @@ function renderPnlCombo(series,elId,totId){
   // x labels (thin if crowded)
   const step=Math.ceil(n/8);
   pts.forEach((p,i)=>{
-    if(i%step===0||i===n-1)s+='<text x="'+Xc(i).toFixed(1)+'" y="'+(H-8)+'" text-anchor="middle" font-size="9" fill="var(--muted)">'+p.date.slice(5)+'</text>';
+    if(i===n-1||(i%step===0&&n-1-i>=step))s+='<text x="'+Xc(i).toFixed(1)+'" y="'+(H-8)+'" text-anchor="middle" font-size="9" fill="var(--muted)">'+p.date.slice(5)+'</text>';
   });
   s+='</svg>';
   el.innerHTML=s+'<div style="font-size:9px;color:var(--muted);margin-top:4px;">bars = day PnL with wins/losses · line = cumulative</div>';
@@ -2096,211 +2033,6 @@ function tempDrillCity(city_key){
     }).catch(e=>console.error('Drill failed',e));
 }
 
-// ── PORTFOLIO ─────────────────────────────────────────────────────────────────
-let pnlTimeframe=90; // days
-
-async function loadPortfolio(){
-  const wrap=document.getElementById('portfolio-wrap');
-  if(!wrap)return;
-  wrap.innerHTML='<div class="scan-loading">Loading portfolio...</div>';
-  try{
-    // Fetch both in parallel but don't let pnl failure kill portfolio display
-    const[portRes,pnlRes]=await Promise.all([
-      fetch(SERVER+'/portfolio'),
-      fetch(SERVER+'/pnl?limit=200').catch(()=>null)
-    ]);
-    if(!portRes.ok){
-      const err=await portRes.json().catch(()=>({error:portRes.statusText}));
-      wrap.innerHTML=`<div class="err-msg">Portfolio error: ${err.error||portRes.statusText}</div>`;
-      return;
-    }
-    const port=await portRes.json();
-    if(!port.ok){
-      wrap.innerHTML=`<div class="err-msg">Portfolio error: ${port.error}</div>`;
-      return;
-    }
-    // PnL is optional — show portfolio even if it fails
-    let pnl={ok:false,trades:[],total_pnl:0};
-    if(pnlRes&&pnlRes.ok){
-      try{ pnl=await pnlRes.json(); }catch(e){}
-    }
-    renderPortfolio(port,pnl);
-  }catch(e){
-    wrap.innerHTML=`<div class="err-msg">Could not load portfolio: ${e.message}</div>`;
-  }
-}
-
-function renderPortfolio(port,pnl){
-  const wrap=document.getElementById('portfolio-wrap');
-  if(!wrap)return;
-
-  const TEMP_START = '2026-04-16';
-  const cash=port.balance||0;
-  const portVal=port.portfolio_value||0;
-  const total=cash+portVal;
-  const allTrades=pnl.trades||[];
-  // Filter to temp markets from cutoff only — exclude old rain bets
-  const trades=allTrades.filter(t=>/KXHIGH|KXLOWT|KXLOWS/.test(t.ticker||'') && (t.date||'')>=TEMP_START);
-  const totalPnl=trades.reduce((s,t)=>s+(t.pnl||0),0);
-  const positions=port.positions||[];
-
-  // Balance strip
-  const balHtml=`<div class="bal-grid" style="margin-bottom:12px">
-    <div class="bal-card"><div class="bal-lbl">Total value</div><div class="bal-val" style="font-family:'Instrument Serif',serif;font-style:italic">$${total.toFixed(2)}</div></div>
-    <div class="bal-card"><div class="bal-lbl">Cash</div><div class="bal-val">$${cash.toFixed(2)}</div></div>
-    <div class="bal-card"><div class="bal-lbl">Positions</div><div class="bal-val">$${portVal.toFixed(2)}</div><div class="bal-sub">${positions.length} open</div></div>
-    <div class="bal-card"><div class="bal-lbl">Total P&L</div><div class="bal-val" style="color:${totalPnl>=0?'var(--yes)':'var(--no)'}">${totalPnl>=0?'+':''}$${totalPnl.toFixed(2)}</div></div>
-  </div>`;
-
-  // P&L chart
-  const pnlHtml=`<div class="chart-card" style="margin-bottom:12px">
-    <div class="chart-hdr">
-      <div class="chart-title">Cumulative P&L</div>
-      <div style="display:flex;gap:4px">
-        ${[7,30,90,'All'].map(d=>`<button onclick="setPnlTimeframe(${d==='All'?9999:d})" id="pnl-tf-${d}" style="font-size:10px;padding:3px 8px;border-radius:3px;border:0.5px solid var(--border);background:${d===90?'var(--ink)':'var(--bg)'};color:${d===90?'var(--paper)':'var(--muted)'};cursor:pointer;font-family:inherit">${d}${d!=='All'?'d':''}</button>`).join('')}
-      </div>
-    </div>
-    <svg id="pnl-svg" viewBox="0 0 860 160" style="height:160px;display:block;width:100%"></svg>
-    <div class="chart-foot" id="pnl-foot"></div>
-  </div>`;
-
-  // Open positions — rain and temp only, filter sports
-  const weatherPositions = positions.filter(p => {
-    const t = (p.ticker||'').toUpperCase();
-    const title = (p.market_title||'').toLowerCase();
-    const isRain = t.includes('RAIN') || title.includes('rain') || title.includes('precipitation');
-    const isTemp = t.includes('HIGH') || t.includes('LOWT') || t.includes('KXHIGH') || t.includes('KXLOWT')
-                || title.includes('temperature') || title.includes('highest temp') || title.includes('lowest temp');
-    return isRain || isTemp;
-  });
-  const hiddenCount = positions.length - weatherPositions.length;
-
-  const posHtml = weatherPositions.length ? `
-    <div class="section-lbl" style="margin-bottom:8px">Open positions — weather markets${hiddenCount>0?` <span style="font-size:10px;color:var(--muted);font-weight:400">(${hiddenCount} non-weather hidden)</span>`:''}</div>
-    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:12px">
-      ${weatherPositions.map(p=>{
-        const t=(p.ticker||'').toUpperCase();
-        // Parse ticker: KXHIGHMIA-26APR12-B79.5 or KXHIGHTLV-26APR13-T66
-        const tkParts = t.match(/KX(?:HIGH|LOWT|LOWS)([A-Z]+)-(\d{2})([A-Z]{3})(\d{2})-(B|T)([\d.]+)/);
-        const cityCode  = tkParts ? tkParts[1] : '';
-        const dateStr   = tkParts ? tkParts[3]+' '+tkParts[4] : '';
-        const bracketType = tkParts ? tkParts[5] : '';
-        const bracketVal  = tkParts ? tkParts[6] : '';
-        const isLow = t.includes('LOWT') || t.includes('LOWS');
-        const mktType = isLow ? 'Low' : 'High';
-        const bracketLabel = bracketType==='T'
-          ? (t.includes('LOWT')||t.includes('LOWS') ? '>'+bracketVal+'°F' : '<'+bracketVal+'°F')
-          : (()=>{ const mid=parseFloat(bracketVal); const lo=mid-0.5; const hi=mid+0.5; return lo+'–'+hi+'°F'; })();
-        // City name lookup
-        const cityNames = {NY:'New York',MIA:'Miami',PHX:'Phoenix',CHI:'Chicago',LAX:'Los Angeles',
-          AUS:'Austin',SFO:'San Francisco',ATL:'Atlanta',DCA:'Washington DC',DEN:'Denver',
-          HOU:'Houston',MSP:'Minneapolis',BOS:'Boston',LV:'Las Vegas',LAS:'Las Vegas',
-          PHL:'Philadelphia',OKC:'Oklahoma City',SEA:'Seattle',MIN:'Minneapolis',TLV:'Las Vegas',
-          TMIN:'Minneapolis',TSFO:'San Francisco',TSEA:'Seattle',THOU:'Houston',TPHX:'Phoenix'};
-        const cityName = cityNames[cityCode] || cityCode;
-        const contracts = Math.abs(p.yes_contracts);
-        const avgC = (p.avg_yes_price_c||0).toFixed(1);
-        const cost = (p.total_cost||0).toFixed(2);
-        const payout = (p.payout_if_right||0).toFixed(2);
-        // Unrealized: market_value - total_cost (Kalshi updates market_value live)
-        const mktVal = p.market_value || p.total_cost || 0;
-        const upnl = mktVal - (p.total_cost||0);
-        const upnlStr = (upnl>=0?'+':'')+'$'+Math.abs(upnl).toFixed(2);
-        const upnlColor = upnl>0.01?'var(--yes)':upnl<-0.01?'var(--no)':'var(--muted)';
-        // Current market price per contract
-        const curC = contracts > 0 ? ((mktVal/contracts)*100).toFixed(1) : avgC;
-        return `<div class="opp probabilistic" style="cursor:default">
-          <div class="opp-inner">
-            <div class="opp-left">
-              <div style="font-size:11px;color:var(--muted);letter-spacing:0.8px;text-transform:uppercase;margin-bottom:2px">${cityName} · ${mktType} · ${dateStr}</div>
-              <div class="opp-decision" style="font-size:13px">Buy ${bracketLabel} YES</div>
-              <div class="opp-context" style="margin-top:3px">${contracts} contracts · entry ${avgC}¢ · now ${curC}¢ · cost $${cost} · payout $${payout}</div>
-            </div>
-            <div class="opp-right">
-              <div class="opp-net-gap" style="font-size:18px;color:${upnlColor}">${upnlStr}</div>
-              <div class="opp-meta-right" style="font-size:9px;color:var(--muted)">unrealized</div>
-            </div>
-          </div>
-        </div>`;
-      }).join('')}
-    </div>` : `<div class="scan-empty" style="padding:16px;line-height:1.8;">
-      No open weather positions.${hiddenCount>0?`<br><span style="font-size:10px;color:var(--muted)">${hiddenCount} non-weather position${hiddenCount>1?'s':''} hidden (sports, crypto, etc.) — open Kalshi to view.</span>`:''}
-    </div>`;
-
-  wrap.innerHTML=balHtml+pnlHtml+posHtml;
-  drawPnlChart(trades, pnlTimeframe);
-}
-
-function setPnlTimeframe(days){
-  pnlTimeframe=days;
-  [7,30,90,'All'].forEach(d=>{
-    const el=document.getElementById('pnl-tf-'+d);
-    if(el){
-      const active=(d==='All'&&days===9999)||(d!=='All'&&d===days);
-      el.style.background=active?'var(--ink)':'var(--bg)';
-      el.style.color=active?'var(--paper)':'var(--muted)';
-    }
-  });
-  const pnlData=window._pnlTrades||[];
-  drawPnlChart(pnlData,days);
-}
-
-function drawPnlChart(trades,days){
-  window._pnlTrades=trades;
-  const svg=document.getElementById('pnl-svg');
-  const foot=document.getElementById('pnl-foot');
-  if(!svg)return;
-
-  // Filter by timeframe
-  const cutoff=days>=9999?null:new Date(Date.now()-days*86400000).toISOString().slice(0,10);
-  const filtered=cutoff?trades.filter(t=>t.date>=cutoff):trades;
-
-  if(!filtered.length){
-    svg.innerHTML=`<text x="430" y="80" text-anchor="middle" font-size="12" fill="var(--muted)">No trades in this timeframe</text>`;
-    if(foot)foot.innerHTML='';
-    return;
-  }
-
-  const W=860,H=160,PL=50,PR=20,PT=16,PB=24;
-  const CW=W-PL-PR,CH=H-PT-PB;
-  const vals=filtered.map(t=>t.cumulative);
-  const minV=Math.min(0,...vals),maxV=Math.max(0,...vals);
-  const range=maxV-minV||1;
-  const xS=i=>PL+(i/(filtered.length-1||1))*CW;
-  const yS=v=>PT+(1-(v-minV)/range)*CH;
-  const zero=yS(0);
-
-  let html='';
-  // Zero line
-  html+=`<line x1="${PL}" y1="${zero}" x2="${W-PR}" y2="${zero}" stroke="var(--border)" stroke-width="1"/>`;
-  // Y labels
-  [minV,0,maxV].forEach(v=>{
-    if(Math.abs(v)<0.01)return;
-    html+=`<text x="${PL-4}" y="${yS(v)+4}" text-anchor="end" font-size="10" fill="var(--muted)">${v>=0?'+':''}$${Math.abs(v).toFixed(0)}</text>`;
-  });
-
-  // Area fill
-  const areaTop=filtered.map((t,i)=>`${xS(i)},${yS(t.cumulative)}`).join(' ');
-  const areaBot=`${xS(filtered.length-1)},${zero} ${xS(0)},${zero}`;
-  const lastVal=filtered[filtered.length-1]?.cumulative||0;
-  html+=`<polygon points="${areaTop} ${areaBot}" fill="${lastVal>=0?'rgba(29,158,117,.12)':'rgba(163,45,45,.10)'}"/>`;
-
-  // Line
-  const path=filtered.map((t,i)=>`${i===0?'M':'L'}${xS(i)},${yS(t.cumulative)}`).join(' ');
-  html+=`<path d="${path}" fill="none" stroke="${lastVal>=0?'var(--yes)':'var(--no)'}" stroke-width="2"/>`;
-
-  // Last point dot
-  const li=filtered.length-1;
-  html+=`<circle cx="${xS(li)}" cy="${yS(lastVal)}" r="4" fill="${lastVal>=0?'var(--yes)':'var(--no)'}"/>`;
-
-  // X labels — first and last date
-  html+=`<text x="${PL}" y="${H-4}" font-size="10" fill="var(--muted)">${filtered[0]?.date||''}</text>`;
-  html+=`<text x="${W-PR}" y="${H-4}" text-anchor="end" font-size="10" fill="var(--muted)">${filtered[li]?.date||''}</text>`;
-
-  svg.innerHTML=html;
-  if(foot)foot.innerHTML=`<span>${filtered.length} settled trades</span><span>P&L: <b style="color:${lastVal>=0?'var(--yes)':'var(--no)'}">${lastVal>=0?'+':''}$${lastVal.toFixed(2)}</b></span><span>${days>=9999?'All time':days+'d'}</span>`;
-}
-
 function togRule(tog){
   const on=tog.classList.contains('on');
   tog.classList.toggle('on',!on);
@@ -2829,12 +2561,12 @@ loadData();
   <div style="max-width:900px;margin:0 auto;padding:0 16px">
 
     <div class="rf-card">
-      <div class="rf-hdr"><div class="rf-hdr-lbl">LIVE SCOREBOARD</div><div class="rf-hdr-val" style="font-size:10px;color:var(--muted);">all time</div></div>
+      <div class="rf-hdr"><div class="rf-hdr-lbl">LIVE SCOREBOARD</div><div class="rf-hdr-val" style="font-size:10px;color:var(--muted);">all time · settled trades · both strategies</div></div>
       <div id="rp-score" style="padding:12px 14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;font-size:11px;color:var(--muted);">Loading…</div>
     </div>
 
     <div class="rf-card">
-      <div class="rf-hdr"><div class="rf-hdr-lbl">DAILY PNL + CUMULATIVE</div><div class="rf-hdr-val" style="font-size:10px;color:var(--muted);">wins/losses per day</div></div>
+      <div class="rf-hdr"><div class="rf-hdr-lbl">DAILY PNL + CUMULATIVE</div><div class="rf-hdr-val" style="font-size:10px;color:var(--muted);">settled trades · forecast + gap combined</div></div>
       <div id="rp-daily" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
     </div>
 
