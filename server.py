@@ -3441,6 +3441,7 @@ def run_auto_trader_cycle(force=False):
 # and cost are remembered here so dedup and the daily cap still see them.
 _GAP_RUNTIME_FILLED = set()   # tickers live-filled this process
 _GAP_RUNTIME_SPEND  = {"date": None, "dollars": 0.0}
+_GAP_FETCH_ERR_LOGGED = {}    # city_key -> last epoch a market-fetch failure was logged
 
 
 def _gap_spend_today(target_date):
@@ -3606,6 +3607,7 @@ def run_gap_trader_cycle():
     cannot move the outcome.
     """
     import pytz
+    import time as _time
     from datetime import datetime as _dt
 
     cfg = dict(_AT_CONFIG)
@@ -3642,19 +3644,26 @@ def run_gap_trader_cycle():
                                f"({ob_age} min)", city=city_key)
                 continue
 
-            result = scan_temp_city(city_key, "d0")
-            if not result.get("ok"):
+            # Markets straight from Kalshi — the gap rule needs no model
+            # forecast, and going through scan_temp_city made entries depend
+            # on Open-Meteo (whose daily quota dies ~11:00 UTC, silently
+            # blanking the whole afternoon window on 2026-09-01/02).
+            target = local_now.strftime("%Y-%m-%d")
+            mk = fetch_temp_kalshi_markets(city_key, "high")
+            if not mk.get("ok"):
+                _last = _GAP_FETCH_ERR_LOGGED.get(city_key, 0)
+                if _time.time() - _last > 3600:
+                    _GAP_FETCH_ERR_LOGGED[city_key] = _time.time()
+                    at_log("SKIP", f"GAP {city_key}: market fetch failed — "
+                                   f"{mk.get('error', 'unknown')}", city=city_key)
                 continue
-            fc = result.get("forecast", {})
-            target = fc.get("target_date", "")
-            if target != local_now.strftime("%Y-%m-%d"):
-                continue  # belt & braces: d0 must be today, city-local
 
-            for m in result.get("high_markets", []):
+            for m in mk.get("markets", []):
                 ticker = m.get("ticker") or ""
-                if not ticker or ticker.startswith("COMBO:"):
+                if not ticker:
                     continue
-                if m.get("ticker_date") and m.get("ticker_date") != target:
+                # The series fetch spans every open date — trade today only.
+                if m.get("ticker_date") != target:
                     continue
                 lo = m.get("lo_temp")
                 if lo is None:
