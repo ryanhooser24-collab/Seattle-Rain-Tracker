@@ -6670,13 +6670,14 @@ class Handler(BaseHTTPRequestHandler):
                         cur.execute(f"""
                             SELECT ts, ticker, city, requested_count, filled_count,
                                    avg_fill_price_c, cost, fill_status, is_live,
-                                   z_score, grade, settled_correct, pnl
+                                   z_score, grade, settled_correct, pnl, target_date
                             FROM live_trades
                             WHERE {frag}
                             ORDER BY ts DESC LIMIT 25
                         """)
                         blk["recent"] = [
-                            {"ts": str(q[0]), "ticker": q[1], "city": q[2],
+                            {"ts": str(q[0]), "target_date": q[13],
+                             "ticker": q[1], "city": q[2],
                              "requested": q[3], "filled": q[4],
                              "price_c": float(q[5]) if q[5] is not None else None,
                              "cost": float(q[6]) if q[6] is not None else None,

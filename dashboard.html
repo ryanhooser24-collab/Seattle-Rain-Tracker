@@ -1236,11 +1236,14 @@ function lvScoreboard(elId,totId,blk){
 function lvTradeTable(rows,withZ){
   if(!rows||!rows.length)return null;
   return '<table style="width:100%;border-collapse:collapse;font-size:11px;color:var(--ink);">'+
-    '<tr style="color:var(--muted);text-align:left;"><th style="padding:3px 6px;">WHEN</th><th>TICKER</th><th>CT</th><th>PRICE</th><th>COST</th>'+(withZ?'<th>GAP</th><th>TIER</th>':'')+'<th></th><th>RESULT</th></tr>'+
+    '<tr style="color:var(--muted);text-align:left;"><th style="padding:3px 6px;">DAY</th><th>TICKER</th><th>CT</th><th>PRICE</th><th>COST</th>'+(withZ?'<th>GAP</th><th>TIER</th>':'')+'<th></th><th>RESULT</th></tr>'+
     rows.map(f=>{
       const res=f.settled_correct==null?'<span style="color:var(--muted);">open</span>'
         :(f.settled_correct?'<span style="color:var(--yes);">W':'<span style="color:var(--no);">L')+(f.pnl!=null?' '+(f.pnl>=0?'+$':'-$')+Math.abs(f.pnl).toFixed(2):'')+'</span>';
-      return '<tr><td style="padding:3px 6px;white-space:nowrap;">'+String(f.ts).slice(5,16)+'</td><td>'+f.ticker+'</td>'+
+      // DAY = market target date, the same key every PnL chart buckets by;
+      // exact fill time (UTC) on hover
+      const day=f.target_date?String(f.target_date).slice(5):String(f.ts).slice(5,10);
+      return '<tr><td style="padding:3px 6px;white-space:nowrap;" data-tip="filled '+String(f.ts).slice(0,16)+' UTC">'+day+'</td><td>'+f.ticker+'</td>'+
       '<td>'+(f.filled??0)+'/'+(f.requested??0)+'</td><td>'+(f.price_c!=null?f.price_c.toFixed(0)+'¢':'—')+'</td>'+
       '<td>'+lvFmt$(f.cost||0)+'</td>'+
       (withZ?'<td>'+(f.z!=null?f.z.toFixed(1):'—')+'</td><td>'+(f.grade||'—').replace('GAP-','+').replace('TAIL-','')+'</td>':'')+
