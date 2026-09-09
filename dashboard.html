@@ -572,7 +572,6 @@ body{max-width:900px;margin:0 auto;}
     <!-- Strategy sub-tabs -->
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
       <div id="lvt-forecast" onclick="lvSw('forecast')" class="tab active" style="font-size:11px;padding:7px 14px;">FORECAST BASED</div>
-      <div id="lvt-tail" onclick="lvSw('tail')" class="tab" style="font-size:11px;padding:7px 14px;">NEXT DEGREE UP</div>
       <div style="flex:1;"></div>
       <button onclick="lvKill()" style="padding:7px 14px;font-family:inherit;font-size:10px;letter-spacing:1px;background:var(--no-lt);color:var(--no);border:1px solid var(--no-border);border-radius:4px;cursor:pointer;">KILL — STOP ALL</button>
     </div>
@@ -744,89 +743,6 @@ body{max-width:900px;margin:0 auto;}
 
     </div><!-- /lvs-forecast -->
 
-    <!-- ══ NEXT DEGREE UP STRATEGY ══ -->
-    <div id="lvs-tail" style="display:none">
-
-    <!-- Status -->
-    <div class="rf-card">
-      <div class="rf-hdr">
-        <div class="rf-hdr-lbl">NEXT DEGREE UP</div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <div id="tl-status" class="pill">—</div>
-          <div style="display:flex;border:1px solid var(--border);border-radius:4px;overflow:hidden;">
-            <button id="tl-m-off" onclick="lvTailSet('off')" style="padding:5px 12px;font-family:inherit;font-size:10px;letter-spacing:1px;border:none;cursor:pointer;background:var(--bg);color:var(--muted);">OFF</button>
-            <button id="tl-m-sim" onclick="lvTailSet('sim')" style="padding:5px 12px;font-family:inherit;font-size:10px;letter-spacing:1px;border:none;border-left:1px solid var(--border);cursor:pointer;background:var(--bg);color:var(--muted);">SIM</button>
-            <button id="tl-m-live" onclick="lvTailSet('live')" style="padding:5px 12px;font-family:inherit;font-size:10px;letter-spacing:1px;border:none;border-left:1px solid var(--border);cursor:pointer;background:var(--bg);color:var(--muted);">LIVE</button>
-          </div>
-        </div>
-      </div>
-      <div style="padding:12px 14px;">
-        <div style="font-size:11px;color:var(--muted);line-height:1.5;margin-bottom:12px;">
-          In the afternoon, buy cheap brackets sitting just above today's current high &mdash;
-          because temperatures almost always climb another degree or two, and
-          <b style="color:var(--ink);">the market forgets that</b>. Brackets 0&ndash;1&deg;F above
-          the running high win <b style="color:var(--ink);">28&ndash;32%</b> but trade at
-          ~7&cent;. Rules: 1&ndash;7pm local, never pay more than 20&cent;, all 17 cities, hold
-          to settlement. Backtest vs official NWS records:
-          <b style="color:var(--ink);">+$3.42 per $1</b>, positive in every city, both data
-          halves agree. Replaces the tail-lag sleeve (same trade, ~10&times; the signals).
-        </div>
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;">
-          <div><div style="font-size:10px;color:var(--muted);">SPENT TODAY</div><div id="tl-spent" style="font-size:16px;font-weight:500;">—</div></div>
-          <div><div style="font-size:10px;color:var(--muted);">DAILY CAP</div><div id="tl-cap" style="font-size:16px;font-weight:500;">—</div></div>
-          <div><div style="font-size:10px;color:var(--muted);">OPEN POSITIONS</div><div id="tl-openct" style="font-size:16px;font-weight:500;">—</div></div>
-          <div><div style="font-size:10px;color:var(--muted);">FILL RATE</div><div id="tl-fillrate" style="font-size:16px;font-weight:500;">—</div></div>
-        </div>
-        <div style="height:6px;background:var(--border);border-radius:3px;overflow:hidden;">
-          <div id="tl-capbar" style="height:100%;width:0%;background:var(--yes);"></div>
-        </div>
-      </div>
-    </div>
-
-    <!-- Performance over time -->
-    <div class="rf-card">
-      <div class="rf-hdr"><div class="rf-hdr-lbl">PERFORMANCE — NEXT DEGREE UP</div><div id="tl-tot" style="font-size:13px;font-weight:500;"></div></div>
-      <div style="padding:12px 14px;">
-        <div id="tl-kpi" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;font-size:11px;color:var(--muted);">No settled trades yet.</div>
-        <div id="tl-chart" style="font-size:11px;color:var(--muted);"></div>
-      </div>
-    </div>
-
-    <!-- Sizing -->
-    <div class="rf-card">
-      <div class="rf-hdr"><div class="rf-hdr-lbl">SIZING</div>
-        <button onclick="lvTailSaveCfg()" style="padding:4px 12px;font-family:inherit;font-size:10px;letter-spacing:1px;background:var(--rain-lt);color:var(--rain);border:1px solid var(--border);border-radius:4px;cursor:pointer;">SAVE</button>
-      </div>
-      <div style="padding:12px 14px;display:flex;flex-direction:column;gap:10px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
-          <div><div style="font-size:12px;">Dollars per position</div><div style="font-size:10px;color:var(--muted);">Worst-case $ per position. THE aggression knob &mdash; each entry sweeps every ask level under the value frontier up to this many dollars.</div></div>
-          <input id="tl-cfg-pos" type="number" step="1" min="1" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
-        </div>
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
-          <div><div style="font-size:12px;">EV floor (walk depth)</div><div style="font-size:10px;color:var(--muted);">Walk the book while the marginal contract still clears this EV per dollar. 1.0 = every marginal dollar expects to double. Lower = deeper walks, more capacity, thinner marginal edge.</div></div>
-          <input id="tl-cfg-floor" type="number" step="0.1" min="0.1" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
-        </div>
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;">
-          <div><div style="font-size:12px;">Daily cap</div><div style="font-size:10px;color:var(--muted);">Most real dollars Next Degree Up may spend per day (worst-case accounting) — separate from the forecast cap.</div></div>
-          <input id="tl-cfg-cap" type="number" step="1" min="0" style="width:70px;padding:5px;font-family:inherit;font-size:12px;text-align:right;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;">
-        </div>
-        <div id="tl-cfg-msg" style="font-size:10px;color:var(--muted);"></div>
-      </div>
-    </div>
-
-    <!-- Open positions -->
-    <div class="rf-card">
-      <div class="rf-hdr"><div class="rf-hdr-lbl">OPEN POSITIONS — NEXT DEGREE UP</div></div>
-      <div id="tl-open" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
-    </div>
-
-    <!-- Recent trades -->
-    <div class="rf-card">
-      <div class="rf-hdr"><div class="rf-hdr-lbl">TRADES — NEXT DEGREE UP</div></div>
-      <div id="tl-recent" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
-    </div>
-
-    </div><!-- /lvs-tail -->
 
   </div>
 </div>
@@ -1213,9 +1129,7 @@ let lvStratTab='forecast';
 function lvSw(t){
   lvStratTab=t;
   document.getElementById('lvs-forecast').style.display=t==='forecast'?'':'none';
-  document.getElementById('lvs-tail').style.display=t==='tail'?'':'none';
   document.getElementById('lvt-forecast').className='tab'+(t==='forecast'?' active':'');
-  document.getElementById('lvt-tail').className='tab'+(t==='tail'?' active':'');
 }
 function lvKpi(l,v,c){return '<div style="background:var(--bg);border-radius:6px;padding:10px 12px;"><div style="font-size:9px;letter-spacing:1px;color:var(--muted);">'+l+'</div><div style="font-size:15px;margin-top:4px;color:'+(c||'var(--ink)')+';white-space:nowrap;">'+v+'</div></div>';}
 function lvScoreboard(elId,totId,blk){
@@ -1288,37 +1202,6 @@ async function loadLive(){
         S.forecast.open.map(o=>'<tr><td style="padding:3px 6px;">'+o.ticker+'</td><td>'+o.count+'</td><td>'+(o.price_c!=null?o.price_c+'¢':'—')+'</td><td>'+(o.target_date||'—')+'</td></tr>').join('')+'</table>'
         :'None.';
       document.getElementById('lv-recent').innerHTML=lvTradeTable(S.forecast.recent,false)||'No trades yet.';
-      // ── gap tab ──
-      const T=S.gap;
-      const mode=!T.enabled?'off':(T.live?'live':'sim');
-      const st=document.getElementById('tl-status');
-      st.textContent=mode==='off'?'OFF':mode==='sim'?'SIMULATING':'LIVE — ARMED';
-      st.className='pill '+(mode==='live'?'pill-ok':mode==='sim'?'pill-warn':'pill-err');
-      [['off','tl-m-off'],['sim','tl-m-sim'],['live','tl-m-live']].forEach(([m,id])=>{
-        const b=document.getElementById(id);
-        const on=m===mode;
-        b.style.background=on?(m==='live'?'var(--yes-lt)':m==='sim'?'var(--rain-lt)':'var(--no-lt)'):'var(--bg)';
-        b.style.color=on?(m==='live'?'var(--yes)':m==='sim'?'var(--rain)':'var(--no)'):'var(--muted)';
-      });
-      document.getElementById('tl-spent').textContent=lvFmt$(T.spend_today||0);
-      document.getElementById('tl-cap').textContent=lvFmt$(T.cap||0);
-      document.getElementById('tl-openct').textContent=(T.open||[]).length;
-      document.getElementById('tl-fillrate').textContent=T.execution&&T.execution.fill_rate!=null?(T.execution.fill_rate*100).toFixed(0)+'%':'—';
-      const tpct=T.cap?Math.min(100,100*(T.spend_today||0)/T.cap):0;
-      const tbar=document.getElementById('tl-capbar');
-      tbar.style.width=tpct+'%';
-      tbar.style.background=tpct>=90?'var(--no)':tpct>=60?'var(--warn)':'var(--yes)';
-      lvScoreboard('tl-kpi','tl-tot',T);
-      if(document.getElementById('tl-cfg-pos')!==document.activeElement)document.getElementById('tl-cfg-pos').value=T.position_dollars??'';
-      if(document.getElementById('tl-cfg-floor')!==document.activeElement)document.getElementById('tl-cfg-floor').value=T.ev_floor??'';
-      if(document.getElementById('tl-cfg-cap')!==document.activeElement)document.getElementById('tl-cfg-cap').value=T.cap??'';
-      const tOp=document.getElementById('tl-open');
-      tOp.innerHTML=(T.open&&T.open.length)?
-        '<table style="width:100%;border-collapse:collapse;font-size:11px;color:var(--ink);">'+
-        '<tr style="color:var(--muted);text-align:left;"><th style="padding:3px 6px;">TICKER</th><th>CT</th><th>PRICE</th><th>GAP</th><th>TIER</th><th>TARGET</th></tr>'+
-        T.open.map(o=>'<tr><td style="padding:3px 6px;">'+o.ticker+'</td><td>'+o.count+'</td><td>'+(o.price_c!=null?o.price_c+'¢':'—')+'</td><td>'+(o.z!=null?o.z.toFixed(1):'—')+'</td><td>'+(o.grade||'—').replace('GAP-','+').replace('TAIL-','')+'</td><td>'+(o.target_date||'—')+'</td></tr>').join('')+'</table>'
-        :'None.';
-      document.getElementById('tl-recent').innerHTML=lvTradeTable(T.recent,true)||'No trades yet — entries appear 1–7pm local per city.';
     }
     // settings
     document.getElementById('lv-cfg-cap').value=cfg.daily_cap_dollars??'';
@@ -1344,7 +1227,6 @@ async function loadLive(){
       document.getElementById('lv-fc-kpi').textContent=(stratR&&stratR.error)?('Results unavailable: '+stratR.error):'Results unavailable.';
       document.getElementById('lv-open').textContent='—';
       document.getElementById('lv-recent').textContent='—';
-      document.getElementById('tl-kpi').textContent='Results unavailable.';
     }
     // slippage by city
     const sl=document.getElementById('lv-slip');
@@ -1374,27 +1256,6 @@ async function lvForecastToggle(){
     await fetch(SERVER+'/auto-trader/go-live');
   }
   loadLive();
-}
-async function lvTailSet(mode){
-  if(mode==='live'&&!confirm('Set Next Degree Up LIVE? Real money orders will be placed (up to its daily cap).'))return;
-  const body=mode==='off'?{gap_enabled:false,gap_live:false}
-            :mode==='sim'?{gap_enabled:true,gap_live:false}
-            :{gap_enabled:true,gap_live:true};
-  await fetch(SERVER+'/auto-trader/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
-  loadLive();
-}
-async function lvTailSaveCfg(){
-  const msg=document.getElementById('tl-cfg-msg');
-  try{
-    const body={
-      gap_position_dollars:parseFloat(document.getElementById('tl-cfg-pos').value)||10,
-      gap_ev_floor:parseFloat(document.getElementById('tl-cfg-floor').value)||1.0,
-      gap_daily_cap_dollars:parseFloat(document.getElementById('tl-cfg-cap').value)||100
-    };
-    const r=await fetch(SERVER+'/auto-trader/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(x=>x.json());
-    msg.textContent=r.ok?'Saved.':'Save failed: '+(r.error||'?');
-    setTimeout(()=>{msg.textContent='';},4000);
-  }catch(e){msg.textContent='Save failed: '+e.message;}
 }
 function renderPnlCombo(series,elId,totId){
   const el=document.getElementById(elId);
