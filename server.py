@@ -609,6 +609,26 @@ def fetch_temp_forecast(city_key, horizon="d1"):
         return {"ok": False, "error": str(e)}
 
 
+_SNAPSHOT_SIDE_READY = False
+
+def _ensure_snapshot_side(conn):
+    """Add temp_snapshots.side in place (autocommit, standalone — the
+    migrate-endpoint rule guards multi-statement DDL; a single idempotent
+    ALTER at write time follows the _ensure_live_trades_table precedent)."""
+    global _SNAPSHOT_SIDE_READY
+    if _SNAPSHOT_SIDE_READY:
+        return
+    try:
+        old_ac = conn.autocommit
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE temp_snapshots ADD COLUMN IF NOT EXISTS side TEXT")
+        conn.autocommit = old_ac
+        _SNAPSHOT_SIDE_READY = True
+    except Exception as e:
+        print(f"  _ensure_snapshot_side: {e}")
+
+
 def fetch_temp_kalshi_markets(city_key, market_type="high"):
     """
     Fetch open bracket markets for a temp city from Kalshi.
@@ -666,11 +686,29 @@ def fetch_temp_kalshi_markets(city_key, market_type="high"):
             # Kalshi stores bracket bounds as numeric fields
             fs_floor = m.get("floor_strike")
             fs_cap   = m.get("cap_strike")
+            strike_type = (m.get("strike_type") or "").lower()
             if fs_floor is not None and fs_cap is not None:
                 try:
                     lo_temp = float(fs_floor)
                     hi_temp = float(fs_cap)
                     bracket_label = f"{int(lo_temp)}–{int(hi_temp)}°F"
+                except Exception:
+                    pass
+            elif fs_floor is not None and strike_type in ("greater", "greater_or_equal"):
+                # Kalshi "greater" is STRICT: T82 pays only at 83+ (the UI
+                # label says "83° or above"). Storing lo=82 settled
+                # strike-exact days as wins — the 2026-09-08 off-by-one.
+                try:
+                    lo_temp = float(fs_floor) + (1.0 if strike_type == "greater" else 0.0)
+                    hi_temp = None
+                    bracket_label = f">{int(lo_temp) - 1}°F" if strike_type == "greater" else f">={int(lo_temp)}°F"
+                except Exception:
+                    pass
+            elif fs_cap is not None and strike_type in ("less", "less_or_equal"):
+                try:
+                    hi_temp = float(fs_cap) - (1.0 if strike_type == "less" else 0.0)
+                    lo_temp = None
+                    bracket_label = f"<{int(hi_temp) + 1}°F" if strike_type == "less" else f"<={int(hi_temp)}°F"
                 except Exception:
                     pass
 
@@ -690,16 +728,24 @@ def fetch_temp_kalshi_markets(city_key, market_type="high"):
                         lo_temp = hi_temp = None
 
             if lo_temp is None and hi_temp is None:
-                above = re.search(r"(?:above|>|or above)\s*(\d+\.?\d*)", title, re.IGNORECASE)
-                below = re.search(r"(?:below|<|or below)\s*(\d+\.?\d*)", title, re.IGNORECASE)
-                if above:
-                    lo_temp = float(above.group(1))
-                    hi_temp = None
-                    bracket_label = f">{int(lo_temp)}°F"
-                elif below:
-                    lo_temp = None
-                    hi_temp = float(below.group(1))
-                    bracket_label = f"<{int(hi_temp)}°F"
+                # ">81°" / "above 81" are STRICT (pays 82+); "82° or above" is
+                # inclusive (pays 82+). Mirrored on the low side.
+                strict_above = re.search(r"(?:above|>)\s*(\d+\.?\d*)", title, re.IGNORECASE)
+                incl_above   = re.search(r"(\d+\.?\d*)\s*°?F?\s*or above", title, re.IGNORECASE)
+                strict_below = re.search(r"(?:below|<)\s*(\d+\.?\d*)", title, re.IGNORECASE)
+                incl_below   = re.search(r"(\d+\.?\d*)\s*°?F?\s*or below", title, re.IGNORECASE)
+                if incl_above:
+                    lo_temp = float(incl_above.group(1)); hi_temp = None
+                    bracket_label = f">{int(lo_temp) - 1}°F"
+                elif strict_above:
+                    lo_temp = float(strict_above.group(1)) + 1.0; hi_temp = None
+                    bracket_label = f">{int(lo_temp) - 1}°F"
+                elif incl_below:
+                    lo_temp = None; hi_temp = float(incl_below.group(1))
+                    bracket_label = f"<{int(hi_temp) + 1}°F"
+                elif strict_below:
+                    lo_temp = None; hi_temp = float(strict_below.group(1)) - 1.0
+                    bracket_label = f"<{int(hi_temp) + 1}°F"
 
             # Last resort: functional_strike field
             if lo_temp is None and hi_temp is None:
@@ -1593,6 +1639,7 @@ def scan_temp_city(city_key, horizon="d1"):
         try:
             conn = get_db()
             if conn:
+                _ensure_snapshot_side(conn)
                 with conn.cursor() as cur:
                     for mtype, mkts in [("high", high_markets), ("low", low_markets)]:
                         for m in mkts:
@@ -1606,8 +1653,8 @@ def scan_temp_city(city_key, horizon="d1"):
                                      sigma, spread_models, model_prob, yes_ask,
                                      gap_c, net_gap_c, edge_ratio, kelly_frac,
                                      grade, liq_grade, open_interest, volume_24h,
-                                     hours_to_cutoff)
-                                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                                     hours_to_cutoff, side)
+                                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                                     ON CONFLICT DO NOTHING
                                 """, (
                                     # target_date from the ticker itself, not the scan's
@@ -1626,6 +1673,11 @@ def scan_temp_city(city_key, horizon="d1"):
                                     m.get("grade"),      m.get("liq_grade"),
                                     int(m.get("open_interest",0)), int(m.get("volume_24h",0)),
                                     m.get("hours_to_cutoff"),
+                                    # NO-side variants of the same market were logged
+                                    # UNLABELED for months — 430k mirrored (ticker,
+                                    # scan_ts) pairs poisoned every calibration
+                                    # backtest. Label them from now on.
+                                    m.get("side", "yes"),
                                 ))
                             except Exception:
                                 pass
@@ -5729,6 +5781,49 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(run_apply_settlements(rows, force=bool(body.get("force"))))
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
+        elif path == "/admin/set-side":
+            # Batch-label historical mirrored rows (the scanner logged NO-side
+            # variants with NO prices in the yes_* columns; unlabeled in
+            # price_history before 2026-07-11 and in temp_snapshots since
+            # April — 430k mirrored pairs). Side assignments are computed
+            # offline (validated disambiguator) and pushed here by id.
+            # Body: {token, table: price_history|temp_snapshots, side: yes|no,
+            #        ids: [int, ...]} (<=50000 ids per call)
+            import os as _os
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+                body   = json.loads(self.rfile.read(length).decode()) if length else {}
+                expected = _os.environ.get("QUERY_TOKEN", "")
+                if not expected or body.get("token") != expected:
+                    self.send_json({"ok": False, "error": "Invalid token"})
+                    return
+                tbl  = body.get("table")
+                side = body.get("side")
+                ids  = body.get("ids") or []
+                if tbl not in ("price_history", "temp_snapshots"):
+                    self.send_json({"ok": False, "error": "table must be price_history|temp_snapshots"})
+                    return
+                if side not in ("yes", "no"):
+                    self.send_json({"ok": False, "error": "side must be yes|no"})
+                    return
+                if not isinstance(ids, list) or len(ids) > 50000 or not all(isinstance(i, int) for i in ids):
+                    self.send_json({"ok": False, "error": "ids must be a list of <=50000 ints"})
+                    return
+                conn = get_db()
+                if not conn:
+                    self.send_json({"ok": False, "error": "No DB"})
+                    return
+                if tbl == "temp_snapshots":
+                    _ensure_snapshot_side(conn)
+                with conn.cursor() as cur:
+                    cur.execute(f"UPDATE {tbl} SET side = %s WHERE id = ANY(%s)", (side, ids))
+                    n = cur.rowcount
+                conn.commit()
+                conn.close()
+                self.send_json({"ok": True, "updated": n})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
         elif path == "/admin/query":
             import os as _os
             try:
@@ -8207,6 +8302,89 @@ class Handler(BaseHTTPRequestHandler):
 
             all_ok = all(v == "ok" for v in results.values())
             self.send_json({"ok": all_ok, "results": results})
+
+        elif path == "/admin/fix-bracket-bounds":
+            # Repair the T-market off-by-one across every table that stores
+            # bracket bounds, then rescore live_trades from the corrected
+            # bounds. Kalshi T{X} 'greater' pays STRICTLY above X (UI: "X+1 or
+            # above"); the old parser stored lo=X, so strike-exact settles
+            # were scored as wins (found 2026-09-08; -$288 of phantom wins).
+            # Idempotent: bounds are recomputed FROM THE TICKER, orientation
+            # from which bound is set. Autocommit per statement.
+            # Also recomputes pnl with the real Kalshi fee curve
+            # ceil(0.07*C*p*(1-p)) instead of the old flat 2%-of-payout.
+            import os as _os
+            qs_fix = parse_qs(urlparse(self.path).query)
+            _tok = (qs_fix.get("token") or [""])[0]
+            if not _os.environ.get("QUERY_TOKEN") or _tok != _os.environ.get("QUERY_TOKEN"):
+                self.send_json({"ok": False, "error": "Invalid token"})
+                return
+            results = {}
+            _TVAL = r"substring(ticker from '-T([0-9]+\.?[0-9]*)$')::numeric"
+            for tbl in ("live_trades", "price_history", "temp_snapshots",
+                        "calibration_snapshots", "paper_trades"):
+                try:
+                    conn = get_db()
+                    conn.autocommit = True
+                    with conn.cursor() as cur:
+                        cur.execute(f"""
+                            UPDATE {tbl}
+                            SET lo_temp = {_TVAL} + 1
+                            WHERE ticker ~ '-T[0-9]+\\.?[0-9]*$'
+                              AND lo_temp IS NOT NULL AND hi_temp IS NULL
+                              AND lo_temp <> {_TVAL} + 1
+                        """)
+                        hi_n = cur.rowcount
+                        cur.execute(f"""
+                            UPDATE {tbl}
+                            SET hi_temp = {_TVAL} - 1
+                            WHERE ticker ~ '-T[0-9]+\\.?[0-9]*$'
+                              AND hi_temp IS NOT NULL AND lo_temp IS NULL
+                              AND hi_temp <> {_TVAL} - 1
+                        """)
+                        results[tbl] = {"above_fixed": hi_n, "below_fixed": cur.rowcount}
+                    conn.close()
+                except Exception as e:
+                    results[tbl] = f"ERROR: {e}"
+            # Rescore live_trades from corrected bounds + stored settled_temp
+            try:
+                conn = get_db()
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE live_trades
+                        SET settled_correct = CASE
+                            WHEN COALESCE(filled_count, "count", 0) = 0 THEN NULL
+                            WHEN COALESCE(side, 'yes') = 'no' THEN
+                                NOT ((lo_temp IS NULL OR settled_temp >= lo_temp)
+                                 AND (hi_temp IS NULL OR settled_temp <= hi_temp))
+                            ELSE
+                                ((lo_temp IS NULL OR settled_temp >= lo_temp)
+                                 AND (hi_temp IS NULL OR settled_temp <= hi_temp))
+                            END
+                        WHERE settled_temp IS NOT NULL
+                    """)
+                    rescored = cur.rowcount
+                    cur.execute("""
+                        UPDATE live_trades
+                        SET pnl = ROUND((
+                            CASE WHEN settled_correct
+                                 THEN  COALESCE(filled_count, "count") * (1.0 - avg_fill_price_c / 100.0)
+                                 ELSE -COALESCE(filled_count, "count") * (avg_fill_price_c / 100.0)
+                            END
+                            - CEIL(0.07 * COALESCE(filled_count, "count")
+                                   * (avg_fill_price_c / 100.0)
+                                   * (1.0 - avg_fill_price_c / 100.0) * 100.0) / 100.0
+                        )::numeric, 2)
+                        WHERE settled_correct IS NOT NULL
+                          AND avg_fill_price_c IS NOT NULL
+                    """)
+                    results["live_trades_rescored"] = rescored
+                    results["live_trades_pnl_recomputed"] = cur.rowcount
+                conn.close()
+            except Exception as e:
+                results["rescore"] = f"ERROR: {e}"
+            self.send_json({"ok": True, "results": results})
 
         elif path == "/admin/backfill-fees":
             # One-shot migration: retroactively apply 2% Kalshi fee adjustment
