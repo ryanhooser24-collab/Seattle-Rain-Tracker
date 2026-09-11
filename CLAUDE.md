@@ -21,6 +21,15 @@ dashboard.html, syntax-check every `<script>` block and verify tag balance.
 The auto-trader places real Kalshi orders when armed. Config is DB-backed and
 hot-swappable — no redeploy needed for config changes.
 
+**Night Before (`strategy='nb'`) is the current live focus** (deployed
+2026-09-10, SIM). D-1 evening: buy YES on tomorrow's high brackets 25–60¢ when
+the 3-model ensemble's P(win) beats the ask by ≥0.15; $50 units, rise top-ups,
+no new signals after local midnight. Backtest +0.287/$ (N=111, referee-verified,
+see memory `d1-evening-edge`). Config keys `nb_*`; arm via the Live tab's NIGHT
+BEFORE subtab (OFF/SIM/LIVE). The forecast, tail, and gap sleeves are retired
+(tail/gap edges were data-bug artifacts — memory `market-efficiency-audit-2026-09`;
+forecast +24% was the T off-by-one). All four data bugs are fixed in code+DB.
+
 - Arm: `GET /auto-trader/go-live` · Kill: `GET /auto-trader/kill`
 - Config: `GET/POST /auto-trader/config`
 - State: `GET /debug/live` · Results: `GET /debug/live-results`
@@ -77,8 +86,9 @@ explicitly asked. Never arm/disarm without an explicit instruction.
 ## Dashboard
 
 Tabs: Scanner · Rainfall Tracker · Positions · Live · Analysis.
-(Auto-trader, History, Backtest tabs were removed; advanced knobs live in the
-Live tab's collapsible Advanced section.)
+Live tab has strategy subtabs: FORECAST BASED · NIGHT BEFORE.
+(Auto-trader, History, Backtest tabs were removed; the "Next Degree Up" subtab
+was removed when the gap sleeve was retired.)
 
 Rule: dashboard changes get a visual preview/mockup for approval before
 pushing. Server-only changes don't need mockups.
