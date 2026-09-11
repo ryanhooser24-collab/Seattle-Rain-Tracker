@@ -572,6 +572,7 @@ body{max-width:900px;margin:0 auto;}
     <!-- Strategy sub-tabs -->
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
       <div id="lvt-forecast" onclick="lvSw('forecast')" class="tab active" style="font-size:11px;padding:7px 14px;">FORECAST BASED</div>
+      <div id="lvt-nb" onclick="lvSw('nb')" class="tab" style="font-size:11px;padding:7px 14px;">NIGHT BEFORE</div>
       <div style="flex:1;"></div>
       <button onclick="lvKill()" style="padding:7px 14px;font-family:inherit;font-size:10px;letter-spacing:1px;background:var(--no-lt);color:var(--no);border:1px solid var(--no-border);border-radius:4px;cursor:pointer;">KILL — STOP ALL</button>
     </div>
@@ -742,6 +743,64 @@ body{max-width:900px;margin:0 auto;}
     </div>
 
     </div><!-- /lvs-forecast -->
+
+    <!-- ══ NIGHT BEFORE STRATEGY ══ -->
+    <div id="lvs-nb" style="display:none">
+
+    <div class="rf-card">
+      <div class="rf-hdr">
+        <div class="rf-hdr-lbl">NIGHT BEFORE</div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <div id="nb-status" class="pill">—</div>
+          <div style="display:flex;border:1px solid var(--border);border-radius:4px;overflow:hidden;">
+            <button id="nb-m-off" onclick="lvNbSet('off')" style="padding:5px 12px;font-family:inherit;font-size:10px;letter-spacing:1px;border:none;cursor:pointer;background:var(--bg);color:var(--muted);">OFF</button>
+            <button id="nb-m-sim" onclick="lvNbSet('sim')" style="padding:5px 12px;font-family:inherit;font-size:10px;letter-spacing:1px;border:none;border-left:1px solid var(--border);cursor:pointer;background:var(--bg);color:var(--muted);">SIM</button>
+            <button id="nb-m-live" onclick="lvNbSet('live')" style="padding:5px 12px;font-family:inherit;font-size:10px;letter-spacing:1px;border:none;border-left:1px solid var(--border);cursor:pointer;background:var(--bg);color:var(--muted);">LIVE</button>
+          </div>
+        </div>
+      </div>
+      <div style="padding:12px 14px;">
+        <div style="font-size:11px;color:var(--muted);line-height:1.5;">
+          Buy <b style="color:var(--ink);">tomorrow's</b> temperature brackets <b style="color:var(--ink);">tonight</b> —
+          each evening the day's freshest weather models publish, and for a few hours the market is still
+          priced off older forecasts. When our 3-model ensemble says a 25&ndash;60&cent; bracket is underpriced by
+          15+ points, buy and hold to settlement. If the price then <b style="color:var(--ink);">rises</b> toward our
+          forecast, buy more; if it <b style="color:var(--ink);">falls</b>, never add &mdash; the market knows something.
+          No new positions after midnight. Backtest: +29&cent; per $1 staked, every month positive.
+        </div>
+        <div id="nb-window" style="margin-top:10px;font-size:11px;color:var(--muted);"></div>
+      </div>
+    </div>
+
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">PERFORMANCE — NIGHT BEFORE</div><div id="nb-tot" style="font-size:13px;font-weight:500;"></div></div>
+      <div style="padding:12px 14px;">
+        <div id="nb-kpi" style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px;font-size:11px;color:var(--muted);">Loading…</div>
+        <div id="nb-chart" style="font-size:11px;color:var(--muted);"></div>
+      </div>
+    </div>
+
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">SETTINGS</div><div id="nb-cfg-msg" style="font-size:10px;color:var(--muted);"></div></div>
+      <div style="padding:12px 14px;display:grid;grid-template-columns:repeat(3,1fr);gap:12px;font-size:11px;">
+        <div><div style="font-size:12px;">Unit size $</div><div style="font-size:10px;color:var(--muted);">Base position; big-gap signals size up to 1.5&times;.</div><input id="nb-cfg-unit" type="number" step="5" style="width:90%;margin-top:4px;padding:5px;font-family:inherit;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;"></div>
+        <div><div style="font-size:12px;">Per-bracket cap $</div><div style="font-size:10px;color:var(--muted);">All units on one bracket win or lose together.</div><input id="nb-cfg-tcap" type="number" step="25" style="width:90%;margin-top:4px;padding:5px;font-family:inherit;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;"></div>
+        <div><div style="font-size:12px;">Daily cap $</div><div style="font-size:10px;color:var(--muted);">Bounds a correlated multi-city heat night.</div><input id="nb-cfg-dcap" type="number" step="50" style="width:90%;margin-top:4px;padding:5px;font-family:inherit;background:var(--bg);color:var(--ink);border:1px solid var(--border);border-radius:4px;"></div>
+      </div>
+      <div style="padding:0 14px 12px;"><button onclick="lvNbSaveCfg()" style="padding:6px 16px;font-family:inherit;font-size:10px;letter-spacing:1px;border-radius:4px;cursor:pointer;border:1px solid var(--border);background:var(--bg);color:var(--ink);">SAVE</button></div>
+    </div>
+
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">OPEN POSITIONS — NIGHT BEFORE</div><div id="nb-spent" style="font-size:11px;color:var(--muted);"></div></div>
+      <div id="nb-open" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
+    </div>
+
+    <div class="rf-card">
+      <div class="rf-hdr"><div class="rf-hdr-lbl">TRADES — NIGHT BEFORE</div></div>
+      <div id="nb-recent" style="padding:12px 14px;font-size:11px;color:var(--muted);">Loading…</div>
+    </div>
+
+    </div><!-- /lvs-nb -->
 
 
   </div>
@@ -1129,7 +1188,9 @@ let lvStratTab='forecast';
 function lvSw(t){
   lvStratTab=t;
   document.getElementById('lvs-forecast').style.display=t==='forecast'?'':'none';
+  document.getElementById('lvs-nb').style.display=t==='nb'?'':'none';
   document.getElementById('lvt-forecast').className='tab'+(t==='forecast'?' active':'');
+  document.getElementById('lvt-nb').className='tab'+(t==='nb'?' active':'');
 }
 function lvKpi(l,v,c){return '<div style="background:var(--bg);border-radius:6px;padding:10px 12px;"><div style="font-size:9px;letter-spacing:1px;color:var(--muted);">'+l+'</div><div style="font-size:15px;margin-top:4px;color:'+(c||'var(--ink)')+';white-space:nowrap;">'+v+'</div></div>';}
 function lvScoreboard(elId,totId,blk){
@@ -1202,6 +1263,40 @@ async function loadLive(){
         S.forecast.open.map(o=>'<tr><td style="padding:3px 6px;">'+o.ticker+'</td><td>'+o.count+'</td><td>'+(o.price_c!=null?o.price_c+'¢':'—')+'</td><td>'+(o.target_date||'—')+'</td></tr>').join('')+'</table>'
         :'None.';
       document.getElementById('lv-recent').innerHTML=lvTradeTable(S.forecast.recent,false)||'No trades yet.';
+      // ── night before tab ──
+      const NB=S.nb;
+      if(NB){
+        const nbMode=!NB.enabled?'off':(NB.live?'live':'sim');
+        const nbSt=document.getElementById('nb-status');
+        nbSt.textContent=nbMode==='off'?'OFF':nbMode==='sim'?'SIMULATING':'LIVE — ARMED';
+        nbSt.className='pill '+(nbMode==='live'?'pill-ok':nbMode==='sim'?'pill-warn':'pill-err');
+        [['off','nb-m-off'],['sim','nb-m-sim'],['live','nb-m-live']].forEach(([m,id])=>{
+          const b=document.getElementById(id);
+          const on=m===nbMode;
+          b.style.background=on?(m==='live'?'var(--yes-lt)':m==='sim'?'var(--rain-lt)':'var(--no-lt)'):'var(--bg)';
+          b.style.color=on?(m==='live'?'var(--yes)':m==='sim'?'var(--rain)':'var(--no)'):'var(--muted)';
+        });
+        const w=NB.windows||{};
+        document.getElementById('nb-window').innerHTML=
+          'Entry window (6pm\u2013midnight local, East 7pm): '+
+          ['east','central','mountain','west'].map(z=>{
+            const s=w[z]||'—';
+            const col=s==='open'?'var(--yes)':s==='catchup'?'var(--warn)':'var(--muted)';
+            return z.toUpperCase()+' <b style="color:'+col+'">'+s+'</b>';
+          }).join(' · ');
+        lvScoreboard('nb-kpi','nb-tot',NB);
+        document.getElementById('nb-spent').textContent='today: '+lvFmt$(NB.spend_today||0)+' / '+lvFmt$(NB.cap||0);
+        if(document.getElementById('nb-cfg-unit')!==document.activeElement)document.getElementById('nb-cfg-unit').value=NB.unit_dollars??'';
+        if(document.getElementById('nb-cfg-tcap')!==document.activeElement)document.getElementById('nb-cfg-tcap').value=NB.ticker_cap??'';
+        if(document.getElementById('nb-cfg-dcap')!==document.activeElement)document.getElementById('nb-cfg-dcap').value=NB.cap??'';
+        const nbOp=document.getElementById('nb-open');
+        nbOp.innerHTML=(NB.open&&NB.open.length)?
+          '<table style="width:100%;border-collapse:collapse;font-size:11px;color:var(--ink);">'+
+          '<tr style="color:var(--muted);text-align:left;"><th style="padding:3px 6px;">TICKER</th><th>CT</th><th>PRICE</th><th>TARGET</th></tr>'+
+          NB.open.map(o=>'<tr><td style="padding:3px 6px;">'+o.ticker+'</td><td>'+o.count+'</td><td>'+(o.price_c!=null?o.price_c+'\u00a2':'—')+'</td><td>'+(o.target_date||'—')+'</td></tr>').join('')+'</table>'
+          :'None.';
+        document.getElementById('nb-recent').innerHTML=lvTradeTable(NB.recent,false)||'No trades yet — signals appear 6pm\u2013midnight local.';
+      }
     }
     // settings
     document.getElementById('lv-cfg-cap').value=cfg.daily_cap_dollars??'';
@@ -1373,6 +1468,27 @@ function lvToggleAdv(btn){
   const open=el.style.display==='none';
   el.style.display=open?'flex':'none';
   btn.innerHTML=(open?'&#9662;':'&#9656;')+' Advanced';
+}
+async function lvNbSet(mode){
+  if(mode==='live'&&!confirm('Set Night Before LIVE? Real money orders will be placed tonight (up to its daily cap).'))return;
+  const body=mode==='off'?{nb_enabled:false,nb_live:false}
+            :mode==='sim'?{nb_enabled:true,nb_live:false}
+            :{nb_enabled:true,nb_live:true};
+  await fetch(SERVER+'/auto-trader/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  loadLive();
+}
+async function lvNbSaveCfg(){
+  const msg=document.getElementById('nb-cfg-msg');
+  try{
+    const body={
+      nb_unit_dollars:parseFloat(document.getElementById('nb-cfg-unit').value)||50,
+      nb_ticker_cap:parseFloat(document.getElementById('nb-cfg-tcap').value)||100,
+      nb_day_cap:parseFloat(document.getElementById('nb-cfg-dcap').value)||300
+    };
+    const r=await fetch(SERVER+'/auto-trader/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(x=>x.json());
+    msg.textContent=r.ok?'Saved.':'Save failed: '+(r.error||'?');
+    setTimeout(()=>{msg.textContent='';},4000);
+  }catch(e){msg.textContent='Save failed: '+e.message;}
 }
 async function lvKill(){
   await fetch(SERVER+'/auto-trader/kill');loadLive();

@@ -650,7 +650,7 @@ def fetch_temp_kalshi_markets(city_key, market_type="high"):
     try:
         path = "/trade-api/v2/markets"
         url  = f"{KALSHI_BASE}/markets"
-        params = {"series_ticker": series, "status": "open", "limit": 20}
+        params = {"series_ticker": series, "status": "open", "limit": 100}
         headers = kalshi_auth_headers("GET", path)
         r = requests.get(url, params=params, headers=headers, timeout=6)
         r.raise_for_status()
@@ -1941,6 +1941,35 @@ _AT_CONFIG = {
     "gap_daily_cap_dollars":  100.0,  # gap-only cap, worst-case accounting
     "gap_max_attempts":       3,      # unfilled IOC attempts per ticker per day
     "gap_obs_max_age_min":    90,     # skip a city when its newest ob is older
+
+    # ── Night Before — D-1 evening fresh-forecast strategy (2026-09-10).
+    # Buy YES on TOMORROW's high brackets tonight when the 3-model ensemble's
+    # P(win) exceeds the ask by >= nb_gap_min. Fully referee-verified spec:
+    # backtest +0.287/$ (N=111, 4/4 months positive), ~$27/day at $50 units.
+    # Every price comparison is INTEGER CENTS (a float-epsilon bug at +3c
+    # comparisons corrupted two prior analyses — never compare float prices).
+    # Rules that are LOAD-BEARING (each one measured, do not relax casually):
+    #   - entries 25-60c only (cheaper = phantom/toxic, dearer = no edge)
+    #   - no NEW signals after local midnight; NEVER act on a gap first seen
+    #     overnight (17% win, -0.38/$); catch-up fills of evening triggers OK
+    #   - top-up on RISES only (+3c, gap still >= nb_gap_min); dips are toxic
+    #   - per-ticker/day caps are at the measured optimum, not conservatism
+    "nb_enabled":         False,
+    "nb_live":            False,  # False = simulate fills; True = REAL orders
+    "nb_unit_dollars":    50.0,   # base position size
+    "nb_topup_dollars":   25.0,   # rise top-up size
+    "nb_gap_min":         0.15,   # p_model - ask entry threshold
+    "nb_shadow_gap_min":  0.10,   # shadow-log rungs down to this gap (no trade)
+    "nb_ask_min_c":       25,     # entry band, cents
+    "nb_ask_max_c":       60,
+    "nb_slip_cap_c":      3,      # IOC limit = ask + this
+    "nb_overlay_cap":     1.5,    # edge-proportional multiplier cap
+    "nb_overlay_div":     1.285,  # causal capital normalizer
+    "nb_ticker_cap":      100.0,  # max deployed $ per ticker (corr-1.0 stack)
+    "nb_day_cap":         300.0,  # max deployed $ per target date
+    "nb_hour_start":      18,     # local; Eastern cities gate at 19 (18z pub)
+    "nb_hour_start_east": 19,
+    "nb_catchup_end_h":   8,      # unfilled evening triggers may fill until this local hour
 }
 
 
@@ -2092,7 +2121,7 @@ def _live_spend_today():
                     END
                 ), 0) FROM live_trades
                 WHERE is_live = TRUE AND ts::date = CURRENT_DATE
-                  AND COALESCE(strategy, '') NOT IN ('tail', 'gap')
+                  AND COALESCE(strategy, '') NOT IN ('tail', 'gap', 'nb')
             """)
             v = float(cur.fetchone()[0] or 0)
         conn.close()
@@ -2842,7 +2871,7 @@ def at_check_exits(city_key, markets, cfg):
                 WHERE is_live = TRUE AND COALESCE(exited, FALSE) = FALSE
                   AND settled_temp IS NULL AND pnl IS NULL
                   AND city = %s AND entry_prob IS NOT NULL
-                  AND COALESCE(strategy, '') NOT IN ('tail', 'gap')
+                  AND COALESCE(strategy, '') NOT IN ('tail', 'gap', 'nb')
                   AND ticker = ANY(%s)
                 GROUP BY ticker
             """, (city_key, list(view.keys())))
@@ -2881,7 +2910,7 @@ def at_check_exits(city_key, markets, cfg):
                         pnl = ROUND((COALESCE(filled_count, "count") * %s - cost)::numeric, 2)
                     WHERE ticker = %s AND is_live = TRUE
                       AND COALESCE(exited, FALSE) = FALSE AND pnl IS NULL
-                      AND COALESCE(strategy, '') NOT IN ('tail', 'gap')
+                      AND COALESCE(strategy, '') NOT IN ('tail', 'gap', 'nb')
                 """, (px_c, px_c / 100.0, ticker))
             conn.commit()
             conn.close()
@@ -3834,6 +3863,522 @@ def run_gap_trader_cycle():
     at_flush_log_to_db()
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  NIGHT BEFORE — D-1 evening fresh-forecast sleeve (strategy='nb')
+#  Spec + evidence: memory d1-evening-edge; backtest_data/analysis2/
+#  ALL price math in INTEGER CENTS.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_NB_CAL = None            # calibration residuals, loaded once
+_NB_RESID_CACHE = {"ts": 0, "extra": {}}   # DB-derived residual extension
+_NB_FC_CACHE = {}         # city -> {ts, tdate, models{}, ens}
+_NB_TABLES_READY = False
+_NB_FETCH_ERR_LOGGED = {}
+# In-process fallback when a LIVE fill's DB write fails — merged into
+# _nb_state so caps/dedupe still see the position (gap-sleeve precedent).
+_NB_RUNTIME = {"dep": {}, "last_c": {}, "day": {}}
+
+def _nb_phi(x):
+    import math as _m
+    return 0.5 * (1.0 + _m.erf(x / _m.sqrt(2.0)))
+
+def _nb_load_cal():
+    global _NB_CAL
+    if _NB_CAL is None:
+        import os as _os
+        p = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "nb_calibration.json")
+        _NB_CAL = json.load(open(p))
+    return _NB_CAL
+
+def _nb_ensure_tables(conn):
+    global _NB_TABLES_READY
+    if _NB_TABLES_READY:
+        return
+    old_ac = conn.autocommit
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS nb_forecasts (
+                id BIGSERIAL PRIMARY KEY, tdate DATE NOT NULL, city TEXT NOT NULL,
+                gfs NUMERIC(6,2), ecmwf NUMERIC(6,2), icon NUMERIC(6,2),
+                ens NUMERIC(6,2), fetched_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE (tdate, city)
+            )""")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS nb_signals (
+                id BIGSERIAL PRIMARY KEY, ts TIMESTAMPTZ DEFAULT NOW(),
+                ticker TEXT NOT NULL, city TEXT, tdate TEXT, kind TEXT,
+                ask_c INTEGER, bid_c INTEGER, ask_sz NUMERIC(10,1),
+                p_model NUMERIC(6,4),
+                gap NUMERIC(6,4), acted BOOLEAN, is_live BOOLEAN,
+                mins_since_2300z INTEGER, note TEXT
+            )""")
+        cur.execute("ALTER TABLE nb_signals ADD COLUMN IF NOT EXISTS ask_sz NUMERIC(10,1)")
+        cur.execute("CREATE INDEX IF NOT EXISTS ix_nb_signals_tk ON nb_signals (ticker, kind)")
+    conn.autocommit = old_ac
+    _NB_TABLES_READY = True
+
+def _nb_fetch_forecast(city_key):
+    """Tomorrow's high forecast, 3-model ensemble, city-local day. Cached 30 min.
+    Live fetch = freshest published runs (>= p1 quality; the backtest's edge is
+    a conservative floor for this)."""
+    import time as _t
+    from datetime import datetime as _dt, timedelta as _td
+    c = _NB_FC_CACHE.get(city_key)
+    if c and _t.time() - c["ts"] < 1800:
+        return c
+    cfg = TEMP_CITIES[city_key]
+    local_now = _dt.utcnow().replace(tzinfo=pytz.utc).astimezone(pytz.timezone(cfg["tz"]))
+    tdate = (local_now + _td(days=1)).strftime("%Y-%m-%d")
+    try:
+        url = ("https://api.open-meteo.com/v1/forecast"
+               f"?latitude={cfg['lat']}&longitude={cfg['lon']}"
+               "&daily=temperature_2m_max"
+               "&models=gfs_seamless,ecmwf_ifs025,icon_seamless"
+               f"&timezone={cfg['tz'].replace('/', '%2F')}"
+               "&temperature_unit=fahrenheit&forecast_days=3")
+        r = requests.get(url, timeout=8)
+        r.raise_for_status()
+        d = r.json()
+        daily = d.get("daily", {})
+        times = daily.get("time", [])
+        if tdate not in times:
+            raise ValueError(f"tomorrow {tdate} not in daily.time")
+        i = times.index(tdate)
+        models = {}
+        for suffix, name in (("gfs_seamless", "gfs"), ("ecmwf_ifs025", "ecmwf"),
+                             ("icon_seamless", "icon")):
+            arr = daily.get(f"temperature_2m_max_{suffix}")
+            if arr and arr[i] is not None:
+                models[name] = float(arr[i])
+        if len(models) < 2:   # need at least 2 of 3 models
+            raise ValueError(f"only {len(models)} models returned")
+        ens = sum(models.values()) / len(models)
+        rec = {"ts": _t.time(), "tdate": tdate, "models": models, "ens": ens}
+        _NB_FC_CACHE[city_key] = rec
+        # persist for residual self-extension + A/B run-vintage analysis
+        try:
+            conn = get_db()
+            if conn:
+                _nb_ensure_tables(conn)
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO nb_forecasts (tdate, city, gfs, ecmwf, icon, ens, fetched_at)
+                        VALUES (%s,%s,%s,%s,%s,%s,NOW())
+                        ON CONFLICT (tdate, city) DO UPDATE
+                            SET gfs=EXCLUDED.gfs, ecmwf=EXCLUDED.ecmwf,
+                                icon=EXCLUDED.icon, ens=EXCLUDED.ens, fetched_at=NOW()
+                    """, (tdate, city_key, models.get("gfs"), models.get("ecmwf"),
+                          models.get("icon"), round(ens, 2)))
+                conn.commit()
+                conn.close()
+        except Exception:
+            pass
+        return rec
+    except Exception as e:
+        _last = _NB_FETCH_ERR_LOGGED.get(city_key, 0)
+        if _t.time() - _last > 3600:
+            _NB_FETCH_ERR_LOGGED[city_key] = _t.time()
+            at_log("WARN", f"NB forecast fetch failed for {city_key}: {e}", city=city_key)
+        return None
+
+def _nb_residuals(city_key):
+    """Dated residual list (forecast − CLI truth): shipped calibration file +
+    rows self-extended from nb_forecasts joined to settled temps. Cached 6h."""
+    import time as _t
+    cal = _nb_load_cal()
+    base = [(d, float(x)) for d, x in cal["cities"].get(city_key, {}).get("residuals", [])]
+    if _t.time() - _NB_RESID_CACHE["ts"] > 21600:
+        extra = {}
+        try:
+            conn = get_db()
+            if conn:
+                _nb_ensure_tables(conn)
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT f.city, f.tdate::text, f.ens - ts.settled_temp
+                        FROM nb_forecasts f
+                        JOIN (SELECT DISTINCT ON (city, target_date)
+                                     city, target_date, settled_temp
+                              FROM temp_snapshots
+                              WHERE settled_temp IS NOT NULL AND market_type = 'high'
+                              ORDER BY city, target_date, scan_ts DESC) ts
+                          ON ts.city = f.city AND ts.target_date = f.tdate
+                    """)
+                    for c, dt, resid in cur.fetchall():
+                        extra.setdefault(c, []).append((dt, float(resid)))
+                conn.close()
+        except Exception:
+            pass
+        _NB_RESID_CACHE["ts"] = _t.time()
+        _NB_RESID_CACHE["extra"] = extra
+    have = {d for d, _ in base}
+    ext = [(d, x) for d, x in _NB_RESID_CACHE["extra"].get(city_key, []) if d not in have]
+    return sorted(base + ext)
+
+def _nb_bracket_prob(city_key, tdate, ens, lo, hi):
+    """P(win) for a bracket from the validated OOS recipe (rolling-21 bias,
+    full-sample empirical spread, Silverman KDE). lo/hi are the CORRECT payout
+    bounds from the fixed parser (T '>' lo=strike+1; T '<' hi=strike-1)."""
+    r = [x for d, x in _nb_residuals(city_key) if d < tdate]
+    n = len(r)
+    if n < 15:
+        return None
+    bias = sum(r[-21:]) / len(r[-21:])
+    mu = sum(r) / n
+    c = [x - mu for x in r]
+    sd = (sum(x * x for x in c) / (n - 1)) ** 0.5
+    h = max(0.5, 1.06 * sd * n ** -0.2)
+    shrink = sd / (sd * sd + h * h) ** 0.5
+    pts = [ens - bias - x * shrink for x in c]
+    cdf = lambda x: sum(_nb_phi((x - p) / h) for p in pts) / n
+    if lo is not None and hi is not None:
+        return max(0.0, cdf(hi + 0.5) - cdf(lo - 0.5))
+    if lo is not None:
+        return max(0.0, 1.0 - cdf(lo - 0.5))
+    if hi is not None:
+        return max(0.0, cdf(hi + 0.5))
+    return None
+
+def _nb_log_signal(ticker, city, tdate, kind, ask_c, bid_c, p_model, gap,
+                   acted, is_live, note=None, ask_sz=None):
+    try:
+        from datetime import datetime as _dt
+        now = _dt.utcnow()
+        anchor = now.replace(hour=23, minute=0, second=0, microsecond=0)
+        mins = round((now - anchor).total_seconds() / 60)
+        if mins < -720:
+            mins += 1440
+        conn = get_db()
+        if not conn:
+            return
+        _nb_ensure_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO nb_signals (ticker, city, tdate, kind, ask_c, bid_c,
+                                        ask_sz, p_model, gap, acted, is_live,
+                                        mins_since_2300z, note)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (ticker, city, tdate, kind, ask_c, bid_c, ask_sz,
+                  round(p_model, 4) if p_model is not None else None,
+                  round(gap, 4) if gap is not None else None,
+                  acted, is_live, mins, note))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"  nb_log_signal: {e}")
+
+def _nb_state(is_live):
+    """Per-ticker deployed $ and last fill price (cents), per-tdate deployed $,
+    and the set of tickers whose FIRST trigger was logged before local midnight
+    (i.e. legitimate catch-up candidates). Mode-scoped (sim vs live)."""
+    dep_ticker, last_fill_c, dep_day = {}, {}, {}
+    evening_triggered, dipped = set(), set()
+    try:
+        conn = get_db()
+        if not conn:
+            return None   # fail-closed: caller must skip trading
+        _ensure_live_trades_table(conn)
+        _nb_ensure_tables(conn)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT ticker, target_date,
+                       COALESCE(SUM(filled_count * avg_fill_price_c / 100.0), 0),
+                       MAX(avg_fill_price_c)
+                FROM live_trades
+                WHERE strategy = 'nb' AND is_live = %s
+                  AND COALESCE(filled_count, 0) > 0
+                GROUP BY ticker, target_date
+            """, (is_live,))
+            for tk, td, dep, px in cur.fetchall():
+                dep_ticker[tk] = float(dep or 0)
+                last_fill_c[tk] = int(round(float(px))) if px is not None else None
+                if td:
+                    dep_day[td] = dep_day.get(td, 0.0) + float(dep or 0)
+            cur.execute("""
+                SELECT ticker, MIN(ts) FROM nb_signals
+                WHERE kind = 'entry_trigger' AND is_live = %s
+                GROUP BY ticker
+            """, (is_live,))
+            for tk, first_ts in cur.fetchall():
+                evening_triggered.add(tk)
+            # sticky dip ban: once a ticker dipped 3c+ below our fill, its
+            # top-up path stays closed for good (dip-then-recovery re-buys
+            # were measured negative)
+            cur.execute("""
+                SELECT DISTINCT ticker FROM nb_signals
+                WHERE kind = 'dip_flag' AND is_live = %s
+            """, (is_live,))
+            for (tk,) in cur.fetchall():
+                dipped.add(tk)
+        conn.close()
+    except Exception as e:
+        at_log("ERR", f"NB state read failed: {e}")
+        return None
+    # merge in-process fallback (LIVE fills whose DB write failed)
+    if is_live:
+        for tk, dep in _NB_RUNTIME["dep"].items():
+            dep_ticker[tk] = dep_ticker.get(tk, 0.0) + dep
+        for tk, c in _NB_RUNTIME["last_c"].items():
+            if tk not in last_fill_c or c > (last_fill_c[tk] or 0):
+                last_fill_c[tk] = c
+        for td, dep in _NB_RUNTIME["day"].items():
+            dep_day[td] = dep_day.get(td, 0.0) + dep
+    return dep_ticker, last_fill_c, dep_day, evening_triggered, dipped
+
+def _nb_place(ticker, count, limit_c, is_live, sim_fill_c=None):
+    """IOC buy YES, mirroring the battle-tested gap parser exactly:
+    fill_count / average_fill_price are FIXED-POINT STRINGS in the V2
+    response; on a missing fill_count fall back to at_confirm_fill, whose
+    'unknown' reports the FULL requested size (fail-closed for caps).
+    Returns (filled_count int, avg_px_c float|None, status, order_id).
+    Sim mode fills at sim_fill_c (ask+1c — the backtest's slip convention),
+    never at the IOC limit."""
+    if not is_live:
+        return count, float(sim_fill_c if sim_fill_c is not None else limit_c), "simulated", None
+    ok, order, err = at_place_order(ticker, "yes", count, limit_c)
+    if not ok:
+        at_log("ERR", f"NB order failed {ticker}: {err}", ticker=ticker)
+        return 0, None, "unfilled", None
+    o = (order or {}).get("order", order) or {}
+    oid = o.get("order_id") or o.get("id")
+    filled = None
+    px_c = None
+    try:
+        if o.get("fill_count") is not None:
+            filled = int(float(o["fill_count"]))
+            _px = o.get("average_fill_price")
+            if _px is not None:
+                px_c = float(_px) * 100.0
+    except Exception:
+        filled = None
+    if filled is None:
+        filled, conf_px, conf_status = at_confirm_fill(oid, ticker, count)
+        filled = int(filled or 0)
+        if conf_px is not None:
+            px_c = float(conf_px)
+    if px_c is None:
+        px_c = float(limit_c)   # conservative: book at the limit
+    status = "filled" if filled >= count else ("partial" if filled > 0 else "unfilled")
+    if status in ("unfilled", "partial") and oid:
+        try:
+            at_cancel_order(oid)
+        except Exception:
+            pass
+    return filled, px_c, status, oid
+
+def run_nb_trader_cycle():
+    """One Night Before scan across all cities. Called from the scheduler when
+    nb_enabled. Window/rules per the verified spec; integer-cent price math."""
+    from datetime import datetime as _dt, timedelta as _td
+    cfg = _AT_CONFIG
+    is_live   = bool(cfg.get("nb_live", False))
+    gap_min   = float(cfg.get("nb_gap_min", 0.15))
+    gap_shadow= float(cfg.get("nb_shadow_gap_min", 0.10))
+    ask_lo_c  = int(cfg.get("nb_ask_min_c", 25))
+    ask_hi_c  = int(cfg.get("nb_ask_max_c", 60))
+    slip_c    = int(cfg.get("nb_slip_cap_c", 3))
+    unit      = float(cfg.get("nb_unit_dollars", 50.0))
+    topup     = float(cfg.get("nb_topup_dollars", 25.0))
+    ov_cap    = float(cfg.get("nb_overlay_cap", 1.5))
+    ov_div    = float(cfg.get("nb_overlay_div", 1.285))
+    cap_tk    = float(cfg.get("nb_ticker_cap", 100.0))
+    cap_day   = float(cfg.get("nb_day_cap", 300.0))
+    h_start   = int(cfg.get("nb_hour_start", 18))
+    h_start_e = int(cfg.get("nb_hour_start_east", 19))
+    h_catchup = int(cfg.get("nb_catchup_end_h", 8))
+
+    st = _nb_state(is_live)
+    if st is None:
+        return
+    dep_ticker, last_fill_c, dep_day, evening_triggered, dipped = st
+
+    for city_key, ccfg in TEMP_CITIES.items():
+        try:
+            local_now = _dt.utcnow().replace(tzinfo=pytz.utc).astimezone(
+                pytz.timezone(ccfg["tz"]))
+            start_h = h_start_e if ccfg["tz"] == "America/New_York" else h_start
+            if local_now.hour >= start_h:
+                phase, target = "evening", (local_now + _td(days=1)).strftime("%Y-%m-%d")
+            elif local_now.hour < h_catchup:
+                # after midnight the market date is TODAY's date
+                phase, target = "catchup", local_now.strftime("%Y-%m-%d")
+            else:
+                continue
+
+            if phase == "evening":
+                fc = _nb_fetch_forecast(city_key)
+            else:
+                # catch-up NEVER touches the live API (no overnight rescoring);
+                # use the cached evening forecast, or reload the persisted
+                # evening fetch from nb_forecasts after a restart
+                fc = _NB_FC_CACHE.get(city_key)
+                if not fc or fc.get("tdate") != target:
+                    fc = None
+                    try:
+                        conn = get_db()
+                        if conn:
+                            _nb_ensure_tables(conn)
+                            with conn.cursor() as cur:
+                                cur.execute("""
+                                    SELECT ens FROM nb_forecasts
+                                    WHERE city = %s AND tdate = %s
+                                """, (city_key, target))
+                                row = cur.fetchone()
+                            conn.close()
+                            if row and row[0] is not None:
+                                fc = {"tdate": target, "ens": float(row[0])}
+                    except Exception:
+                        fc = None
+            if not fc or fc.get("tdate") != target:
+                continue
+
+            mk = fetch_temp_kalshi_markets(city_key, "high")
+            if not mk.get("ok"):
+                continue
+            for m in mk.get("markets", []):
+                ticker = m.get("ticker") or ""
+                if not ticker or m.get("ticker_date") != target:
+                    continue
+                ask = m.get("yes_ask") or 0
+                bid = m.get("yes_bid") or 0
+                ask_c = int(round(ask * 100))
+                bid_c = int(round(bid * 100))
+                if ask_c <= 0:
+                    continue
+                lo, hi = m.get("lo_temp"), m.get("hi_temp")
+                if lo is None and hi is None:
+                    continue
+                p = _nb_bracket_prob(city_key, target, fc["ens"], lo, hi)
+                if p is None:
+                    continue
+                gap = p - ask_c / 100.0
+
+                held = dep_ticker.get(ticker, 0.0)
+                last_c = last_fill_c.get(ticker)
+
+                # ── dip flag (shadow exit signal; never trade) ──
+                if last_c is not None and ask_c <= last_c - 3:
+                    _nb_log_signal(ticker, city_key, target, "dip_flag", ask_c, bid_c,
+                                   p, gap, False, is_live)
+                    continue
+
+                # ── top-up rung: rise +3c, gap holds, <= 60c, EVENING only
+                # (overnight rungs are untested — shadow-log them), and never
+                # after a dip flag (dip-then-recovery re-buys measured toxic) ──
+                if held > 0 and last_c is not None and ask_c >= last_c + 3 and ask_c <= ask_hi_c:
+                    if phase != "evening":
+                        if gap >= gap_shadow:
+                            _nb_log_signal(ticker, city_key, target, "shadow_rung_overnight",
+                                           ask_c, bid_c, p, gap, False, is_live,
+                                           ask_sz=m.get("yes_ask_size"))
+                        continue
+                    if ticker in dipped:
+                        _nb_log_signal(ticker, city_key, target, "shadow_rung_postdip",
+                                       ask_c, bid_c, p, gap, False, is_live)
+                        continue
+                    if gap >= gap_min:
+                        room = min(cap_tk - held, cap_day - dep_day.get(target, 0.0))
+                        limit_c = ask_c + slip_c
+                        cnt = int(min(topup, max(0.0, room)) * 100) // limit_c
+                        if cnt >= 1:
+                            filled, px, status, oid = _nb_place(ticker, cnt, limit_c,
+                                                                is_live, sim_fill_c=ask_c + 1)
+                            _nb_log_signal(ticker, city_key, target, "topup", ask_c, bid_c,
+                                           p, gap, filled > 0, is_live,
+                                           note=f"rung from {last_c}c",
+                                           ask_sz=m.get("yes_ask_size"))
+                            if filled > 0:
+                                cost = round(filled * px / 100.0, 2)
+                                logged = _live_trade_log(ticker, city_key, "yes", filled, ask_c,
+                                                limit_c, cost, is_live,
+                                                order_id=oid, requested_count=cnt,
+                                                filled_count=filled, fill_status=status,
+                                                avg_fill_price_c=px, target_date=target,
+                                                lo_temp=lo, hi_temp=hi, entry_prob=p,
+                                                strategy="nb", grade="NB-TOP")
+                                if is_live and logged is False:
+                                    _NB_RUNTIME["dep"][ticker] = _NB_RUNTIME["dep"].get(ticker, 0.0) + cost
+                                    _NB_RUNTIME["last_c"][ticker] = int(round(px))
+                                    _NB_RUNTIME["day"][target] = _NB_RUNTIME["day"].get(target, 0.0) + cost
+                                    at_log("ERR", f"NB top-up fill {ticker} NOT logged to DB — tracked in-process", ticker=ticker)
+                                dep_ticker[ticker] = held + cost
+                                last_fill_c[ticker] = int(round(px))
+                                dep_day[target] = dep_day.get(target, 0.0) + cost
+                            elif is_live:
+                                _live_trade_log(ticker, city_key, "yes", 0, ask_c, limit_c,
+                                                0.0, is_live, order_id=oid, requested_count=cnt,
+                                                filled_count=0, fill_status="unfilled",
+                                                avg_fill_price_c=None, target_date=target,
+                                                lo_temp=lo, hi_temp=hi, entry_prob=p,
+                                                strategy="nb", grade="NB-TOP")
+                    elif gap >= gap_shadow:
+                        _nb_log_signal(ticker, city_key, target, "shadow_rung_lowgap",
+                                       ask_c, bid_c, p, gap, False, is_live,
+                                       ask_sz=m.get("yes_ask_size"))
+                    continue
+
+                # ── new entry ──
+                if held > 0:
+                    continue
+                if not (ask_lo_c <= ask_c <= ask_hi_c) or gap < gap_min:
+                    continue
+                if phase == "catchup":
+                    if ticker not in evening_triggered:
+                        # gap first appearing overnight: measured 17% win, -0.38/$
+                        _nb_log_signal(ticker, city_key, target, "overnight_fresh",
+                                       ask_c, bid_c, p, gap, False, is_live)
+                        continue
+                else:
+                    if ticker not in evening_triggered:
+                        # sighting record (acted is tracked on the 'entry' row)
+                        _nb_log_signal(ticker, city_key, target, "entry_trigger",
+                                       ask_c, bid_c, p, gap, False, is_live,
+                                       ask_sz=m.get("yes_ask_size"))
+                        evening_triggered.add(ticker)
+                room = min(cap_tk - held, cap_day - dep_day.get(target, 0.0))
+                if room < 1.0:
+                    continue
+                nominal = unit * min(ov_cap, gap / gap_min) / ov_div
+                limit_c = ask_c + slip_c
+                cnt = int(min(nominal, room) * 100) // limit_c
+                if cnt < 1:
+                    continue
+                filled, px, status, oid = _nb_place(ticker, cnt, limit_c, is_live,
+                                                    sim_fill_c=ask_c + 1)
+                _nb_log_signal(ticker, city_key, target, "entry", ask_c, bid_c,
+                               p, gap, filled > 0, is_live,
+                               note=f"phase={phase} nominal=${nominal:.0f}",
+                               ask_sz=m.get("yes_ask_size"))
+                if filled > 0:
+                    cost = round(filled * px / 100.0, 2)
+                    logged = _live_trade_log(ticker, city_key, "yes", filled, ask_c,
+                                    limit_c, cost, is_live,
+                                    order_id=oid, requested_count=cnt,
+                                    filled_count=filled, fill_status=status,
+                                    avg_fill_price_c=px, target_date=target,
+                                    lo_temp=lo, hi_temp=hi, entry_prob=p,
+                                    strategy="nb", grade="NB")
+                    if is_live and logged is False:
+                        _NB_RUNTIME["dep"][ticker] = _NB_RUNTIME["dep"].get(ticker, 0.0) + cost
+                        _NB_RUNTIME["last_c"][ticker] = int(round(px))
+                        _NB_RUNTIME["day"][target] = _NB_RUNTIME["day"].get(target, 0.0) + cost
+                        at_log("ERR", f"NB fill {ticker} NOT logged to DB — tracked in-process", ticker=ticker)
+                    dep_ticker[ticker] = cost
+                    last_fill_c[ticker] = int(round(px))
+                    dep_day[target] = dep_day.get(target, 0.0) + cost
+                elif is_live:
+                    _live_trade_log(ticker, city_key, "yes", 0, ask_c, limit_c,
+                                    0.0, is_live, order_id=oid, requested_count=cnt,
+                                    filled_count=0, fill_status="unfilled",
+                                    avg_fill_price_c=None, target_date=target,
+                                    lo_temp=lo, hi_temp=hi, entry_prob=p,
+                                    strategy="nb", grade="NB")
+        except Exception as e:
+            at_log("ERR", f"NB cycle error {city_key}: {e}", city=city_key)
+    at_flush_log_to_db()
+
+
 def _auto_trader_scheduler():
     """Background thread — runs run_auto_trader_cycle() every scan_interval seconds."""
     import time as _t
@@ -3849,6 +4394,12 @@ def _auto_trader_scheduler():
                 run_gap_trader_cycle()
         except Exception as e:
             at_log("ERR", f"Gap scheduler error: {e}")
+            at_flush_log_to_db()
+        try:
+            if _AT_CONFIG.get("nb_enabled", False):
+                run_nb_trader_cycle()
+        except Exception as e:
+            at_log("ERR", f"NB scheduler error: {e}")
             at_flush_log_to_db()
         interval = _AT_CONFIG.get("scan_interval", 300)
         _t.sleep(interval)
@@ -6638,7 +7189,7 @@ class Handler(BaseHTTPRequestHandler):
             # POST; this is the emergency stop.
             try:
                 for k in ("enabled", "live_mode", "gap_enabled", "gap_live",
-                          "tail_enabled", "tail_live"):
+                          "tail_enabled", "tail_live", "nb_enabled", "nb_live"):
                     _AT_CONFIG[k] = False
                 try:
                     conn = get_db()
@@ -6646,7 +7197,7 @@ class Handler(BaseHTTPRequestHandler):
                         conn.autocommit = True
                         with conn.cursor() as cur:
                             for k in ("enabled", "live_mode", "gap_enabled", "gap_live",
-                                      "tail_enabled", "tail_live"):
+                                      "tail_enabled", "tail_live", "nb_enabled", "nb_live"):
                                 cur.execute("""
                                     INSERT INTO auto_trader_config (key, value, updated_at)
                                     VALUES (%s, 'false', NOW())
@@ -6657,7 +7208,8 @@ class Handler(BaseHTTPRequestHandler):
                     pass
                 at_log("KILL", "Kill switch activated — forecast AND gap strategies OFF")
                 self.send_json({"ok": True, "enabled": False, "live_mode": False,
-                                "gap_enabled": False, "gap_live": False})
+                                "gap_enabled": False, "gap_live": False,
+                                "nb_enabled": False, "nb_live": False})
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
@@ -6672,9 +7224,10 @@ class Handler(BaseHTTPRequestHandler):
                 _ensure_live_trades_table(conn)
                 out = {}
                 specs = {
-                    "forecast": "COALESCE(strategy, '') NOT IN ('tail', 'gap')",
+                    "forecast": "COALESCE(strategy, '') NOT IN ('tail', 'gap', 'nb')",
                     # 'gap' includes legacy tail rows — same trade, generalized
                     "gap":      "strategy IN ('tail', 'gap')",
+                    "nb":       "strategy = 'nb'",
                 }
                 with conn.cursor() as cur:
                     for name, frag in specs.items():
@@ -6809,6 +7362,29 @@ class Handler(BaseHTTPRequestHandler):
                 out["gap"]["cap"] = _AT_CONFIG.get("gap_daily_cap_dollars")
                 out["gap"]["position_dollars"] = _AT_CONFIG.get("gap_position_dollars")
                 out["gap"]["ev_floor"] = _AT_CONFIG.get("gap_ev_floor")
+                out["nb"]["enabled"] = bool(_AT_CONFIG.get("nb_enabled"))
+                out["nb"]["live"] = bool(_AT_CONFIG.get("nb_live"))
+                out["nb"]["unit_dollars"] = _AT_CONFIG.get("nb_unit_dollars")
+                out["nb"]["ticker_cap"] = _AT_CONFIG.get("nb_ticker_cap")
+                out["nb"]["cap"] = _AT_CONFIG.get("nb_day_cap")
+                out["nb"]["gap_min"] = _AT_CONFIG.get("nb_gap_min")
+                # window status per tz for the dashboard header
+                try:
+                    from datetime import datetime as _dtw
+                    _now = _dtw.utcnow().replace(tzinfo=pytz.utc)
+                    _wins = {}
+                    for _tz, _lbl in (("America/New_York", "east"),
+                                      ("America/Chicago", "central"),
+                                      ("America/Denver", "mountain"),
+                                      ("America/Los_Angeles", "west")):
+                        _lh = _now.astimezone(pytz.timezone(_tz)).hour
+                        _start = 19 if _lbl == "east" else int(_AT_CONFIG.get("nb_hour_start", 18))
+                        _wins[_lbl] = ("open" if _lh >= _start else
+                                       "catchup" if _lh < int(_AT_CONFIG.get("nb_catchup_end_h", 8))
+                                       else "closed")
+                    out["nb"]["windows"] = _wins
+                except Exception:
+                    pass
                 self.send_json({"ok": True, "strategies": out})
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
@@ -6847,7 +7423,7 @@ class Handler(BaseHTTPRequestHandler):
                                    COUNT(*) FILTER (WHERE is_live),
                                    COUNT(*) FILTER (WHERE NOT is_live)
                             FROM live_trades WHERE ts::date = CURRENT_DATE
-                              AND COALESCE(strategy, '') NOT IN ('tail', 'gap')
+                              AND COALESCE(strategy, '') NOT IN ('tail', 'gap', 'nb')
                         """)
                         r = cur.fetchone()
                         out["spent_today"] = float(r[0]); out["live_fills_today"] = r[1]
@@ -6856,7 +7432,7 @@ class Handler(BaseHTTPRequestHandler):
                             SELECT COUNT(*), ROUND(AVG(slippage_c)::numeric,2),
                                    ROUND(AVG(ABS(slippage_c))::numeric,2)
                             FROM live_trades WHERE slippage_c IS NOT NULL
-                              AND COALESCE(strategy, '') NOT IN ('tail', 'gap')
+                              AND COALESCE(strategy, '') NOT IN ('tail', 'gap', 'nb')
                         """)
                         r = cur.fetchone()
                         out["slippage"] = {"n": r[0], "avg_c": float(r[1] or 0),
@@ -6865,7 +7441,7 @@ class Handler(BaseHTTPRequestHandler):
                             SELECT ts, ticker, city, count, paper_ask_c, order_ask_c,
                                    slippage_c, cost, is_live, grade
                             FROM live_trades
-                            WHERE COALESCE(strategy, '') NOT IN ('tail', 'gap')
+                            WHERE COALESCE(strategy, '') NOT IN ('tail', 'gap', 'nb')
                             ORDER BY ts DESC LIMIT 25
                         """)
                         out["recent_fills"] = [
