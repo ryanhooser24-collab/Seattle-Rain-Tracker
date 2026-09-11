@@ -3923,6 +3923,7 @@ def _nb_fetch_forecast(city_key):
     Live fetch = freshest published runs (>= p1 quality; the backtest's edge is
     a conservative floor for this)."""
     import time as _t
+    import pytz
     from datetime import datetime as _dt, timedelta as _td
     c = _NB_FC_CACHE.get(city_key)
     if c and _t.time() - c["ts"] < 1800:
@@ -4170,6 +4171,7 @@ def _nb_place(ticker, count, limit_c, is_live, sim_fill_c=None):
 def run_nb_trader_cycle():
     """One Night Before scan across all cities. Called from the scheduler when
     nb_enabled. Window/rules per the verified spec; integer-cent price math."""
+    import pytz
     from datetime import datetime as _dt, timedelta as _td
     cfg = _AT_CONFIG
     is_live   = bool(cfg.get("nb_live", False))
@@ -7370,6 +7372,7 @@ class Handler(BaseHTTPRequestHandler):
                 out["nb"]["gap_min"] = _AT_CONFIG.get("nb_gap_min")
                 # window status per tz for the dashboard header
                 try:
+                    import pytz
                     from datetime import datetime as _dtw
                     _now = _dtw.utcnow().replace(tzinfo=pytz.utc)
                     _wins = {}
