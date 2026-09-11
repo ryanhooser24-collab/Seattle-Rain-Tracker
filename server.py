@@ -542,25 +542,17 @@ def fetch_temp_forecast(city_key, horizon="d1"):
         blend_hi_adj = round(best_raw.get("high", 0) - blend_bias_high, 1) if best_raw  else None
         blend_lo_adj = round(best_raw.get("low",  0) - 0.0,             1) if best_raw  else None
 
-        # ── Use best model per city (GFS vs ECMWF, by lowest bc_rmse) ─────────
-        # Simple selection until trigger-moment data justifies seasonal/spread rules.
-        best_model = bias_cache.get("best_model", "average")
-
-        if best_model == "gfs" and gfs_hi_adj is not None:
-            best_hi = gfs_hi_adj
-            best_lo = gfs_lo_adj
-        elif best_model == "ecmwf" and ecmwf_hi_adj is not None:
-            best_hi = ecmwf_hi_adj
-            best_lo = ecmwf_lo_adj
-        elif best_model == "blend" and blend_hi_adj is not None:
-            best_hi = blend_hi_adj
-            best_lo = blend_lo_adj
-        else:
-            hi_vals = [v for v in [gfs_hi_adj, ecmwf_hi_adj, blend_hi_adj] if v is not None]
-            lo_vals = [v for v in [gfs_lo_adj, ecmwf_lo_adj, blend_lo_adj] if v is not None]
-            best_hi = round(sum(hi_vals) / len(hi_vals), 1) if hi_vals else None
-            best_lo = round(sum(lo_vals) / len(lo_vals), 1) if lo_vals else None
-            best_model = "average"
+        # ── Model center = plain average, always ─────────────────────────────
+        # The old winner-take-all pick (lowest hindcast bc_rmse) lost to the
+        # simple average in 10/17 cities on forecast-vs-CLI MAE (2026-08-31,
+        # bug-independent measurement; e.g. Chicago 1.0F avg vs 2.07F pick),
+        # and the hindcast ranking that drove it was mirror-contaminated.
+        # NB's live sleeve independently converged on the same design.
+        hi_vals = [v for v in [gfs_hi_adj, ecmwf_hi_adj, blend_hi_adj] if v is not None]
+        lo_vals = [v for v in [gfs_lo_adj, ecmwf_lo_adj, blend_lo_adj] if v is not None]
+        best_hi = round(sum(hi_vals) / len(hi_vals), 1) if hi_vals else None
+        best_lo = round(sum(lo_vals) / len(lo_vals), 1) if lo_vals else None
+        best_model = "average"
 
         # Outlier override: REMOVED — implement analytically once trigger-moment data justifies it.
 
@@ -871,38 +863,6 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
     if city_key in _SPRING_VOLATILE and _month in (3, 4, 5):
         sigma = round(sigma * 1.5, 2)
 
-    # Regional minimum sigma floors — prevent catastrophic overconfidence.
-    # Floors are set by climate zone and season volatility, not model output.
-    # These represent the minimum believable forecast uncertainty for each region.
-    _SIGMA_FLOORS = {
-        # Midwest: high spring volatility, frontal boundaries volatile
-        'minneapolis':   1.5,
-        'chicago':       1.2,
-        'oklahoma_city': 1.2,
-        # East Coast: moderate spring volatility
-        'nyc':           1.0,
-        'philadelphia':  1.0,
-        'washington_dc': 1.0,
-        'boston':        1.0,
-        'atlanta':       1.0,
-        # Mountain: convective volatility in spring
-        'denver':        0.8,
-        # Stable desert/tropical — low floors justified
-        'phoenix':       0.4,
-        'las_vegas':     0.6,
-        'miami':         0.6,
-        # Variable coasts — marine layer makes forecasting hard
-        'san_francisco': 1.5,
-        'los_angeles':   1.2,
-        'seattle':       1.5,
-        # Gulf Coast
-        'houston':       0.8,
-        'austin':        0.8,
-    }
-    _floor = _SIGMA_FLOORS.get(city_key, 0.8)
-    if sigma < _floor:
-        sigma = _floor
-
     # Inflate σ further by model spread in quadrature.
     # When GFS and ECMWF disagree, today's forecast is genuinely harder than
     # the historical RMSE baseline.
@@ -925,6 +885,20 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
         if _cc:
             mu    = round(mu + _cc["bias_c"], 2)
             sigma = round(sigma * _cc["sig_f"], 2)
+
+    # Empirical minimum sigma floor — the FINAL clamp, applied after sig_f so
+    # the two corrections cannot stack (sig_f is measured against historical
+    # stored sigmas; flooring first would multiply into ~4.8F overshoot).
+    # Measured 2026-09-11 on clean post-2026-07-15 settled residuals (dedup
+    # last snapshot per city/date/horizon, T/mirror bugs fixed):
+    #   d0: actual residual SD 2.35F vs model-claimed 0.96F (2.4x tight —
+    #       the old 0.4-1.5F per-city floors were the leak; live
+    #       entry_prob >= 0.95 trades won only ~70%)
+    #   d1: actual 2.89F vs claimed 2.78F (nearly calibrated)
+    _EMP_SIGMA_FLOORS = {"d0": 2.0, "d1": 2.2}
+    _floor = _EMP_SIGMA_FLOORS.get(forecast.get("horizon", "d1"), 2.2)
+    if sigma < _floor:
+        sigma = _floor
 
     if mu is None:
         for m in markets:
@@ -1377,6 +1351,10 @@ def detect_combo_signals(all_markets, forecast):
 
     mu    = forecast.get("best_high")
     sigma = forecast.get("sigma", 2.0)
+    # Same empirical sigma floor as the main analyzer — the raw hindcast
+    # sigma here was the last un-floored path (d0 claimed 0.96F vs 2.35F
+    # actual residual SD, measured 2026-09-11 on clean data).
+    sigma = max(sigma, 2.0 if forecast.get("horizon") == "d0" else 2.2)
     if mu is None or sigma <= 0:
         return []
 
