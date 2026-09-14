@@ -1841,6 +1841,15 @@ _AT_CONFIG = {
     "horizons":       ["d0", "d1"],
     "kelly_mult":     0.50,
     "bankroll_unit":  100.0,
+    # Minimum ask (cents) the sleeve will pay. There was NO floor before
+    # 2026-09-14. Below ~25c this sleeve is an anti-edge on every dataset we
+    # have: full-history calibration puts B brackets at -0.38/$ (0-5c) through
+    # -0.17/$ (20-30c), negative in every month; the A-rule replay on the clean
+    # substrate shows 14-25% of its triggers sitting <20c at a 14% win rate; and
+    # live it filled 117 orders / 27 tickers under 25c for 2 wins and -$326.
+    # 25c is also where taker fills are proven (99.6%, +0.5c slip). Applied to
+    # the REFETCHED ask in the execution loop, so it gates what is actually paid.
+    "min_ask_c":      25,
     "max_per_fill":   25.0,
     "max_per_ticker": 75.0,
     "max_positions":  10,
@@ -1948,6 +1957,11 @@ _AT_CONFIG = {
     "nb_hour_start":      18,     # local; Eastern cities gate at 19 (18z pub)
     "nb_hour_start_east": 19,
     "nb_catchup_end_h":   8,      # unfilled evening triggers may fill until this local hour
+    # Rise rungs on an ALREADY-HELD ticker after local midnight. The verified
+    # top-up leg included them (+0.72/$, N=25, P0=.008) but the deployed code
+    # shadow-logged them; default False keeps current behaviour until armed
+    # deliberately. Unrelated to the overnight-ENTRY guard, which is always on.
+    "nb_overnight_rungs": False,
 }
 
 
@@ -3204,6 +3218,14 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
         ask_size = market["yes_ask_size"]
         ask_c    = round(ask * 100)
 
+        # Minimum-ask floor — integer cents, checked on the REFETCHED ask so it
+        # gates the price actually paid, not the stale scan price.
+        _min_ask_c = int(cfg.get("min_ask_c", 25))
+        if ask_c < _min_ask_c:
+            at_log("SKIP", f"{ticker} ask {ask_c}¢ below min_ask_c {_min_ask_c}¢ — stopping",
+                   ticker=ticker, city=city_key)
+            break
+
         # Recalculate grade at current ask price
         if mu is not None and sigma and sigma > 0 and ask > 0 and ask < 1:
             from math import erf, sqrt as _sqrt
@@ -3854,7 +3876,7 @@ _NB_TABLES_READY = False
 _NB_FETCH_ERR_LOGGED = {}
 # In-process fallback when a LIVE fill's DB write fails — merged into
 # _nb_state so caps/dedupe still see the position (gap-sleeve precedent).
-_NB_RUNTIME = {"dep": {}, "last_c": {}, "day": {}}
+_NB_RUNTIME = {"dep": {}, "base_ask_c": {}, "last_ask_c": {}, "day": {}}
 
 def _nb_phi(x):
     import math as _m
@@ -4048,10 +4070,23 @@ def _nb_log_signal(ticker, city, tdate, kind, ask_c, bid_c, p_model, gap,
         print(f"  nb_log_signal: {e}")
 
 def _nb_state(is_live):
-    """Per-ticker deployed $ and last fill price (cents), per-tdate deployed $,
-    and the set of tickers whose FIRST trigger was logged before local midnight
-    (i.e. legitimate catch-up candidates). Mode-scoped (sim vs live)."""
-    dep_ticker, last_fill_c, dep_day = {}, {}, {}
+    """Per-ticker deployed $, the BASE ENTRY ASK and the LAST BUY'S ASK (cents),
+    per-tdate deployed $, and the set of tickers whose FIRST trigger was logged
+    before local midnight (i.e. legitimate catch-up candidates). Mode-scoped.
+
+    Two distinct reference prices — conflating them was the 2026-09-14 bug:
+      base_ask_c  — the ask at the BASE entry, FIXED for the ticker's life.
+                    The dip test measures against this and nothing else.
+      last_ask_c  — the ask at the most recent buy (base or rung). The rise
+                    ladder ratchets on this.
+    Both are ASKS (live_trades.paper_ask_c), never fill prices: the backtest
+    defines every rung and dip against the quoted ask (its sim fills at ask+1),
+    so anchoring to avg_fill_price_c shifted both tests by the live slip —
+    dips fired 1-3c early and rungs needed 1-3c more. Worse, the old MAX()
+    ratcheted the reference UP after a rung, so a topped-up ticker could be
+    dip-banned ABOVE its own entry ask (KXHIGHTPHX-26SEP14-T101: entry ask 35,
+    max fill 40.05 -> dip fired at 37). Bans are permanent, so this never healed."""
+    dep_ticker, base_ask_c, last_ask_c, dep_day = {}, {}, {}, {}
     evening_triggered, dipped = set(), set()
     try:
         conn = get_db()
@@ -4063,15 +4098,23 @@ def _nb_state(is_live):
             cur.execute("""
                 SELECT ticker, target_date,
                        COALESCE(SUM(filled_count * avg_fill_price_c / 100.0), 0),
-                       MAX(avg_fill_price_c)
+                       COALESCE(
+                         (array_agg(paper_ask_c ORDER BY ts)
+                            FILTER (WHERE grade = 'NB' AND paper_ask_c IS NOT NULL))[1],
+                         (array_agg(paper_ask_c ORDER BY ts)
+                            FILTER (WHERE paper_ask_c IS NOT NULL))[1]
+                       ) AS base_ask_c,
+                       (array_agg(paper_ask_c ORDER BY ts DESC)
+                          FILTER (WHERE paper_ask_c IS NOT NULL))[1] AS last_ask_c
                 FROM live_trades
                 WHERE strategy = 'nb' AND is_live = %s
                   AND COALESCE(filled_count, 0) > 0
                 GROUP BY ticker, target_date
             """, (is_live,))
-            for tk, td, dep, px in cur.fetchall():
+            for tk, td, dep, base_c, last_c in cur.fetchall():
                 dep_ticker[tk] = float(dep or 0)
-                last_fill_c[tk] = int(round(float(px))) if px is not None else None
+                base_ask_c[tk] = int(base_c) if base_c is not None else None
+                last_ask_c[tk] = int(last_c) if last_c is not None else base_ask_c[tk]
                 if td:
                     dep_day[td] = dep_day.get(td, 0.0) + float(dep or 0)
             cur.execute("""
@@ -4081,15 +4124,29 @@ def _nb_state(is_live):
             """, (is_live,))
             for tk, first_ts in cur.fetchall():
                 evening_triggered.add(tk)
-            # sticky dip ban: once a ticker dipped 3c+ below our fill, its
-            # top-up path stays closed for good (dip-then-recovery re-buys
-            # were measured negative)
+            # Sticky dip ban: once a ticker's ask fell 3c+ below the BASE ENTRY
+            # ASK, its top-up path stays closed for good (dip-then-recovery
+            # re-buys measured negative).
+            #
+            # The ban is RE-DERIVED from the logged ask, not trusted as a bare
+            # flag, because rows written before the reference fix used the
+            # max-fill-price anchor. That old threshold (maxfill-3) is always >=
+            # the correct one (base_ask-3) since a fill never prints below its
+            # ask, so the historical dip_flag rows are a strict SUPERSET of the
+            # genuine dips — filtering them on ask_c <= base_ask_c - 3 recovers
+            # the correct ban exactly, for old and new rows alike. Without this,
+            # 5 of 7 live tickers carried a permanent ban the real rule never
+            # would have set (KXHIGHTPHX-26SEP14-T101 was banned at ask 37 on a
+            # base entry ask of 35 — above its own entry).
             cur.execute("""
-                SELECT DISTINCT ticker FROM nb_signals
-                WHERE kind = 'dip_flag' AND is_live = %s
+                SELECT ticker, MIN(ask_c) FROM nb_signals
+                WHERE kind = 'dip_flag' AND is_live = %s AND ask_c IS NOT NULL
+                GROUP BY ticker
             """, (is_live,))
-            for (tk,) in cur.fetchall():
-                dipped.add(tk)
+            for tk, low_ask in cur.fetchall():
+                b = base_ask_c.get(tk)
+                if b is not None and low_ask is not None and int(low_ask) <= b - 3:
+                    dipped.add(tk)
         conn.close()
     except Exception as e:
         at_log("ERR", f"NB state read failed: {e}")
@@ -4098,12 +4155,13 @@ def _nb_state(is_live):
     if is_live:
         for tk, dep in _NB_RUNTIME["dep"].items():
             dep_ticker[tk] = dep_ticker.get(tk, 0.0) + dep
-        for tk, c in _NB_RUNTIME["last_c"].items():
-            if tk not in last_fill_c or c > (last_fill_c[tk] or 0):
-                last_fill_c[tk] = c
+        for tk, c in _NB_RUNTIME["base_ask_c"].items():
+            base_ask_c.setdefault(tk, c)          # base never moves once set
+        for tk, c in _NB_RUNTIME["last_ask_c"].items():
+            last_ask_c[tk] = c                     # last buy wins
         for td, dep in _NB_RUNTIME["day"].items():
             dep_day[td] = dep_day.get(td, 0.0) + dep
-    return dep_ticker, last_fill_c, dep_day, evening_triggered, dipped
+    return dep_ticker, base_ask_c, last_ask_c, dep_day, evening_triggered, dipped
 
 def _nb_place(ticker, count, limit_c, is_live, sim_fill_c=None):
     """IOC buy YES, mirroring the battle-tested gap parser exactly:
@@ -4168,10 +4226,12 @@ def run_nb_trader_cycle():
     h_start_e = int(cfg.get("nb_hour_start_east", 19))
     h_catchup = int(cfg.get("nb_catchup_end_h", 8))
 
+    ov_rungs  = bool(cfg.get("nb_overnight_rungs", False))
+
     st = _nb_state(is_live)
     if st is None:
         return
-    dep_ticker, last_fill_c, dep_day, evening_triggered, dipped = st
+    dep_ticker, base_ask_c, last_ask_c, dep_day, evening_triggered, dipped = st
 
     for city_key, ccfg in TEMP_CITIES.items():
         try:
@@ -4235,19 +4295,30 @@ def run_nb_trader_cycle():
                 gap = p - ask_c / 100.0
 
                 held = dep_ticker.get(ticker, 0.0)
-                last_c = last_fill_c.get(ticker)
+                base_c = base_ask_c.get(ticker)   # dip reference: FIXED base entry ask
+                last_c = last_ask_c.get(ticker)   # rung reference: ratchets on last buy
 
                 # ── dip flag (shadow exit signal; never trade) ──
-                if last_c is not None and ask_c <= last_c - 3:
+                # Measured against the BASE ENTRY ASK only — never the fill
+                # price and never a later rung's ask (see _nb_state).
+                if base_c is not None and ask_c <= base_c - 3:
                     _nb_log_signal(ticker, city_key, target, "dip_flag", ask_c, bid_c,
-                                   p, gap, False, is_live)
+                                   p, gap, False, is_live,
+                                   note=f"base_ask={base_c}c")
                     continue
 
-                # ── top-up rung: rise +3c, gap holds, <= 60c, EVENING only
-                # (overnight rungs are untested — shadow-log them), and never
-                # after a dip flag (dip-then-recovery re-buys measured toxic) ──
+                # ── top-up rung: rise +3c over the LAST BUY's ask, gap holds,
+                # <= 60c, and never after a dip flag (dip-then-recovery re-buys
+                # measured toxic). Overnight rungs are gated by
+                # nb_overnight_rungs (default False = shadow-log only); the
+                # verified top-up leg did include them (+0.72/$, N=25, P0=.008),
+                # but that is a separate decision from the reference fix and
+                # opens trading in a window the sleeve does not currently use.
+                # NOTE: this is distinct from the overnight-ENTRY guard below,
+                # which stays unconditional — gaps FIRST APPEARING overnight
+                # retest at 10.5% win / -0.66 per $ on fresh forecasts. ──
                 if held > 0 and last_c is not None and ask_c >= last_c + 3 and ask_c <= ask_hi_c:
-                    if phase != "evening":
+                    if phase != "evening" and not ov_rungs:
                         if gap >= gap_shadow:
                             _nb_log_signal(ticker, city_key, target, "shadow_rung_overnight",
                                            ask_c, bid_c, p, gap, False, is_live,
@@ -4279,11 +4350,13 @@ def run_nb_trader_cycle():
                                                 strategy="nb", grade="NB-TOP")
                                 if is_live and logged is False:
                                     _NB_RUNTIME["dep"][ticker] = _NB_RUNTIME["dep"].get(ticker, 0.0) + cost
-                                    _NB_RUNTIME["last_c"][ticker] = int(round(px))
+                                    _NB_RUNTIME["last_ask_c"][ticker] = ask_c
                                     _NB_RUNTIME["day"][target] = _NB_RUNTIME["day"].get(target, 0.0) + cost
                                     at_log("ERR", f"NB top-up fill {ticker} NOT logged to DB — tracked in-process", ticker=ticker)
                                 dep_ticker[ticker] = held + cost
-                                last_fill_c[ticker] = int(round(px))
+                                # ratchet the RUNG reference only; the dip
+                                # reference (base_ask_c) must never move
+                                last_ask_c[ticker] = ask_c
                                 dep_day[target] = dep_day.get(target, 0.0) + cost
                             elif is_live:
                                 _live_trade_log(ticker, city_key, "yes", 0, ask_c, limit_c,
@@ -4341,11 +4414,14 @@ def run_nb_trader_cycle():
                                     strategy="nb", grade="NB")
                     if is_live and logged is False:
                         _NB_RUNTIME["dep"][ticker] = _NB_RUNTIME["dep"].get(ticker, 0.0) + cost
-                        _NB_RUNTIME["last_c"][ticker] = int(round(px))
+                        _NB_RUNTIME["base_ask_c"].setdefault(ticker, ask_c)
+                        _NB_RUNTIME["last_ask_c"][ticker] = ask_c
                         _NB_RUNTIME["day"][target] = _NB_RUNTIME["day"].get(target, 0.0) + cost
                         at_log("ERR", f"NB fill {ticker} NOT logged to DB — tracked in-process", ticker=ticker)
                     dep_ticker[ticker] = cost
-                    last_fill_c[ticker] = int(round(px))
+                    # base entry: this ask anchors the dip test for good
+                    base_ask_c.setdefault(ticker, ask_c)
+                    last_ask_c[ticker] = ask_c
                     dep_day[target] = dep_day.get(target, 0.0) + cost
                 elif is_live:
                     _live_trade_log(ticker, city_key, "yes", 0, ask_c, limit_c,
