@@ -4145,7 +4145,14 @@ def _nb_state(is_live):
             """, (is_live,))
             for tk, low_ask in cur.fetchall():
                 b = base_ask_c.get(tk)
-                if b is not None and low_ask is not None and int(low_ask) <= b - 3:
+                if b is None or low_ask is None:
+                    # Base ask unrecoverable (paper_ask_c NULL, or the fill's
+                    # live_trades write failed while the signal row landed).
+                    # KEEP the ban: the permissive direction would re-buy into
+                    # a genuine dip, and dipped entries lose (29% win vs 53%).
+                    # Costs at most one rung; the other way costs real money.
+                    dipped.add(tk)
+                elif int(low_ask) <= b - 3:
                     dipped.add(tk)
         conn.close()
     except Exception as e:
