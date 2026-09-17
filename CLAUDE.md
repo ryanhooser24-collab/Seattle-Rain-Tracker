@@ -145,6 +145,13 @@ explicitly asked. Never arm/disarm without an explicit instruction.
 - Sigma was ~65% too narrow globally before per-city calibration (bias +
   sigma factor, shrinkage to global means, clamped) — that fix is core to v2.
 - Combo rows poison calibration SQL (inflate z-std) — always filter them.
+- **Changing the data under an analysis invalidates every statistic computed
+  on it, and backfills are the dangerous case because they feel like
+  correctness fixes rather than data changes.** The 2026-09-17 fee backfill
+  was unambiguously a fix, and it silently broke a statistic computed hours
+  earlier the same day (see the rho note below). Rerun anything downstream
+  after a backfill, and when publishing a figure, say which vintage it was
+  computed on.
 - `fillable_a` from `/orderbook` is structurally unreliable: it only shows
   resting limit orders. Market-maker liquidity appears only in `/markets` BBO.
 - NO-side betting: tested and dead on raw + corrected model, train + test.
