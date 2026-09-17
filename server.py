@@ -2021,14 +2021,19 @@ _AT_CONFIG = {
     # last-10-day mean residual diverges >1F from the rolling-21 bias."
     #
     # IMPORTANT — the spec's literal formulation is BLIND and must not be used.
-    # Measured on the 13 live tickets, max |last10 - last21| was 0.84F against
-    # its own 1F trigger, so it would not have fired once. The reason: both
-    # windows are slices of the SAME list, which is ~95% frozen shipped
-    # calibration (phoenix at 09-15 had only 4 live points inside its last 21),
-    # so the two means move together and the drift cancels out.
+    # On the nine city-days the sleeve actually traded it fires ZERO times: the
+    # highest reading among them is miami 09-12 at 0.84F against a 1F trigger,
+    # and phoenix — the city that did the damage — reads 0.52-0.78F all week.
+    # It is worse than merely insensitive: it DOES cross 1F for oklahoma_city
+    # (peak 1.21F) and miami on 09-16/17 (1.06F), i.e. on city-days the sleeve
+    # held no position. It fires where there is nothing to protect and stays
+    # silent where the money is.
+    # The reason both windows are slices of the SAME list, which is ~96% frozen
+    # shipped calibration (phoenix at 09-15 had only 4 live points inside its
+    # last 21), so the two means move together and the drift cancels out.
     # The guard below instead compares the applied bias against the mean of the
     # SELF-EXTENDED (live) residuals only. Same phoenix case: 0.58F by the spec
-    # formula, 1.60F measured correctly.
+    # formula, 1.28-1.60F measured correctly.
     #
     # Live-tape result, EWMA half-life 7 + this guard at 1.0F: 4 of 13 tickets
     # fire, $94.31 staked, +$8.59 instead of −$256.75. Treat the SIGN as the

@@ -69,6 +69,21 @@ tickets at −1.000/$; the week's largest gap was its largest loss) and a
 market-agreement gate (worse at every threshold — on 09-14 phoenix the model
 and the market agreed to 0.07°F and both were 2.2°F cold).
 
+*The best evidence the mechanism is real, and its limit.* The vintage placebo
+in `analysis2/edge_highs/results.md:49-54` runs the identical rule on a STALE
+forecast: fresh p1 +0.287/$ vs stale p2 **+0.045/$ (P0=0.40)**, with only 47
+of 171 triggers overlapping, and d0_pre9 (next morning) +0.11 n.s. If the
+signal were purely our own forecast error, the *worse* vintage should generate
+more spurious triggers and lose more — p2 is measurably worse (max MAE 2.05°F
+vs 1.66°F, paired t=12.9) yet earns ~0 rather than going negative. **Caveat,
+and it is not resolvable from these numbers:** "a fresher run is more
+accurate, so its disagreements are more often right" fits the same data and is
+a model-quality story, not an information-timing one. Only the time structure
+separates them — onset at run publication, holds to local midnight, collapses
+after — and that is suggestive, not proof. None of it was measured on
+September data, so it says nothing about whether the mechanism is alive now.
+That is what the shadow period is for.
+
 The forecast, tail, and gap sleeves are retired
 (tail/gap edges were data-bug artifacts — memory `market-efficiency-audit-2026-09`;
 forecast +24% was the T off-by-one). All four data bugs are fixed in code+DB.
@@ -138,7 +153,11 @@ explicitly asked. Never arm/disarm without an explicit instruction.
 - A regime guard must measure drift against SELF-EXTENDED (live) residuals
   only. Comparing two windows of the combined list cannot work while the
   shipped calibration file is ~96% of it — both windows move together. The
-  spec's last10-vs-last21 form never fired once on the losing week.
+  spec's last10-vs-last21 form fires 0 times across the nine city-days the
+  sleeve actually traded (worst: miami 09-12 at 0.84F vs a 1F trigger;
+  phoenix 0.52-0.78F all week), yet it DOES cross 1F for oklahoma_city
+  (1.21F) and for miami on 09-16/17 — days with no position. It fires where
+  there is nothing to protect and is silent where the money is.
 - Bigger model-vs-market disagreement is NOT a better bet. When the forecast is
   biased, the largest gaps are the largest errors.
 
