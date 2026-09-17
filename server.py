@@ -1946,7 +1946,29 @@ _AT_CONFIG = {
     "nb_unit_dollars":    50.0,   # base position size
     "nb_topup_dollars":   25.0,   # rise top-up size
     "nb_gap_min":         0.15,   # p_model - ask entry threshold
-    "nb_shadow_gap_min":  0.10,   # shadow-log rungs down to this gap (no trade)
+    "nb_shadow_gap_min":  0.10,   # TOP-UP RUNGS ONLY — not a global shadow
+                                  # threshold, despite the name. Consulted at
+                                  # exactly two places, both inside the rung
+                                  # branch on tickers ALREADY HELD. The
+                                  # new-entry reject is a bare `continue` with
+                                  # no logging, so a candidate that misses the
+                                  # ask band or nb_gap_min leaves no trace at
+                                  # all. Consequence: of ~99 distinct D-1
+                                  # candidates priced each night across 17
+                                  # cities, only the 1-3 that TRADE are
+                                  # recorded — nb_signals holds 1,014 rows but
+                                  # just 21 distinct tickers for a whole week.
+                                  # That is why the 2026-09 audit had to
+                                  # rebuild its calibration curve from
+                                  # temp_snapshots instead, and why the
+                                  # re-arm bar's shadow-EV condition
+                                  # accumulates at ~1.5 tickets/day and can
+                                  # say nothing about whether nb_gap_min sits
+                                  # in the right place. Logging near-misses
+                                  # (deduped once per ticker per night, ~99
+                                  # rows) is instrumentation only, no money
+                                  # and no selection change — NOT YET BUILT,
+                                  # it is Ryan's call.
     "nb_ask_min_c":       25,     # entry band, cents
     "nb_ask_max_c":       60,
     "nb_slip_cap_c":      3,      # IOC limit = ask + this
