@@ -53,6 +53,16 @@ hides a 1st-half +0.73 vs 2nd-half −0.06 split.
 `nb_dd_stop_dollars` (150) auto-disarms to SIM on a trailing-7-day breach and
 leaves `nb_enabled` on so shadow logging survives. Re-arming is always manual.
 
+*Known interaction, by design, not a bug:* the breaker reads realised PnL by
+**target date**, so the September drawdown stays inside its window for a
+while. Arming before **2026-09-22** means the breaker trips on the very next
+cycle and puts the sleeve straight back into SIM with only a KILL log line to
+show for it. Trailing-7d by as-of date: 09-17 −$261.92, 09-19 −$282.62,
+09-20 −$243.67, 09-21 −$215.59, **09-22 −$77.65 (first day inside the
+threshold)**, 09-23 +$9.84. This is aligned with the re-arm bar above, which
+needs ~10 clean days anyway — but do not mistake the auto-disarm for a new
+failure if you arm early.
+
 **Two filters that look right and are REFUTED by the live tape — do not add
 them back without new evidence:** raising `nb_gap_min` (gap≥0.25 leaves 2
 tickets at −1.000/$; the week's largest gap was its largest loss) and a
