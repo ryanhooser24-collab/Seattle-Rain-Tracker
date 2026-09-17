@@ -1962,6 +1962,87 @@ _AT_CONFIG = {
     # shadow-logged them; default False keeps current behaviour until armed
     # deliberately. Unrelated to the overnight-ENTRY guard, which is always on.
     "nb_overnight_rungs": False,
+
+    # ── NB risk + calibration hardening (2026-09-17, post-mortem on the
+    # 09-11..09-15 drawdown: 2/13 tickets, TRUE −$271.75 = −0.756/$).
+    #
+    # What the post-mortem actually established, so nobody re-litigates it:
+    #   - The model CENTRE (ens − rolling-21 bias) ran 0.59F cold over 62
+    #     D-1 city-days and was 0.48F less accurate than the market's own
+    #     implied high (MAE 1.65 vs 1.17, paired t=+3.86, market better on
+    #     41/62 days). Real, but smaller than the raw-ensemble gap suggests.
+    #   - TWO plausible filters were TESTED ON THE LIVE TAPE AND REJECTED —
+    #     do not add them back without new evidence:
+    #       * raising nb_gap_min: gap>=0.20 leaves 4 tickets at −1.000/$,
+    #         gap>=0.25 leaves 2 at −1.000/$. The single largest gap of the
+    #         week (nyc T74, p=0.734 vs ask 0.36) was the single largest
+    #         loss. A bigger disagreement is a bigger model error, not a
+    #         better bet.
+    #       * a market-agreement gate (|model centre − market implied| <= T):
+    #         WORSE at every threshold (−0.78 to −0.85/$ vs −0.714 actual).
+    #         On 09-14 phoenix the market implied 102.85 and the model 102.78
+    #         — they agreed to 0.07F — and the high was 105. Agreement does
+    #         not imply correctness.
+    # The keys below are the interventions that survived testing: they either
+    # cap a structurally indefensible exposure or make the sleeve honest about
+    # its own results. None of them claims to restore edge.
+    "nb_city_day_cap":    100.0,  # max deployed $ per (city, target_date).
+                                  # The $300 day cap is an AGGREGATE bound; it
+                                  # let 66% of the week's stake land in one
+                                  # heat dome and $185.80 (45%) in phoenix.
+    "nb_one_bracket":     True,   # at most ONE distinct bracket per city-day.
+                                  # Brackets on the same city-day are mutually
+                                  # exclusive, so holding two guarantees a loss
+                                  # on at least one. It happened twice: 09-14
+                                  # phoenix held "<=100" AND "103-104", 09-15
+                                  # held "99-100" AND "97-98" — $45.81 was a
+                                  # guaranteed loss the moment it was placed.
+                                  # Top-ups to a ticker already held are still
+                                  # allowed; that is the rise ladder, not a
+                                  # second view.
+    "nb_bias_halflife":   7,      # days, exponential half-life for the bias
+                                  # estimate. 0 restores the legacy flat
+                                  # rolling-21. The flat window could not track
+                                  # the ~08-24 cold drift: phoenix was corrected
+                                  # by −1.91F when the truth was −4.15F. On the
+                                  # 5-month walk-forward a 7-day half-life beats
+                                  # rolling-21 in the decayed Aug-Sep tail
+                                  # (+0.165 vs +0.081 per $).
+    "nb_dd_window_days":  7,      # trailing window for the drawdown breaker
+    "nb_dd_stop_dollars": 150.0,  # if trailing realised PnL <= −this, the
+                                  # sleeve disarms ITSELF to sim. The 5-day
+                                  # −$271.75 blew through the backtested max
+                                  # drawdown (−$236) with nothing to stop it.
+                                  # 0 disables the breaker.
+
+    # ── Regime-divergence guard. analysis2/skill/results.md:161-164 already
+    # prescribed this and it was never built: "after a sharp regime break the
+    # 21-day window adapts slowly ... guard by widening spreads when the
+    # last-10-day mean residual diverges >1F from the rolling-21 bias."
+    #
+    # IMPORTANT — the spec's literal formulation is BLIND and must not be used.
+    # Measured on the 13 live tickets, max |last10 - last21| was 0.84F against
+    # its own 1F trigger, so it would not have fired once. The reason: both
+    # windows are slices of the SAME list, which is ~95% frozen shipped
+    # calibration (phoenix at 09-15 had only 4 live points inside its last 21),
+    # so the two means move together and the drift cancels out.
+    # The guard below instead compares the applied bias against the mean of the
+    # SELF-EXTENDED (live) residuals only. Same phoenix case: 0.58F by the spec
+    # formula, 1.60F measured correctly.
+    #
+    # Live-tape result, EWMA half-life 7 + this guard at 1.0F: 4 of 13 tickets
+    # fire, $94.31 staked, +$8.59 instead of −$256.75. Treat the SIGN as the
+    # finding and the magnitude as in-sample noise — this is a 13-ticket fit
+    # and several thresholds were tried. It is stable across 0.5F-1.5F (the
+    # same 6 phoenix tickets are blocked at every setting in that range), and
+    # the 7-day half-life independently wins the Aug-Sep tail of the 5-month
+    # walk-forward (+0.165 vs +0.081 per $). Mostly this cuts exposure rather
+    # than creating edge: it removes two thirds of the tickets.
+    "nb_regime_div_f":    1.0,    # F; skip a city when |live mean residual −
+                                  # applied bias| exceeds this. 0 disables.
+    "nb_regime_min_pts":  2,      # minimum live residuals before the guard is
+                                  # allowed to judge a city (burn-in). Below
+                                  # this it stays silent and the city trades.
 }
 
 
@@ -2322,14 +2403,33 @@ def _live_trade_settle():
             """)
             n = cur.rowcount
 
-            # Realised PnL, in dollars, on confirmed fills only
+            # Realised PnL, in dollars, on confirmed fills only.
+            #
+            # FEE CONVENTION (fixed 2026-09-17). The old formula was
+            #   win -> C * (0.98 - P),  loss -> -C * P
+            # i.e. a flat 2%-of-payout haircut on WINNERS and NO FEE AT ALL on
+            # losers. Both halves are wrong:
+            #   - Kalshi settles a winning contract at the full $1.00; there is
+            #     no payout fee, so the 0.98 is wrong in kind, not just in size.
+            #   - The taker fee ceil(0.07 * C * P * (1-P)) is charged at
+            #     EXECUTION, so it lands on losing trades too.
+            # Booking $0 of fee on losses made a losing sleeve look better than
+            # it was: over NB's 13 settled live tickets the dashboard read
+            # -$256.75 when the truth was -$271.75 (-0.714/$ vs -0.756/$).
+            # The bias is win-rate dependent (it only nets out near a 76% win
+            # rate), so it always flatters whichever side is losing.
+            # This is the same expression used by /admin/recalibrate's rescore.
             cur.execute("""
                 UPDATE live_trades
-                SET pnl = ROUND(
+                SET pnl = ROUND((
                     CASE WHEN settled_correct
-                         THEN  COALESCE(filled_count, "count") * (0.98 - avg_fill_price_c / 100.0)
+                         THEN  COALESCE(filled_count, "count") * (1.0 - avg_fill_price_c / 100.0)
                          ELSE -COALESCE(filled_count, "count") * (avg_fill_price_c / 100.0)
-                    END::numeric, 2)
+                    END
+                    - CEIL(0.07 * COALESCE(filled_count, "count")
+                           * (avg_fill_price_c / 100.0)
+                           * (1.0 - avg_fill_price_c / 100.0) * 100.0) / 100.0
+                )::numeric, 2)
                 WHERE settled_correct IS NOT NULL
                   AND avg_fill_price_c IS NOT NULL
                   AND pnl IS NULL
@@ -3876,7 +3976,8 @@ _NB_TABLES_READY = False
 _NB_FETCH_ERR_LOGGED = {}
 # In-process fallback when a LIVE fill's DB write fails — merged into
 # _nb_state so caps/dedupe still see the position (gap-sleeve precedent).
-_NB_RUNTIME = {"dep": {}, "base_ask_c": {}, "last_ask_c": {}, "day": {}}
+_NB_RUNTIME = {"dep": {}, "base_ask_c": {}, "last_ask_c": {}, "day": {},
+               "city_day": {}, "held_city_day": {}}
 
 def _nb_phi(x):
     import math as _m
@@ -3914,6 +4015,17 @@ def _nb_ensure_tables(conn):
                 mins_since_2300z INTEGER, note TEXT
             )""")
         cur.execute("ALTER TABLE nb_signals ADD COLUMN IF NOT EXISTS ask_sz NUMERIC(10,1)")
+        # Decision-time forecast vintage. nb_forecasts UPSERTs on (tdate, city),
+        # so `ens` is always the LAST fetch of the evening, not the one a trade
+        # was priced off. The residual loop then learns against a later, more
+        # accurate forecast than the model actually saw, which biases the
+        # measured error toward zero and makes the bias correction under-adjust.
+        # Measured impact on 09-11..15 was small (+0.27F mean intra-evening
+        # drift, so this was NOT the cause of the cold miss) but it is free to
+        # fix and it is what makes per-trade attribution possible at all.
+        # ens_decision is written once on INSERT and never overwritten.
+        cur.execute("ALTER TABLE nb_forecasts ADD COLUMN IF NOT EXISTS ens_decision NUMERIC(6,2)")
+        cur.execute("ALTER TABLE nb_forecasts ADD COLUMN IF NOT EXISTS decided_at TIMESTAMPTZ")
         cur.execute("CREATE INDEX IF NOT EXISTS ix_nb_signals_tk ON nb_signals (ticker, kind)")
     conn.autocommit = old_ac
     _NB_TABLES_READY = True
@@ -3964,13 +4076,20 @@ def _nb_fetch_forecast(city_key):
                 _nb_ensure_tables(conn)
                 with conn.cursor() as cur:
                     cur.execute("""
-                        INSERT INTO nb_forecasts (tdate, city, gfs, ecmwf, icon, ens, fetched_at)
-                        VALUES (%s,%s,%s,%s,%s,%s,NOW())
+                        INSERT INTO nb_forecasts (tdate, city, gfs, ecmwf, icon, ens,
+                                                  fetched_at, ens_decision, decided_at)
+                        VALUES (%s,%s,%s,%s,%s,%s,NOW(),%s,NOW())
                         ON CONFLICT (tdate, city) DO UPDATE
                             SET gfs=EXCLUDED.gfs, ecmwf=EXCLUDED.ecmwf,
-                                icon=EXCLUDED.icon, ens=EXCLUDED.ens, fetched_at=NOW()
+                                icon=EXCLUDED.icon, ens=EXCLUDED.ens, fetched_at=NOW(),
+                                -- first vintage wins and is never overwritten;
+                                -- COALESCE on the EXISTING value, not EXCLUDED
+                                ens_decision = COALESCE(nb_forecasts.ens_decision,
+                                                        EXCLUDED.ens_decision),
+                                decided_at   = COALESCE(nb_forecasts.decided_at,
+                                                        EXCLUDED.decided_at)
                     """, (tdate, city_key, models.get("gfs"), models.get("ecmwf"),
-                          models.get("icon"), round(ens, 2)))
+                          models.get("icon"), round(ens, 2), round(ens, 2)))
                 conn.commit()
                 conn.close()
         except Exception:
@@ -3997,7 +4116,13 @@ def _nb_residuals(city_key):
                 _nb_ensure_tables(conn)
                 with conn.cursor() as cur:
                     cur.execute("""
-                        SELECT f.city, f.tdate::text, f.ens - ts.settled_temp
+                        -- Prefer the DECISION-TIME vintage: it is the forecast
+                        -- the model actually traded off. f.ens is the evening's
+                        -- last fetch and is systematically closer to truth, so
+                        -- learning from it understates the live error. Falls
+                        -- back to f.ens for rows written before 2026-09-17.
+                        SELECT f.city, f.tdate::text,
+                               COALESCE(f.ens_decision, f.ens) - ts.settled_temp
                         FROM nb_forecasts f
                         JOIN (SELECT DISTINCT ON (city, target_date)
                                      city, target_date, settled_temp
@@ -4017,15 +4142,82 @@ def _nb_residuals(city_key):
     ext = [(d, x) for d, x in _NB_RESID_CACHE["extra"].get(city_key, []) if d not in have]
     return sorted(base + ext)
 
+def _nb_live_residuals(city_key):
+    """Only the SELF-EXTENDED residuals — those measured from this deployment's
+    own forecasts, excluding the shipped calibration file. The regime guard
+    needs these separately: the shipped file is frozen at 2026-09-08 and
+    dominates any window drawn from the combined list, which is exactly why the
+    spec's last10-vs-last21 test cannot see a regime break."""
+    cal = _nb_load_cal()
+    have = {d for d, _ in cal["cities"].get(city_key, {}).get("residuals", [])}
+    return sorted((d, x) for d, x in _NB_RESID_CACHE["extra"].get(city_key, [])
+                  if d not in have)
+
+def _nb_bias(r_dated, tdate, halflife):
+    """Bias estimate over dated residuals strictly before tdate.
+
+    halflife <= 0 -> legacy flat mean of the last 21 points.
+    halflife  > 0 -> exponentially weighted by age in DAYS (not by position),
+                     so a gap in coverage does not silently age-shift the
+                     window. The flat-21 estimator could not track the cold
+                     drift that began ~2026-08-24: at 09-15 it corrected
+                     phoenix by -1.91F when September's realised bias was
+                     -4.15F, and a ~1.5F uncorrected bias displaces roughly a
+                     whole 2-degree bracket of probability mass, which is how
+                     a phantom 15-point "mispricing" gets manufactured."""
+    v = [(d, x) for d, x in r_dated if d < tdate]
+    if not v:
+        return 0.0
+    if halflife <= 0:
+        xs = [x for _, x in v]
+        return sum(xs[-21:]) / len(xs[-21:])
+    from datetime import date as _date
+    try:
+        t0 = _date.fromisoformat(tdate)
+    except Exception:
+        xs = [x for _, x in v]
+        return sum(xs[-21:]) / len(xs[-21:])
+    num = den = 0.0
+    for d, x in v:
+        try:
+            age = (t0 - _date.fromisoformat(d)).days
+        except Exception:
+            continue
+        w = 0.5 ** (age / float(halflife))
+        num += w * x
+        den += w
+    if den <= 0:
+        xs = [x for _, x in v]
+        return sum(xs[-21:]) / len(xs[-21:])
+    return num / den
+
+def _nb_regime_divergence(city_key, tdate, applied_bias):
+    """|mean(live residuals before tdate) - the bias actually applied|, in F,
+    or None when there are too few live points to judge.
+
+    This is the corrected form of the guard prescribed in
+    analysis2/skill/results.md:161-164. The spec compares the last-10 mean to
+    the rolling-21 mean, but both are slices of a list that is ~95% frozen
+    calibration, so they track each other and the drift cancels: on the 13 live
+    tickets that formulation peaked at 0.84F against its own 1F trigger and
+    never fired. Measured against LIVE residuals only, phoenix reads 1.60F."""
+    cfg = _AT_CONFIG
+    min_pts = int(cfg.get("nb_regime_min_pts", 2))
+    lv = [x for d, x in _nb_live_residuals(city_key) if d < tdate]
+    if len(lv) < max(1, min_pts):
+        return None
+    return abs(sum(lv) / len(lv) - applied_bias)
+
 def _nb_bracket_prob(city_key, tdate, ens, lo, hi):
-    """P(win) for a bracket from the validated OOS recipe (rolling-21 bias,
+    """P(win) for a bracket from the validated OOS recipe (age-weighted bias,
     full-sample empirical spread, Silverman KDE). lo/hi are the CORRECT payout
     bounds from the fixed parser (T '>' lo=strike+1; T '<' hi=strike-1)."""
-    r = [x for d, x in _nb_residuals(city_key) if d < tdate]
+    r_dated = [(d, x) for d, x in _nb_residuals(city_key) if d < tdate]
+    r = [x for _, x in r_dated]
     n = len(r)
     if n < 15:
         return None
-    bias = sum(r[-21:]) / len(r[-21:])
+    bias = _nb_bias(r_dated, tdate, float(_AT_CONFIG.get("nb_bias_halflife", 7)))
     mu = sum(r) / n
     c = [x - mu for x in r]
     sd = (sum(x * x for x in c) / (n - 1)) ** 0.5
@@ -4088,6 +4280,11 @@ def _nb_state(is_live):
     max fill 40.05 -> dip fired at 37). Bans are permanent, so this never healed."""
     dep_ticker, base_ask_c, last_ask_c, dep_day = {}, {}, {}, {}
     evening_triggered, dipped = set(), set()
+    # (city, target_date) -> deployed $, and -> set of tickers already held.
+    # The $300 day cap is an aggregate across all cities, so it never prevented
+    # a single correlated night: 09-11..15 put 66% of stake in one heat dome.
+    # Worse, nothing stopped two MUTUALLY EXCLUSIVE brackets on one city-day.
+    dep_city_day, held_city_day = {}, {}
     try:
         conn = get_db()
         if not conn:
@@ -4096,7 +4293,7 @@ def _nb_state(is_live):
         _nb_ensure_tables(conn)
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT ticker, target_date,
+                SELECT ticker, target_date, MIN(city) AS city,
                        COALESCE(SUM(filled_count * avg_fill_price_c / 100.0), 0),
                        COALESCE(
                          (array_agg(paper_ask_c ORDER BY ts)
@@ -4111,12 +4308,16 @@ def _nb_state(is_live):
                   AND COALESCE(filled_count, 0) > 0
                 GROUP BY ticker, target_date
             """, (is_live,))
-            for tk, td, dep, base_c, last_c in cur.fetchall():
+            for tk, td, cty, dep, base_c, last_c in cur.fetchall():
                 dep_ticker[tk] = float(dep or 0)
                 base_ask_c[tk] = int(base_c) if base_c is not None else None
                 last_ask_c[tk] = int(last_c) if last_c is not None else base_ask_c[tk]
                 if td:
                     dep_day[td] = dep_day.get(td, 0.0) + float(dep or 0)
+                    if cty:
+                        ck = (cty, td)
+                        dep_city_day[ck] = dep_city_day.get(ck, 0.0) + float(dep or 0)
+                        held_city_day.setdefault(ck, set()).add(tk)
             cur.execute("""
                 SELECT ticker, MIN(ts) FROM nb_signals
                 WHERE kind = 'entry_trigger' AND is_live = %s
@@ -4168,7 +4369,69 @@ def _nb_state(is_live):
             last_ask_c[tk] = c                     # last buy wins
         for td, dep in _NB_RUNTIME["day"].items():
             dep_day[td] = dep_day.get(td, 0.0) + dep
-    return dep_ticker, base_ask_c, last_ask_c, dep_day, evening_triggered, dipped
+        for ck, dep in _NB_RUNTIME["city_day"].items():
+            dep_city_day[ck] = dep_city_day.get(ck, 0.0) + dep
+        for ck, tks in _NB_RUNTIME["held_city_day"].items():
+            held_city_day.setdefault(ck, set()).update(tks)
+    return (dep_ticker, base_ask_c, last_ask_c, dep_day, evening_triggered,
+            dipped, dep_city_day, held_city_day)
+
+def _nb_drawdown_breach():
+    """True when the sleeve has auto-disarmed itself to SIM this cycle.
+
+    Sums realised nb PnL over the trailing nb_dd_window_days of TARGET dates.
+    On a breach it flips nb_live to False in both _AT_CONFIG and the DB and
+    leaves nb_enabled alone, so the sleeve keeps scanning and shadow-logging
+    with no money at risk.
+
+    Exists because nothing stopped the 2026-09-11..15 run: it lost $271.75 in
+    five days, past the backtested max drawdown of $236, and was still armed
+    on day six. Fails OPEN (returns False) if the DB is unreachable — a
+    breaker that can't read its input must not silently halt trading; the
+    caller's own state read fails closed a moment later anyway."""
+    cfg = _AT_CONFIG
+    stop = float(cfg.get("nb_dd_stop_dollars", 150.0))
+    if stop <= 0:
+        return False
+    win = int(cfg.get("nb_dd_window_days", 7))
+    try:
+        conn = get_db()
+        if not conn:
+            return False
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COALESCE(SUM(pnl), 0)
+                FROM live_trades
+                WHERE strategy = 'nb' AND is_live = TRUE AND pnl IS NOT NULL
+                  AND target_date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                  AND target_date::date >= (CURRENT_DATE - %s::int)
+            """, (win,))
+            row = cur.fetchone()
+        conn.close()
+        trailing = float(row[0]) if row and row[0] is not None else 0.0
+    except Exception as e:
+        at_log("ERR", f"NB drawdown check failed (trading continues): {e}")
+        return False
+    if trailing > -stop:
+        return False
+    _AT_CONFIG["nb_live"] = False
+    try:
+        conn = get_db()
+        if conn:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO auto_trader_config (key, value, updated_at)
+                    VALUES ('nb_live', 'false', NOW())
+                    ON CONFLICT (key) DO UPDATE SET value='false', updated_at=NOW()
+                """)
+            conn.close()
+    except Exception as e:
+        at_log("ERR", f"NB drawdown disarm did not persist to DB: {e}")
+    at_log("KILL", f"NB AUTO-DISARMED to SIM: trailing {win}d realised PnL "
+                   f"${trailing:.2f} <= -${stop:.2f}. nb_enabled left ON "
+                   f"(shadow logging continues). Re-arm is a manual decision.")
+    return True
 
 def _nb_place(ticker, count, limit_c, is_live, sim_fill_c=None):
     """IOC buy YES, mirroring the battle-tested gap parser exactly:
@@ -4234,11 +4497,23 @@ def run_nb_trader_cycle():
     h_catchup = int(cfg.get("nb_catchup_end_h", 8))
 
     ov_rungs  = bool(cfg.get("nb_overnight_rungs", False))
+    cap_cd    = float(cfg.get("nb_city_day_cap", 100.0))
+    one_brk   = bool(cfg.get("nb_one_bracket", True))
+    regime_t  = float(cfg.get("nb_regime_div_f", 1.0))
+
+    # ── drawdown circuit breaker ──
+    # Checked once per cycle, before anything is priced. The 09-11..15 run lost
+    # $271.75 in five days, past the backtested max drawdown of $236, with no
+    # mechanism to stop it. Disarms to SIM (nb_live=False) and leaves
+    # nb_enabled alone so shadow logging keeps running.
+    if is_live and _nb_drawdown_breach():
+        return
 
     st = _nb_state(is_live)
     if st is None:
         return
-    dep_ticker, base_ask_c, last_ask_c, dep_day, evening_triggered, dipped = st
+    (dep_ticker, base_ask_c, last_ask_c, dep_day, evening_triggered,
+     dipped, dep_city_day, held_city_day) = st
 
     for city_key, ccfg in TEMP_CITIES.items():
         try:
@@ -4279,6 +4554,27 @@ def run_nb_trader_cycle():
                         fc = None
             if not fc or fc.get("tdate") != target:
                 continue
+
+            # ── regime-divergence guard ──
+            # Skip the whole city when the bias the model is about to apply has
+            # drifted away from what this deployment's OWN recent residuals say.
+            # Blocked all 6 phoenix tickets of 09-14/09-15 (divergence 1.53F and
+            # 1.60F) while staying silent on las_vegas (0.01F) and nyc (0.30F).
+            if regime_t > 0:
+                _rd = [(d, x) for d, x in _nb_residuals(city_key) if d < target]
+                if _rd:
+                    _b = _nb_bias(_rd, target,
+                                  float(cfg.get("nb_bias_halflife", 7)))
+                    _dv = _nb_regime_divergence(city_key, target, _b)
+                    if _dv is not None and _dv > regime_t:
+                        # nb_signals.ticker is NOT NULL — this is a city-level
+                        # event, so use a synthetic key rather than a market.
+                        _nb_log_signal(f"REGIME-{city_key}-{target}", city_key,
+                                       target, "regime_block",
+                                       None, None, None, None, False, is_live,
+                                       note=f"divergence={_dv:.2f}F > {regime_t:.2f}F "
+                                            f"(applied bias {_b:+.2f}F)")
+                        continue
 
             mk = fetch_temp_kalshi_markets(city_key, "high")
             if not mk.get("ok"):
@@ -4336,7 +4632,9 @@ def run_nb_trader_cycle():
                                        ask_c, bid_c, p, gap, False, is_live)
                         continue
                     if gap >= gap_min:
-                        room = min(cap_tk - held, cap_day - dep_day.get(target, 0.0))
+                        room = min(cap_tk - held,
+                                   cap_day - dep_day.get(target, 0.0),
+                                   cap_cd - dep_city_day.get((city_key, target), 0.0))
                         limit_c = ask_c + slip_c
                         cnt = int(min(topup, max(0.0, room)) * 100) // limit_c
                         if cnt >= 1:
@@ -4359,12 +4657,18 @@ def run_nb_trader_cycle():
                                     _NB_RUNTIME["dep"][ticker] = _NB_RUNTIME["dep"].get(ticker, 0.0) + cost
                                     _NB_RUNTIME["last_ask_c"][ticker] = ask_c
                                     _NB_RUNTIME["day"][target] = _NB_RUNTIME["day"].get(target, 0.0) + cost
+                                    _rk = (city_key, target)
+                                    _NB_RUNTIME["city_day"][_rk] = _NB_RUNTIME["city_day"].get(_rk, 0.0) + cost
+                                    _NB_RUNTIME["held_city_day"].setdefault(_rk, set()).add(ticker)
                                     at_log("ERR", f"NB top-up fill {ticker} NOT logged to DB — tracked in-process", ticker=ticker)
                                 dep_ticker[ticker] = held + cost
                                 # ratchet the RUNG reference only; the dip
                                 # reference (base_ask_c) must never move
                                 last_ask_c[ticker] = ask_c
                                 dep_day[target] = dep_day.get(target, 0.0) + cost
+                                _ck2 = (city_key, target)
+                                dep_city_day[_ck2] = dep_city_day.get(_ck2, 0.0) + cost
+                                held_city_day.setdefault(_ck2, set()).add(ticker)
                             elif is_live:
                                 _live_trade_log(ticker, city_key, "yes", 0, ask_c, limit_c,
                                                 0.0, is_live, order_id=oid, requested_count=cnt,
@@ -4383,6 +4687,22 @@ def run_nb_trader_cycle():
                     continue
                 if not (ask_lo_c <= ask_c <= ask_hi_c) or gap < gap_min:
                     continue
+
+                # One bracket per city-day. Brackets on the same city-day are
+                # mutually exclusive, so a second one guarantees a loss on at
+                # least one leg. 09-14 phoenix held "<=100" AND "103-104"
+                # (bought 3h apart as the evening forecast swung 4F); 09-15
+                # held "99-100" AND "97-98". $45.81 of the week's stake was
+                # dead on arrival. Top-ups to a ticker ALREADY held are
+                # unaffected — they return above, via the rung path.
+                _ck = (city_key, target)
+                if one_brk and held_city_day.get(_ck):
+                    _nb_log_signal(ticker, city_key, target, "blocked_second_bracket",
+                                   ask_c, bid_c, p, gap, False, is_live,
+                                   note=f"already hold {sorted(held_city_day[_ck])[0]}",
+                                   ask_sz=m.get("yes_ask_size"))
+                    continue
+
                 if phase == "catchup":
                     if ticker not in evening_triggered:
                         # gap first appearing overnight: measured 17% win, -0.38/$
@@ -4396,7 +4716,9 @@ def run_nb_trader_cycle():
                                        ask_c, bid_c, p, gap, False, is_live,
                                        ask_sz=m.get("yes_ask_size"))
                         evening_triggered.add(ticker)
-                room = min(cap_tk - held, cap_day - dep_day.get(target, 0.0))
+                room = min(cap_tk - held,
+                           cap_day - dep_day.get(target, 0.0),
+                           cap_cd - dep_city_day.get(_ck, 0.0))
                 if room < 1.0:
                     continue
                 nominal = unit * min(ov_cap, gap / gap_min) / ov_div
@@ -4424,12 +4746,16 @@ def run_nb_trader_cycle():
                         _NB_RUNTIME["base_ask_c"].setdefault(ticker, ask_c)
                         _NB_RUNTIME["last_ask_c"][ticker] = ask_c
                         _NB_RUNTIME["day"][target] = _NB_RUNTIME["day"].get(target, 0.0) + cost
+                        _NB_RUNTIME["city_day"][_ck] = _NB_RUNTIME["city_day"].get(_ck, 0.0) + cost
+                        _NB_RUNTIME["held_city_day"].setdefault(_ck, set()).add(ticker)
                         at_log("ERR", f"NB fill {ticker} NOT logged to DB — tracked in-process", ticker=ticker)
                     dep_ticker[ticker] = cost
                     # base entry: this ask anchors the dip test for good
                     base_ask_c.setdefault(ticker, ask_c)
                     last_ask_c[ticker] = ask_c
                     dep_day[target] = dep_day.get(target, 0.0) + cost
+                    dep_city_day[_ck] = dep_city_day.get(_ck, 0.0) + cost
+                    held_city_day.setdefault(_ck, set()).add(ticker)
                 elif is_live:
                     _live_trade_log(ticker, city_key, "yes", 0, ask_c, limit_c,
                                     0.0, is_live, order_id=oid, requested_count=cnt,
@@ -8656,6 +8982,78 @@ class Handler(BaseHTTPRequestHandler):
                 conn.close()
                 self.send_json({"ok": len(errors) == 0,
                                 "applied": len(applied), "errors": errors})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/admin/migrate-trade-fees":
+            # One-shot, idempotent: recompute live_trades.pnl for every settled
+            # row under the CORRECT Kalshi fee convention.
+            #
+            # Rows settled before 2026-09-17 were booked as
+            #   win -> C*(0.98 - P),  loss -> -C*P
+            # which charges a flat 2%-of-payout on winners and nothing at all
+            # on losers. Kalshi pays the full $1.00 on a winning contract and
+            # charges ceil(0.07*C*P*(1-P)) at EXECUTION, win or lose.
+            #
+            # Recomputes from filled_count / avg_fill_price_c / settled_correct
+            # only, never from the previous pnl, so it is safe to re-run.
+            # Reports the before/after delta per strategy so the correction is
+            # auditable rather than silent.
+            import os as _os
+            qs = parse_qs(urlparse(self.path).query)
+            if qs.get("token", [""])[0] != _os.environ.get("QUERY_TOKEN", ""):
+                self.send_json({"ok": False, "error": "bad token"})
+                return
+            try:
+                conn = get_db()
+                if not conn:
+                    self.send_json({"ok": False, "error": "No DB"}); return
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT COALESCE(strategy, 'forecast'),
+                               COUNT(*),
+                               ROUND(SUM(pnl)::numeric, 2),
+                               ROUND(SUM(
+                                   CASE WHEN settled_correct
+                                        THEN  COALESCE(filled_count, "count") * (1.0 - avg_fill_price_c / 100.0)
+                                        ELSE -COALESCE(filled_count, "count") * (avg_fill_price_c / 100.0)
+                                   END
+                                   - CEIL(0.07 * COALESCE(filled_count, "count")
+                                          * (avg_fill_price_c / 100.0)
+                                          * (1.0 - avg_fill_price_c / 100.0) * 100.0) / 100.0
+                               )::numeric, 2)
+                        FROM live_trades
+                        WHERE settled_correct IS NOT NULL
+                          AND avg_fill_price_c IS NOT NULL
+                          AND COALESCE(filled_count, "count", 0) > 0
+                        GROUP BY 1 ORDER BY 1
+                    """)
+                    before = [{"strategy": r[0], "rows": r[1],
+                               "pnl_before": float(r[2]) if r[2] is not None else None,
+                               "pnl_after":  float(r[3]) if r[3] is not None else None,
+                               "delta": round(float(r[3]) - float(r[2]), 2)
+                                        if (r[2] is not None and r[3] is not None) else None}
+                              for r in cur.fetchall()]
+                    cur.execute("""
+                        UPDATE live_trades
+                        SET pnl = ROUND((
+                            CASE WHEN settled_correct
+                                 THEN  COALESCE(filled_count, "count") * (1.0 - avg_fill_price_c / 100.0)
+                                 ELSE -COALESCE(filled_count, "count") * (avg_fill_price_c / 100.0)
+                            END
+                            - CEIL(0.07 * COALESCE(filled_count, "count")
+                                   * (avg_fill_price_c / 100.0)
+                                   * (1.0 - avg_fill_price_c / 100.0) * 100.0) / 100.0
+                        )::numeric, 2)
+                        WHERE settled_correct IS NOT NULL
+                          AND avg_fill_price_c IS NOT NULL
+                          AND COALESCE(filled_count, "count", 0) > 0
+                    """)
+                    updated = cur.rowcount
+                conn.close()
+                self.send_json({"ok": True, "rows_updated": updated,
+                                "by_strategy": before})
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
