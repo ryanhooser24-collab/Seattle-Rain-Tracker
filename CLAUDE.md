@@ -177,12 +177,26 @@ explicitly asked. Never arm/disarm without an explicit instruction.
   the error and the apparent edge are one quantity with opposite signs — which
   would turn every gap-based filter anti-predictive at once.
   **CAUTION — an earlier version of this file quoted rho(gap, return/$) of
-  +0.148 healthy vs −0.841 broken. BOTH WERE WRONG**, from a rank routine that
-  broke ties by list order when 13 of 16 returns are tied at exactly −1.0
-  (every loser returns −1.0 regardless of ask). Correct Spearman with average
-  ranks: **+0.17 healthy (n=99, critical 0.20) and −0.34 broken (n=13,
-  critical 0.55) — neither is significant.** The inversion is a plausible
-  mechanism supported by the bucket contrast, NOT a demonstrated correlation.
+  +0.148 healthy vs −0.841 broken. BOTH WERE WRONG.** Two separate defects,
+  and the second one is a trap that survives the obvious fix:
+  1. *Tie mishandling.* Pre-fee, every loser returns exactly −1.0/$ because
+     (0−ask)/ask = −1 regardless of ask, so 13 of 16 values tie. A rank
+     routine that breaks ties by list order is not Spearman.
+  2. *Fee contamination, post-backfill.* After `/admin/migrate-trade-fees` a
+     total loss books −(cost + fee), so **return/$ = −1 − 0.07·(1−p)** — a
+     deterministic function of the fill price. The losers UNTIE into a pure
+     ask-ordering: among the 13 losers, **rho(ask, stored return/$) = +0.976**.
+     That looks like legitimate variation, average-rank handling will not
+     touch it, and it injects a **+0.144** artifact into the gap statistic.
+  **Therefore: on all-or-nothing outcomes, never rank-correlate
+  return-per-dollar — tied or untied. Use the binary win/loss indicator, or
+  compare bucket means.** The safe figure, which two independent
+  reconstructions agree on, is **rho(gap, win) = −0.293 at n=13 (critical
+  0.55)**; healthy is +0.197 at n=99 (critical 0.198). Neither is significant.
+  Note that a rerun against the backfilled table will NOT reproduce a
+  pre-backfill return/$ figure — the fee changed the statistic, not the data.
+  The inversion is a plausible mechanism supported by the bucket contrast, NOT
+  a demonstrated correlation.
   Do not build a monitor on rho: walked forward over the live tape it never
   flips sign (−0.40 at 4 tickets drifting to −0.31 at 12), and at ~1.5
   triggers/day n=50 takes five weeks while the Sept break did its damage in
