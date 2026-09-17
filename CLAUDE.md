@@ -76,6 +76,50 @@ them on shadow data once calibration is healthy (see the gap-bar note in Key
 learnings — and note that the "inversion" there is a mechanism hypothesis on
 n=2, not a measured effect).
 
+*Audit residue, 2026-09-17 multi-agent pass (125 agents, 9 findings survived
+3-lens adversarial verification, 62 refuted). Nothing below is fixed; three
+are explicitly NOT worth fixing.*
+- **REFUTED, do not re-investigate: there is no product mismatch.**
+  `nb_calibration.json` reproduces from an independent previous-runs fetch of
+  gfs_seamless+ecmwf_ifs025+icon_seamless at mean offset **+0.002F, r=1.000,
+  bit-exact on 1442/1445 city-days**, once the reconstruction uses the live
+  aggregation order (per-model daily max, THEN mean of 3 — not max of the
+  hourly ensemble mean, which runs 0.31F cold and fooled the first pass). The
+  live pipeline is +0.15F WARMER than the calibration substrate, n.s. once
+  date-clustered, and the wrong sign to explain a cold failure.
+- **The KDE shrink formula is wrong, and should be left alone for now.**
+  `server.py` uses `sd/sqrt(sd^2+h^2)` where the variance-matched form is
+  `sqrt(1-h^2/sd^2)`, over-dispersing by **+1.06% in sd** for every city. It
+  lowered p_model by ~0.003 on all 16 live legs — i.e. it made the sleeve
+  CONSERVATIVE, worth about −$3 across the window. Correcting it RAISES
+  p_model and therefore fires more trades, so it cannot be fixed in isolation
+  without re-deriving `nb_gap_min`. Fix it as part of a recalibration, never
+  on its own.
+- **The dip subsystem is inert.** `at_check_exits` excludes `strategy='nb'`,
+  so `dip_flag` gates nothing that runs; the 667 dip rows on the losing week
+  were pure write traffic. The 09-14 reference fix was correct but changed 0
+  of 10 bans.
+- **LATENT, fix before re-arming: `_nb_place` discards the 'unknown' fill
+  status.** `at_confirm_fill` deliberately returns the FULL requested size on
+  an API blip (fail-closed for the spend cap, correct). But `_nb_place` then
+  computes `status = "filled" if filled >= count`, so 'unknown' becomes
+  'filled'; `px_c` falls back to the IOC limit; and the row settles as a real
+  position. One firing on a max-overlay entry fabricates ~$58 of PnL and
+  poisons that ticker's dip and rung references for life. The forecast sleeve
+  does NOT have this bug — it records `fill_status='unknown'` properly (4 such
+  rows, all 2026-08-13). NB has never hit it (0 rows where
+  avg_fill_price_c = paper_ask_c+3), and it CANNOT fire in SIM, since
+  `_nb_place` returns before the confirm path when `is_live` is false.
+- **The "losses were one-sided" observation is NOT significant.** 7 of 9
+  distinct losing tickers had the realized high above the bracket, but the
+  two-sided sign test gives **p=0.18**. Do not re-centre brackets on it. The
+  cold-bias conclusion does not rest on this — it rests on the direct residual
+  measurement (Sept −1.20F pooled vs −0.17/+0.06/−0.24 before) and the paired
+  comparison against the market's implied high (t=+3.86).
+- **`nb_signals` is ~50x pseudo-replicated** — 888 rows on the losing week
+  were 17 ticker-days, 13 of them settled. Never treat its rows as
+  independent observations.
+
 *The best evidence the mechanism is real, and its limit.* The vintage placebo
 in `analysis2/edge_highs/results.md:49-54` runs the identical rule on a STALE
 forecast: fresh p1 +0.287/$ vs stale p2 **+0.045/$ (P0=0.40)**, with only 47
