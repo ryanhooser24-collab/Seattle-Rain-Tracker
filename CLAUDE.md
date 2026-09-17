@@ -72,8 +72,9 @@ is the default outcome here, not evidence. The agreement gate is still the
 most clearly wrong of the three on mechanism — on 09-14 phoenix the model and
 market agreed to 0.07°F and both ran 2.2°F cold, so consensus is not accuracy
 — but none of the three should be re-proposed OR ruled out on this tape. Judge
-them on shadow data once calibration is healthy, when gap size has returned to
-being positively related to return (see the inversion note in Key learnings).
+them on shadow data once calibration is healthy (see the gap-bar note in Key
+learnings — and note that the "inversion" there is a mechanism hypothesis on
+n=2, not a measured effect).
 
 *The best evidence the mechanism is real, and its limit.* The vintage placebo
 in `analysis2/edge_highs/results.md:49-54` runs the identical rule on a STALE
@@ -164,22 +165,33 @@ explicitly asked. Never arm/disarm without an explicit instruction.
   phoenix 0.52-0.78F all week), yet it DOES cross 1F for oklahoma_city
   (1.21F) and for miami on 09-16/17 — days with no position. It fires where
   there is nothing to protect and is silent where the money is.
-- **Gap size INVERTS during a calibration break, and that inversion is the
-  tell.** Spearman rho(gap, return/$) is **+0.148 over the healthy 5-month
-  walk-forward** (monotone by bucket: 0.15-0.20 −0.02, 0.20-0.25 +0.16,
-  0.25-0.30 +0.97, 0.30+ +0.60 — and memory `d1-evening-edge` has the same
-  thing, gaps ≥0.30 winning 61% at +0.62/$) but **−0.841 on the Sept cold
-  tape**. Mechanism: a systematically cold centre produces its LARGEST apparent
-  edges on exactly the brackets it is most wrong about, because the error and
-  the apparent edge are the same quantity with opposite signs. Gap stops
-  measuring edge and starts measuring model error, which makes every
-  gap-based filter anti-predictive AT ONCE.
-  **Read this as a property of the cold regime, NOT of the strategy.** The
-  three filters that "tested badly" on the Sept tape (raising `nb_gap_min`, the
-  market-agreement gate, a fee-aware bar) are one rejection observed three
-  times, and its cause is the calibration break that is now guarded. Do not
-  apply a blanket "never tighten the gap bar" to a HEALTHY calibration — the
-  backtest says the opposite there.
+- **Do NOT carry "never tighten the gap bar" into a healthy calibration.** In
+  the healthy 5-month walk-forward, high gaps are the GOOD ones: gap 0.15-0.20
+  returns −0.02/$ (n=22), 0.20-0.25 +0.16 (n=26), **0.25-0.30 +0.97 at a 71%
+  win rate (n=17)**, 0.30+ +0.60 (n=34) — consistent with memory
+  `d1-evening-edge` ("gaps ≥0.30 win 61% at +0.62/$"). On the Sept cold tape
+  the 0.25+ bucket lost everything, but that is **n=2**, so it is a hypothesis,
+  not a measurement.
+  *Mechanism, if the inversion is real:* a systematically cold centre puts its
+  largest apparent edges on exactly the brackets it is most wrong about, since
+  the error and the apparent edge are one quantity with opposite signs — which
+  would turn every gap-based filter anti-predictive at once.
+  **CAUTION — an earlier version of this file quoted rho(gap, return/$) of
+  +0.148 healthy vs −0.841 broken. BOTH WERE WRONG**, from a rank routine that
+  broke ties by list order when 13 of 16 returns are tied at exactly −1.0
+  (every loser returns −1.0 regardless of ask). Correct Spearman with average
+  ranks: **+0.17 healthy (n=99, critical 0.20) and −0.34 broken (n=13,
+  critical 0.55) — neither is significant.** The inversion is a plausible
+  mechanism supported by the bucket contrast, NOT a demonstrated correlation.
+  Do not build a monitor on rho: walked forward over the live tape it never
+  flips sign (−0.40 at 4 tickets drifting to −0.31 at 12), and at ~1.5
+  triggers/day n=50 takes five weeks while the Sept break did its damage in
+  five days. The divergence guard measures the INPUT and fired on phoenix in
+  four days; rho measures the OUTPUT and inherits all the variance of a
+  3-winners-in-13 stream. Where rho could earn its keep is as a RE-ARM
+  criterion over accumulated shadow tickets, where n can actually grow — it is
+  failure-mode-agnostic, so it would catch sigma being too tight or the
+  freshness edge decaying, which the bias-only divergence guard cannot see.
 
 ## Dashboard
 
