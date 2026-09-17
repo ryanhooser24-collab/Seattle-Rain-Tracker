@@ -63,11 +63,17 @@ threshold)**, 09-23 +$9.84. This is aligned with the re-arm bar above, which
 needs ~10 clean days anyway — but do not mistake the auto-disarm for a new
 failure if you arm early.
 
-**Two filters that look right and are REFUTED by the live tape — do not add
-them back without new evidence:** raising `nb_gap_min` (gap≥0.25 leaves 2
-tickets at −1.000/$; the week's largest gap was its largest loss) and a
-market-agreement gate (worse at every threshold — on 09-14 phoenix the model
-and the market agreed to 0.07°F and both were 2.2°F cold).
+**Three selective filters tested badly on the Sept tape — but the tape cannot
+adjudicate any of them, and none shipped:** raising `nb_gap_min`, a
+market-agreement gate, and a fee-aware bar. With **16 settled tickets, 3
+winners and a −0.63/$ base rate, a filter dropping 4 tickets forfeits a winner
+61% of the time by luck alone** (35% at 2 dropped, 79% at 6). "Tested badly"
+is the default outcome here, not evidence. The agreement gate is still the
+most clearly wrong of the three on mechanism — on 09-14 phoenix the model and
+market agreed to 0.07°F and both ran 2.2°F cold, so consensus is not accuracy
+— but none of the three should be re-proposed OR ruled out on this tape. Judge
+them on shadow data once calibration is healthy, when gap size has returned to
+being positively related to return (see the inversion note in Key learnings).
 
 *The best evidence the mechanism is real, and its limit.* The vintage placebo
 in `analysis2/edge_highs/results.md:49-54` runs the identical rule on a STALE
@@ -158,8 +164,22 @@ explicitly asked. Never arm/disarm without an explicit instruction.
   phoenix 0.52-0.78F all week), yet it DOES cross 1F for oklahoma_city
   (1.21F) and for miami on 09-16/17 — days with no position. It fires where
   there is nothing to protect and is silent where the money is.
-- Bigger model-vs-market disagreement is NOT a better bet. When the forecast is
-  biased, the largest gaps are the largest errors.
+- **Gap size INVERTS during a calibration break, and that inversion is the
+  tell.** Spearman rho(gap, return/$) is **+0.148 over the healthy 5-month
+  walk-forward** (monotone by bucket: 0.15-0.20 −0.02, 0.20-0.25 +0.16,
+  0.25-0.30 +0.97, 0.30+ +0.60 — and memory `d1-evening-edge` has the same
+  thing, gaps ≥0.30 winning 61% at +0.62/$) but **−0.841 on the Sept cold
+  tape**. Mechanism: a systematically cold centre produces its LARGEST apparent
+  edges on exactly the brackets it is most wrong about, because the error and
+  the apparent edge are the same quantity with opposite signs. Gap stops
+  measuring edge and starts measuring model error, which makes every
+  gap-based filter anti-predictive AT ONCE.
+  **Read this as a property of the cold regime, NOT of the strategy.** The
+  three filters that "tested badly" on the Sept tape (raising `nb_gap_min`, the
+  market-agreement gate, a fee-aware bar) are one rejection observed three
+  times, and its cause is the calibration break that is now guarded. Do not
+  apply a blanket "never tighten the gap bar" to a HEALTHY calibration — the
+  backtest says the opposite there.
 
 ## Dashboard
 
