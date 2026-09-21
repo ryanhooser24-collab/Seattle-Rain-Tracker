@@ -16,6 +16,7 @@ import os
 import re
 import traceback
 import socketserver
+import contextlib as _contextlib
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -335,6 +336,7 @@ _TEMP_BIAS_CACHE   = {}   # city_key -> {"gfs_bias": float, "ecmwf_bias": float,
 # with shrinkage toward global (w = n/(n+20)), cached 6h, clamped for safety.
 _MODEL_CAL_CACHE = {"ts": 0.0, "global": None, "cities": {}, "cities_h": {}, "global_h": {}}
 _MODEL_CAL_TTL   = 6 * 3600
+_SIGMA_BAR_WARNED = set()   # dedup for the closed-bracket reachability WARN
 _MODEL_CAL_BIAS_CLAMP  = 4.0          # max |mu correction| in °F
 _MODEL_CAL_SIGF_CLAMP  = (0.8, 3.5)   # sigma factor bounds
 
@@ -351,6 +353,7 @@ def _load_model_calibration(force=False):
     if (not force and _MODEL_CAL_CACHE["global"] is not None
             and _t.time() - _MODEL_CAL_CACHE["ts"] < _MODEL_CAL_TTL):
         return _MODEL_CAL_CACHE
+    conn = None
     try:
         conn = get_db()
         if not conn:
@@ -439,6 +442,12 @@ def _load_model_calibration(force=False):
         })
     except Exception as e:
         print(f"  ⚠️  model calibration load failed: {e}")
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
     return _MODEL_CAL_CACHE
 _TEMP_SNAPSHOT_TTL  = 180   # 3 min cache — keeps markets fresh, avoids stale settled data
 _TEMP_SCAN_CACHE   = {}   # city_key -> {"ts": float, "result": dict}
@@ -899,6 +908,35 @@ def analyze_temp_brackets(markets, forecast, market_type="high"):
     _floor = _EMP_SIGMA_FLOORS.get(forecast.get("horizon", "d1"), 2.2)
     if sigma < _floor:
         sigma = _floor
+
+    # ── Reachability check: can a closed bracket still earn min_grade? ──────
+    # Every closed Kalshi high bracket is exactly 1.0F wide, which bracket_prob
+    # scores as the 2.0F integer window P(lo-0.5 < X < hi+0.5). The best a
+    # perfectly centred closed bracket can do is 2*Phi(1/sigma)-1, so at the
+    # floors above the ceiling is 0.3829 (d0) and 0.3506 (d1). Grade A needs
+    # prob >= 0.50, i.e. sigma <= 1.4826F — which the floor forbids.
+    # Net effect: since the floor shipped 2026-09-11 NO closed bracket in any
+    # city at any horizon can grade A, and the sleeve silently became an
+    # open-ended (T) contract trader. That was never a decision, and nothing
+    # logged it. This WARN makes it visible instead of inferable from a
+    # collapse in signal supply.
+    try:
+        _maxp = 2.0 * normcdf(1.0 / sigma) - 1.0 if sigma > 0 else 1.0
+        _bar = {"A": 0.50, "B": 0.35, "C": 0.25}.get(
+            (_AT_CONFIG.get("min_grade") or "A"), 0.50)
+        if _maxp < _bar:
+            global _SIGMA_BAR_WARNED
+            _k = f"{city_key}|{forecast.get('horizon','d1')}|{round(sigma,2)}"
+            if _k not in _SIGMA_BAR_WARNED:
+                _SIGMA_BAR_WARNED.add(_k)
+                at_log("WARN",
+                       f"{city_key} {forecast.get('horizon','d1')}: sigma={sigma}F caps a "
+                       f"closed bracket at prob {_maxp:.4f}, below the "
+                       f"min_grade={_AT_CONFIG.get('min_grade')} bar of {_bar:.2f} — "
+                       f"only open-ended (T) brackets can grade. Closed brackets are "
+                       f"unreachable at this sigma.", city=city_key)
+    except Exception:
+        pass
 
     if mu is None:
         for m in markets:
@@ -1861,13 +1899,22 @@ _AT_CONFIG = {
     # EV +0.200/$ with exits at 0.6 vs +0.127 hold; ~85% of the Vegas
     # 2026-08-14 loss was recoverable). Sell entire position at bid when
     # current model_prob < exit_prob_frac * entry_prob.
-    "exit_enabled":   True,
+    # DEFAULT FALSE. at_load_config_from_db only applies a key that already
+    # exists here and never resets an absent one, so a dropped/missing DB row
+    # silently re-arms whatever the literal says. Both of these are refuted
+    # features; the default must match the intent, not the history.
+    "exit_enabled":   False,
     "exit_prob_frac": 0.60,
-    # Momentum entries (backtested 2026-08-16 on price_history, n=7,239
-    # jump events: 56% win at 34¢ ask vs 41% baseline at same ask).
-    # Model prob jumped >= momentum_jump vs last logged scan while the ask
-    # moved <= momentum_max_ask_move: bump grade one level, accept >= B.
-    "momentum_enabled":      True,
+    # Momentum entries — REFUTED 2026-09-19, keep OFF.
+    # The original note here claimed "56% win at 34¢ ask vs 41% baseline
+    # (n=7,239 jump events)". That replicates nowhere: measured 29.7-40.9% at a
+    # 0.34 ask against a matched no-trigger baseline of 31-34%. This rule is
+    # exactly the forecast-update/reprice-lag trade, which was tested four ways
+    # and is dead: pass-through of a model move into the ask is beta=0.044
+    # (R^2<0.005), the entire ask move across an update is +0.98c against a
+    # 1.61c one-way fee, and the fit-optimal config inverts out of sample
+    # (8 of 8). Historical live stake $227.64 replayed at -0.15 to -0.53 EV/$.
+    "momentum_enabled":      False,
     "momentum_jump":         0.15,
     "momentum_max_ask_move": 0.02,
     "live_mode":      False, # False = simulate fills (no real orders); True = REAL Kalshi orders
@@ -2030,6 +2077,18 @@ _AT_CONFIG = {
                                   # 5-month walk-forward a 7-day half-life beats
                                   # rolling-21 in the decayed Aug-Sep tail
                                   # (+0.165 vs +0.081 per $).
+    # ── Forecast-sleeve drawdown breaker (added 2026-09-19) ───────────────
+    # SHIPS INERT: 0.0 = disabled, and even when set it only ALERTS. It never
+    # disarms by itself — that is a risk-appetite decision, not a code default.
+    # Deliberately NOT a copy of nb_dd_stop_dollars=150/7d: this sleeve's worst
+    # observed week is −$56.67 and at 2-4 settled ticker-days/week a trailing-7
+    # window holds only $30-100 of settled stake, so a 100% loss rate could
+    # never reach −$150. A $150/7d breaker here would be decoration.
+    # Suggested starting point if you enable it: 85-115 over 21-30 days
+    # (~1.5-2x the worst observed week). Until then the only real protection
+    # remains daily_cap_dollars, which bounds a bad run at ~$525/week.
+    "fc_dd_window_days":  21,
+    "fc_dd_stop_dollars": 0.0,    # 0 = breaker off (alert only when > 0)
     "nb_dd_window_days":  7,      # trailing window for the drawdown breaker
     "nb_dd_stop_dollars": 150.0,  # if trailing realised PnL <= −this, the
                                   # sleeve disarms ITSELF to sim. The 5-day
@@ -2205,10 +2264,21 @@ def _live_trade_log(ticker, city, side, count, paper_ask_c, order_ask_c, cost,
 
 
 def _live_spend_today():
-    """Real dollars spent today (UTC) — enforces daily_cap_dollars."""
+    """Real dollars spent today (UTC) — enforces daily_cap_dollars.
+
+    Fails CLOSED on every path. The `if not conn` branch used to return 0.0,
+    which reads as "nothing spent today" and silently removes the daily cap
+    during a DB outage — the exact condition we were in on 2026-09-19. Its own
+    except branch already returned 999999.0 and _live_spend_ticker returns
+    999999.0 in both branches, so the 0.0 was an inconsistency, not a choice.
+    """
+    with db_conn() as conn:
+        if not conn: return 999999.0
+        return _live_spend_today_q(conn)
+
+
+def _live_spend_today_q(conn):
     try:
-        conn = get_db()
-        if not conn: return 0.0
         with conn.cursor() as cur:
             # Count actual filled dollars. Falls back to `cost` for rows
             # written before fill confirmation existed (filled_count NULL).
@@ -2224,7 +2294,6 @@ def _live_spend_today():
                   AND COALESCE(strategy, '') NOT IN ('tail', 'gap', 'nb')
             """)
             v = float(cur.fetchone()[0] or 0)
-        conn.close()
         return v
     except Exception:
         return 999999.0  # fail-closed: if we can't read spend, treat cap as hit
@@ -2236,9 +2305,13 @@ def _live_spend_ticker(ticker):
     A ticker is a single day's market, so no date filter is needed.
     Enforces max_per_ticker as a true cross-cycle ceiling.
     """
-    try:
-        conn = get_db()
+    with db_conn() as conn:
         if not conn: return 999999.0
+        return _live_spend_ticker_q(conn, ticker)
+
+
+def _live_spend_ticker_q(conn, ticker):
+    try:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT COALESCE(SUM(
@@ -2251,7 +2324,6 @@ def _live_spend_ticker(ticker):
                 WHERE is_live = TRUE AND ticker = %s
             """, (ticker,))
             v = float(cur.fetchone()[0] or 0)
-        conn.close()
         return v
     except Exception:
         return 999999.0  # fail-closed: unknown spend = no budget
@@ -2382,6 +2454,7 @@ def _live_trade_settle():
         win  ->  filled_count * (0.98 - price)     [2% Kalshi fee on payout]
         loss -> -filled_count * price
     """
+    conn = None
     try:
         conn = get_db()
         if not conn:
@@ -2478,6 +2551,12 @@ def _live_trade_settle():
         return 0
 
 
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 # ══════════════════════════════════════════════════════════════════════════
 #  PATCH 3 — STALE SETTLEMENT LEAK
 #  run_auto_settlement only ever targets *yesterday*, and fetch_nws_temp_cli
@@ -2494,6 +2573,7 @@ def _live_trade_settle():
 SETTLE_BACKFILL_DAYS = 14   # how far back to retry before abandoning
 SETTLE_BACKFILL_MIN_GAP = 3600   # seconds between automatic sweeps
 _LAST_BACKFILL_TS = 0.0
+_BACKFILL_DDL_DONE = False   # ACCESS EXCLUSIVE DDL runs once per process, not per tick
 
 
 def fetch_acis_daily(nws_station, date_str):
@@ -2747,17 +2827,32 @@ def run_settlement_backfill(days=None, abandon=True, force=False):
     try:
         # Columns are added defensively — a fresh DB may not have them yet.
         conn.autocommit = True
-        with conn.cursor() as cur:
-            for _ddl in (
-                "ALTER TABLE temp_snapshots ADD COLUMN IF NOT EXISTS settle_source TEXT",
-                "ALTER TABLE temp_snapshots ADD COLUMN IF NOT EXISTS settle_abandoned BOOLEAN DEFAULT FALSE",
-                "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS settle_abandoned BOOLEAN DEFAULT FALSE",
-                "ALTER TABLE calibration_snapshots ADD COLUMN IF NOT EXISTS settle_abandoned BOOLEAN DEFAULT FALSE",
-            ):
+        # Run the DDL ONCE per process, not on every 4-hour tick.
+        # ADD COLUMN IF NOT EXISTS still takes ACCESS EXCLUSIVE even when the
+        # column already exists, so re-running it ~12x/day against the 1.46M-row
+        # temp_snapshots queues every reader and writer behind it. Combined with
+        # the (now fixed) leaked connections that is how the DB wedged.
+        # lock_timeout means we give up rather than hold the queue open; the
+        # existing per-statement except already swallows the failure.
+        global _BACKFILL_DDL_DONE
+        if not _BACKFILL_DDL_DONE:
+            _BACKFILL_DDL_DONE = True
+            with conn.cursor() as cur:
                 try:
-                    cur.execute(_ddl)
-                except Exception as _de:
-                    print(f"  backfill DDL skipped: {_de}")
+                    cur.execute("SET lock_timeout = '3s'")
+                except Exception:
+                    pass
+                for _ddl in (
+                    "ALTER TABLE temp_snapshots ADD COLUMN IF NOT EXISTS settle_source TEXT",
+                    "ALTER TABLE temp_snapshots ADD COLUMN IF NOT EXISTS settle_abandoned BOOLEAN DEFAULT FALSE",
+                    "ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS settle_abandoned BOOLEAN DEFAULT FALSE",
+                    "ALTER TABLE calibration_snapshots ADD COLUMN IF NOT EXISTS settle_abandoned BOOLEAN DEFAULT FALSE",
+                ):
+                    try:
+                        cur.execute(_ddl)
+                    except Exception as _de:
+                        _BACKFILL_DDL_DONE = False   # retry next cycle
+                        print(f"  backfill DDL skipped: {_de}")
         conn.autocommit = False
 
         with conn.cursor() as cur:
@@ -2916,7 +3011,7 @@ def at_apply_momentum(city_key, markets, cfg):
     signals. Tagged rows land in live_trades.momentum_entry for
     segmentation.
     """
-    if not cfg.get("momentum_enabled", True):
+    if not cfg.get("momentum_enabled", False):
         return 0
     jump     = float(cfg.get("momentum_jump", 0.15))
     max_move = float(cfg.get("momentum_max_ask_move", 0.02))
@@ -2970,7 +3065,7 @@ def at_check_exits(city_key, markets, cfg):
     Positions in cities removed from the whitelist are not scanned and
     therefore not exit-checked — remove cities only when flat.
     """
-    if not cfg.get("exit_enabled", True) or not cfg.get("live_mode", False):
+    if not cfg.get("exit_enabled", False) or not cfg.get("live_mode", False):
         return 0
     frac = float(cfg.get("exit_prob_frac", 0.60))
     view = {m["ticker"]: m for m in markets
@@ -3021,18 +3116,28 @@ def at_check_exits(city_key, markets, cfg):
                 at_log("WARN", f"EXIT partial {sold}/{held} on {ticker} — "
                                f"remainder rides to settlement unbooked",
                        ticker=ticker, city=city_key)
-            conn = get_db()
-            with conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE live_trades
-                    SET exited = TRUE, exit_price_c = %s, exit_ts = NOW(),
-                        pnl = ROUND((COALESCE(filled_count, "count") * %s - cost)::numeric, 2)
-                    WHERE ticker = %s AND is_live = TRUE
-                      AND COALESCE(exited, FALSE) = FALSE AND pnl IS NULL
-                      AND COALESCE(strategy, '') NOT IN ('tail', 'gap', 'nb')
-                """, (px_c, px_c / 100.0, ticker))
-            conn.commit()
-            conn.close()
+            # NOTE (2026-09-19): this pnl expression is WRONG and is left as-is
+            # deliberately — see /admin/migrate-exit-pnl. It charges neither the
+            # entry nor the exit taker fee and multiplies by the FULL held
+            # quantity even when only part of the position sold, so one partial
+            # sell stamps a whole-position P&L on every row of the ticker.
+            # Rewriting it here is NOT behaviour-neutral: leaving unsold rows at
+            # exited=FALSE/pnl NULL re-enters the ticker into the open-position
+            # query and the exit trigger is a level condition, so the bot would
+            # re-fire an IOC sell every cycle until the book absorbed the rest.
+            # exit_enabled is False, so nothing new is being mis-booked today.
+            with db_conn() as conn:
+                if conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            UPDATE live_trades
+                            SET exited = TRUE, exit_price_c = %s, exit_ts = NOW(),
+                                pnl = ROUND((COALESCE(filled_count, "count") * %s - cost)::numeric, 2)
+                            WHERE ticker = %s AND is_live = TRUE
+                              AND COALESCE(exited, FALSE) = FALSE AND pnl IS NULL
+                              AND COALESCE(strategy, '') NOT IN ('tail', 'gap', 'nb')
+                        """, (px_c, px_c / 100.0, ticker))
+                    conn.commit()
             exits += 1
             at_log("EXIT", f"{ticker} sold {sold}x @ {px_c:.1f}¢ — model_prob "
                            f"{float(p):.2f} < {frac:.2f} × entry {float(entry_prob):.2f}",
@@ -3385,12 +3490,14 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
             live_grade = grade
             prob       = signal.get("model_prob", 0)
 
-        # Stop if grade degraded below threshold. Momentum entries accept
-        # down to B — the backtested edge is the prob jump itself, not the
-        # static grade (never loosens an already-loose min_grade).
+        # Stop if grade degraded below threshold.
+        # The momentum carve-out that used to relax this bar to B was REMOVED
+        # 2026-09-19. Its premise — "the backtested edge is the prob jump
+        # itself" — is the refuted forecast-update trade (see momentum_enabled
+        # in _AT_CONFIG). It was a second, independent loosening on top of the
+        # grade bump in at_apply_momentum, so a single stale config row could
+        # push a B-graded signal through two gates at once.
         _eff_min = min_grade
-        if signal.get("momentum_entry") and grade_rank.get(min_grade, 0) < grade_rank.get("B", 1):
-            _eff_min = "B"
         if grade_rank.get(live_grade, 99) > grade_rank.get(_eff_min, 0):
             at_log("SKIP", f"{ticker} grade degraded to {live_grade} at {ask_c}¢ — stopping",
                    ticker=ticker, city=city_key)
@@ -3542,6 +3649,59 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
     return fills
 
 
+_FC_DD_LAST_ALERT = 0.0
+
+
+def _fc_drawdown_check(cfg):
+    """Forecast-sleeve drawdown monitor. ALERTS ONLY — never disarms.
+
+    Reports trailing realised PnL and deployed stake over fc_dd_window_days.
+    Logs at ERR when the loss breaches fc_dd_stop_dollars (0 = disabled).
+
+    Deliberately does NOT auto-disarm: at this sleeve's volume the threshold
+    cannot be set from evidence yet (78 settled ticker-days lifetime, worst
+    week −$56.67), and an auto-disarm on a badly-chosen number is its own
+    failure mode. It also does not inherit the NB breaker's fail-open shape —
+    if the DB is unreachable it says so instead of silently reading "no loss",
+    which matters because that is exactly when the spend caps are least able
+    to see reality.
+    """
+    global _FC_DD_LAST_ALERT
+    try:
+        stop = float(cfg.get("fc_dd_stop_dollars", 0.0) or 0.0)
+        days = int(cfg.get("fc_dd_window_days", 21) or 21)
+        import time as _t
+        with db_conn() as conn:
+            if not conn:
+                if _t.time() - _FC_DD_LAST_ALERT > 3600:
+                    _FC_DD_LAST_ALERT = _t.time()
+                    at_log("WARN", "Drawdown check skipped — no DB. Spend caps "
+                                   "are running blind this cycle.")
+                return
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT COALESCE(SUM(pnl), 0), COALESCE(SUM(cost), 0), COUNT(*),
+                           COUNT(DISTINCT (ticker, target_date))
+                    FROM live_trades
+                    WHERE is_live = TRUE
+                      AND COALESCE(strategy, '') NOT IN ('tail', 'gap', 'nb')
+                      AND settled_ts IS NOT NULL
+                      AND ts > NOW() - (%s || ' days')::interval
+                """, (days,))
+                pnl, cost, nrows, nbets = cur.fetchone()
+        pnl, cost = float(pnl or 0), float(cost or 0)
+        if stop > 0 and pnl <= -abs(stop):
+            if _t.time() - _FC_DD_LAST_ALERT > 3600:
+                _FC_DD_LAST_ALERT = _t.time()
+                at_log("ERR", f"DRAWDOWN ALERT — forecast sleeve realised "
+                              f"${pnl:.2f} over the last {days}d on ${cost:.2f} "
+                              f"staked ({nbets} ticker-days, {nrows} fills), "
+                              f"past the ${stop:.2f} bar. NOT auto-disarmed — "
+                              f"this is an alert. Kill with /auto-trader/kill.")
+    except Exception as e:
+        at_log("WARN", f"Drawdown check failed: {e}")
+
+
 def run_auto_trader_cycle(force=False):
     """
     One full scan-and-execute cycle.
@@ -3553,6 +3713,8 @@ def run_auto_trader_cycle(force=False):
 
     if not force and not cfg.get("enabled", False):
         return
+
+    _fc_drawdown_check(cfg)
 
     at_log("SCAN", f"Cycle start — scanning {len(TEMP_CITIES)} cities "
            f"horizons={cfg['horizons']} min_grade={cfg['min_grade']}")
@@ -6111,15 +6273,102 @@ def analyze_value(markets, projected_total, days_remaining=10, true_mtd=None,
 
 # ── POSTGRES — snapshot storage ───────────────────────────────────────────────
 
+# ── Connection accounting ────────────────────────────────────────────────
+# Every get_db() opens a NEW backend; there is no pool. 79 of 89 conn.close()
+# calls sit at the END of a try block, so ANY exception between open and close
+# orphans a Postgres backend for good. That is what took the DB down
+# 2026-09-19..20: Railway Postgres refused every new connection with
+# "FATAL: sorry, too many clients already" while the HTTP service stayed up
+# and reported enabled=true/live_mode=true.
+#
+# Two defences, because fixing call sites alone is not enough:
+#   1. db_conn() — a context manager whose close() is in a finally. Scheduled
+#      paths (which run unattended every 300s/1h and caused the exhaustion)
+#      use it.
+#   2. _DB_INFLIGHT — a hard ceiling. Even if some path still leaks, we refuse
+#      to open past the cap and log loudly instead of exhausting the server for
+#      everything else, including the kill switch and /admin/query.
+_DB_INFLIGHT = 0
+_DB_INFLIGHT_LOCK = _threading.Lock()
+# Headroom over normal concurrency (steady state is 1-3) but far below the
+# server's max_connections, so a runaway leak trips this and fails loudly
+# instead of exhausting Postgres for every other client — including
+# /admin/query and the kill switch. Override with DB_MAX_INFLIGHT.
+_DB_MAX_INFLIGHT = int(os.environ.get("DB_MAX_INFLIGHT", "25"))
+_DB_CAP_LOGGED = 0.0
+
+
+def _db_release():
+    global _DB_INFLIGHT
+    with _DB_INFLIGHT_LOCK:
+        _DB_INFLIGHT = max(0, _DB_INFLIGHT - 1)
+
+
+if PSYCOPG2_AVAILABLE:
+    class _CountedConnection(psycopg2.extensions.connection):
+        """Decrements the in-flight counter exactly once, on first close().
+
+        Subclassing via connection_factory is the only way to do this:
+        psycopg2's connection is a C type with no instance __dict__
+        (__dictoffset__ == 0), so you can neither set an attribute on it nor
+        rebind its .close — both raise AttributeError.
+        """
+        _rt_released = False
+
+        def close(self):
+            if not self._rt_released:
+                self._rt_released = True
+                _db_release()
+            return super().close()
+else:                                    # pragma: no cover
+    _CountedConnection = None
+
+
 def get_db():
-    """Return a psycopg2 connection or None if unavailable."""
+    """Return a psycopg2 connection or None if unavailable.
+
+    Callers MUST close. Prefer `with db_conn() as conn:` — it closes in a
+    finally and decrements the in-flight counter even when the body raises.
+    """
+    global _DB_INFLIGHT, _DB_CAP_LOGGED
     if not PSYCOPG2_AVAILABLE or not DATABASE_URL:
         return None
+    with _DB_INFLIGHT_LOCK:
+        if _DB_INFLIGHT >= _DB_MAX_INFLIGHT:
+            import time as _t
+            if _t.time() - _DB_CAP_LOGGED > 60:
+                _DB_CAP_LOGGED = _t.time()
+                print(f"  ⚠️  DB connection cap hit ({_DB_INFLIGHT}/{_DB_MAX_INFLIGHT}) "
+                      f"— refusing new connection. Suspect a leaked conn.close().")
+            return None
+        _DB_INFLIGHT += 1
     try:
-        return psycopg2.connect(DATABASE_URL, sslmode="require", connect_timeout=5)
+        return psycopg2.connect(DATABASE_URL, sslmode="require", connect_timeout=5,
+                                application_name="rain-tracker",
+                                connection_factory=_CountedConnection)
     except Exception as e:
+        _db_release()
         print(f"  ⚠️  DB connect failed: {e}")
         return None
+
+
+@_contextlib.contextmanager
+def db_conn():
+    """`with db_conn() as conn:` — guarantees close(), yields None if no DB."""
+    conn = get_db()
+    try:
+        yield conn
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def db_inflight():
+    """Current open-connection count — surfaced on /debug/live for monitoring."""
+    return _DB_INFLIGHT
 
 
 def ensure_tables():
@@ -6683,11 +6932,17 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 length  = int(self.headers.get("Content-Length", 0))
                 body    = json.loads(self.rfile.read(length))
+                # Token-gated 2026-09-19: this route can set live_mode,
+                # min_ask_c and daily_cap_dollars on a public URL.
+                if not self._require_token(body):
+                    return
                 conn    = get_db()
                 if not conn:
                     self.send_json({"ok": False, "error": "No DB"}); return
                 with conn.cursor() as cur:
                     for key, val in body.items():
+                        if key == "token":
+                            continue
                         if key in _AT_CONFIG:
                             cur.execute("""
                                 INSERT INTO auto_trader_config (key, value, updated_at)
@@ -6835,6 +7090,36 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
+
+    def _require_token(self, body=None):
+        """Gate a state-changing route on QUERY_TOKEN.
+
+        Returns True when the caller is authorised; otherwise sends the error
+        response and returns False. Accepts the token from ?token= or, for
+        POSTs, from the JSON body.
+
+        Why: /auto-trader/go-live, /auto-trader/run and POST /auto-trader/config
+        were unauthenticated on a public Railway URL. go-live's entire body sets
+        enabled=True + live_mode=True, i.e. one anonymous GET armed real-money
+        trading; the config POST could set min_ask_c=0 and daily_cap_dollars=5000.
+        Every /admin/* route already checked this token. /auto-trader/kill stays
+        OPEN on purpose — it only ever clears flags, and an emergency stop must
+        never be blocked by a missing env var.
+        """
+        import os as _os
+        expected = _os.environ.get("QUERY_TOKEN", "")
+        if not expected:
+            self.send_json({"ok": False, "error": "QUERY_TOKEN not set in environment"})
+            return False
+        tok = ""
+        if body is not None:
+            tok = body.get("token", "") or ""
+        if not tok:
+            tok = (parse_qs(urlparse(self.path).query).get("token") or [""])[0]
+        if tok != expected:
+            self.send_json({"ok": False, "error": "Invalid token"})
+            return False
+        return True
 
     def do_GET(self):
         path = urlparse(self.path).path
@@ -7574,7 +7859,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": str(e)})
 
         elif path == "/auto-trader/go-live":
-            # ARM SWITCH — enables engine + REAL orders. Browser-friendly GET.
+            # ARM SWITCH — enables engine + REAL orders. Token-gated 2026-09-19.
+            if not self._require_token():
+                return
             try:
                 _AT_CONFIG["enabled"] = True
                 _AT_CONFIG["live_mode"] = True
@@ -7877,6 +8164,9 @@ class Handler(BaseHTTPRequestHandler):
                 "ok":     True,
                 "config": _AT_CONFIG,
                 "scheduler_alive": _AT_THREAD is not None and _AT_THREAD.is_alive(),
+                "db_inflight": db_inflight(),   # open PG connections; a rising
+                                                # floor here means a leaked close
+                "db_max_inflight": _DB_MAX_INFLIGHT,
             })
 
         elif path == "/auto-trader/log":
@@ -7925,7 +8215,11 @@ class Handler(BaseHTTPRequestHandler):
                                 "source": "memory", "db_error": str(e)})
 
         elif path == "/auto-trader/run":
-            # Manually trigger one cycle (bypasses enabled check for testing)
+            # Manually trigger one cycle (bypasses enabled check for testing).
+            # Token-gated 2026-09-19 — force=True places real orders when
+            # live_mode is on, regardless of the enabled flag.
+            if not self._require_token():
+                return
             try:
                 import threading as _t2
                 t = _t2.Thread(target=run_auto_trader_cycle,
@@ -9009,6 +9303,117 @@ class Handler(BaseHTTPRequestHandler):
                 conn.close()
                 self.send_json({"ok": len(errors) == 0,
                                 "applied": len(applied), "errors": errors})
+            except Exception as e:
+                self.send_json({"ok": False, "error": str(e)})
+
+        elif path == "/admin/migrate-exit-pnl":
+            # Repair the 33 exited forecast-sleeve tickers whose pnl was booked
+            # by at_check_exits' defective expression (no entry fee, no exit
+            # fee, full held quantity instead of the quantity actually sold),
+            # and then overwritten by the two pnl-rescore endpoints, neither of
+            # which excludes exited rows.
+            #
+            # The sold counts exist NOWHERE as a column — only in the
+            # auto_trader_log EXIT lines ("<ticker> sold <n>x @ <px>¢ ..."), so
+            # this parses them back out and allocates oldest-fill-first.
+            #
+            # DRY RUN BY DEFAULT. Pass &apply=1 to write. Always reports the
+            # per-ticker before/after so the correction is auditable. Run this
+            # BEFORE adding the `exited` guard to the rescore endpoints —
+            # guarding first freezes these rows at a clobbered value while the
+            # rest stay on the hold convention, which is worse than today's
+            # single wrong-but-consistent state.
+            import os as _os, math as _math
+            qs = parse_qs(urlparse(self.path).query)
+            if qs.get("token", [""])[0] != _os.environ.get("QUERY_TOKEN", ""):
+                self.send_json({"ok": False, "error": "bad token"})
+                return
+            _apply = qs.get("apply", ["0"])[0] in ("1", "true", "yes")
+            try:
+                with db_conn() as conn:
+                    if not conn:
+                        self.send_json({"ok": False, "error": "No DB"}); return
+                    conn.autocommit = True
+                    sold_by_ticker = {}
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            SELECT ticker, msg FROM auto_trader_log
+                            WHERE level = 'EXIT' AND msg LIKE '%% sold %%'
+                            ORDER BY ts
+                        """)
+                        for _tk, _msg in cur.fetchall():
+                            m = re.search(r"sold\s+(\d+)x\s+@\s+([\d.]+)", _msg or "")
+                            if not m or not _tk:
+                                continue
+                            n_sold, px = int(m.group(1)), float(m.group(2))
+                            cur_e = sold_by_ticker.setdefault(_tk, {"sold": 0, "px_num": 0.0})
+                            cur_e["sold"] += n_sold
+                            cur_e["px_num"] += n_sold * px
+
+                        rows = []
+                        cur.execute("""
+                            SELECT id, ticker, COALESCE(filled_count, "count") AS qty,
+                                   avg_fill_price_c, cost, settled_correct, pnl
+                            FROM live_trades
+                            WHERE COALESCE(exited, FALSE) = TRUE
+                              AND COALESCE(strategy, '') NOT IN ('tail','gap','nb')
+                            ORDER BY ticker, id
+                        """)
+                        rows = cur.fetchall()
+
+                    def _fee(c, p):
+                        return _math.ceil(0.07 * c * p * (1.0 - p) * 100.0) / 100.0
+
+                    by_ticker = {}
+                    for r in rows:
+                        by_ticker.setdefault(r[1], []).append(r)
+
+                    report, updates = [], []
+                    for tk, trows in by_ticker.items():
+                        info = sold_by_ticker.get(tk)
+                        if not info or info["sold"] <= 0:
+                            report.append({"ticker": tk, "skipped": "no EXIT log line"})
+                            continue
+                        exit_px = (info["px_num"] / info["sold"]) / 100.0
+                        remaining = info["sold"]
+                        old_tot = sum(float(r[6] or 0) for r in trows)
+                        new_tot = 0.0
+                        for (_id, _tk, qty, apc, cost, correct, oldpnl) in trows:
+                            qty = int(qty or 0)
+                            entry_p = float(apc or 0) / 100.0
+                            n_out = min(qty, remaining); remaining -= n_out
+                            n_hold = qty - n_out
+                            pnl = 0.0
+                            if n_out:
+                                pnl += (n_out * exit_px - _fee(n_out, exit_px)
+                                        - n_out * entry_p - _fee(n_out, entry_p))
+                            if n_hold:
+                                payoff = float(n_hold) if correct else 0.0
+                                pnl += (payoff - n_hold * entry_p - _fee(n_hold, entry_p))
+                            pnl = round(pnl, 2); new_tot += pnl
+                            updates.append((pnl, _id))
+                        report.append({"ticker": tk, "sold": info["sold"],
+                                       "exit_px_c": round(exit_px * 100, 1),
+                                       "rows": len(trows),
+                                       "old_pnl": round(old_tot, 2),
+                                       "new_pnl": round(new_tot, 2),
+                                       "delta": round(new_tot - old_tot, 2)})
+
+                    if _apply and updates:
+                        with conn.cursor() as cur:
+                            for pnl, _id in updates:
+                                cur.execute("UPDATE live_trades SET pnl=%s WHERE id=%s",
+                                            (pnl, _id))
+
+                    self.send_json({
+                        "ok": True, "applied": _apply,
+                        "tickers": len(report), "rows_affected": len(updates),
+                        "total_delta": round(sum(r.get("delta", 0) for r in report), 2),
+                        "detail": report,
+                        "note": ("DRY RUN — add &apply=1 to write" if not _apply
+                                 else "Applied. Now add the `exited` guard to the "
+                                      "pnl-rescore endpoints or this will be clobbered again."),
+                    })
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
 
@@ -10487,6 +10892,7 @@ def _price_history_log(city_key, fc, markets):
       - Whether price momentum predicts continued movement
       - The lag window between HRRR/GFS updates and market repricing
     """
+    conn = None
     try:
         conn = get_db()
         if not conn: return
@@ -10547,6 +10953,12 @@ def _price_history_log(city_key, fc, markets):
         print(f"  ⚠️  _price_history_log error: {e}")
 
 
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 _BOOK_TABLE_READY = False
 
 def _book_snapshot_log(city_key, fc, signals, max_fetches=12):
@@ -10564,6 +10976,7 @@ def _book_snapshot_log(city_key, fc, signals, max_fetches=12):
     to respect Kalshi rate limits.
     """
     global _BOOK_TABLE_READY
+    conn = None
     try:
         conn = get_db()
         if not conn: return
@@ -10642,6 +11055,12 @@ def _book_snapshot_log(city_key, fc, signals, max_fetches=12):
         print(f"  ⚠️  _book_snapshot_log error: {e}")
 
 
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 def _paper_trade_log(city_key, fc, markets):
     """
     Log A-grade signals as paper trades (bet tracking) AND log all grades
@@ -10653,6 +11072,7 @@ def _paper_trade_log(city_key, fc, markets):
 
     Both tables skip signals past cutoff (hours_to_cutoff < 0).
     """
+    conn = None
     try:
         conn = get_db()
         if not conn: return
@@ -10748,11 +11168,18 @@ def _paper_trade_log(city_key, fc, markets):
         print(f"  ⚠️  _paper_trade_log error: {e}")
 
 
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 def _paper_trade_settle():
     """
     Settle open paper trades and calibration_snapshots by matching against
     temp_snapshots settled_temp. Called by the settlement scheduler.
     """
+    conn = None
     try:
         conn = get_db()
         if not conn: return
@@ -10806,6 +11233,12 @@ def _paper_trade_settle():
         pass
 
 
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 def _run_background_scan(full=True):
     """
     full=True  → scan all cities, log everything, run calibration + settlement.

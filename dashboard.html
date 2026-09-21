@@ -1345,10 +1345,11 @@ async function lvForecastToggle(){
   const armed=document.getElementById('lv-armed').textContent.indexOf('ARMED')>=0;
   if(armed){
     if(!confirm('Turn OFF the forecast strategy? No new forecast orders will be placed.'))return;
-    await fetch(SERVER+'/auto-trader/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:false,live_mode:false})});
+    await atPost({enabled:false,live_mode:false});
   }else{
     if(!confirm('Turn ON the forecast strategy? Real money orders will be placed.'))return;
-    await fetch(SERVER+'/auto-trader/go-live');
+    {const gr=await fetch(SERVER+'/auto-trader/go-live?token='+encodeURIComponent(atToken())).then(x=>x.json()).catch(e=>({ok:false,error:e.message}));
+     if(!gr.ok){alert('Arm failed: '+(gr.error||'unknown'));if(gr.error==='Invalid token')atToken(true);}}
   }
   loadLive();
 }
@@ -1474,7 +1475,7 @@ async function lvNbSet(mode){
   const body=mode==='off'?{nb_enabled:false,nb_live:false}
             :mode==='sim'?{nb_enabled:true,nb_live:false}
             :{nb_enabled:true,nb_live:true};
-  await fetch(SERVER+'/auto-trader/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  await atPost(body);
   loadLive();
 }
 async function lvNbSaveCfg(){
@@ -1485,13 +1486,38 @@ async function lvNbSaveCfg(){
       nb_ticker_cap:parseFloat(document.getElementById('nb-cfg-tcap').value)||100,
       nb_day_cap:parseFloat(document.getElementById('nb-cfg-dcap').value)||300
     };
-    const r=await fetch(SERVER+'/auto-trader/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(x=>x.json());
+    const r=await atPost(body);
     msg.textContent=r.ok?'Saved.':'Save failed: '+(r.error||'?');
     setTimeout(()=>{msg.textContent='';},4000);
   }catch(e){msg.textContent='Save failed: '+e.message;}
 }
 async function lvKill(){
   await fetch(SERVER+'/auto-trader/kill');loadLive();
+}
+// ── Admin token ────────────────────────────────────────────────────────
+// The arm switch and the config POST are token-gated server-side (2026-09-19);
+// they were open on a public URL. The dashboard itself is served publicly, so
+// the token cannot be baked in here — it is asked for once and kept in this
+// browser's localStorage. KILL is deliberately never gated.
+function atToken(force){
+  let t=null;
+  try{ t=localStorage.getItem('rt_admin_token'); }catch(e){}
+  if(force||!t){
+    t=prompt('Admin token (QUERY_TOKEN) — stored in this browser only:','')||'';
+    try{ localStorage.setItem('rt_admin_token',t); }catch(e){}
+  }
+  return t;
+}
+async function atPost(body){
+  let r=await fetch(SERVER+'/auto-trader/config',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(Object.assign({token:atToken()},body))}).then(x=>x.json()).catch(e=>({ok:false,error:e.message}));
+  if(r&&r.error==='Invalid token'){
+    r=await fetch(SERVER+'/auto-trader/config',{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(Object.assign({token:atToken(true)},body))}).then(x=>x.json()).catch(e=>({ok:false,error:e.message}));
+  }
+  return r;
 }
 let lvCfgLoaded=null;   // config as last loaded — SAVE only posts keys that changed
 async function lvSaveCfg(){
@@ -1542,8 +1568,7 @@ async function lvSaveCfg(){
     if(Object.keys(body).length===0){
       msg.textContent='No changes to save.';msg.style.color='var(--muted)';return;
     }
-    const r=await fetch(SERVER+'/auto-trader/config',{method:'POST',
-      headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+    const r=await atPost(body);
     msg.textContent=r.ok?'Saved: '+Object.keys(body).join(', '):'Save failed: '+(r.error||'unknown');
     msg.style.color=r.ok?'var(--yes)':'var(--no)';
     if(r.ok&&r.config)lvCfgLoaded=r.config;
