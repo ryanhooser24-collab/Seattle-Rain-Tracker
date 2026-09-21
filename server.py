@@ -7061,23 +7061,27 @@ class Handler(BaseHTTPRequestHandler):
                 elif not sql.upper().startswith("SELECT"):
                     self.send_json({"ok": False, "error": "Only SELECT queries allowed"})
                 else:
-                    conn_q = get_db()
-                    if not conn_q:
-                        self.send_json({"ok": False, "error": "No DB"})
-                    else:
-                        with conn_q.cursor() as cur:
-                            cur.execute(sql)
-                            cols = [d[0] for d in cur.description]
-                            rows = cur.fetchall()
-                            import decimal as _dec
-                            import datetime as _dt
-                            def _ser(v):
-                                if isinstance(v, _dec.Decimal): return float(v)
-                                if isinstance(v, (_dt.date, _dt.datetime)): return str(v)
-                                return v
-                            data = [dict(zip(cols, [_ser(c) for c in r])) for r in rows]
-                        conn_q.close()
-                        self.send_json({"ok": True, "rows": data, "count": len(data)})
+                    # db_conn() closes in a finally: a failing query (bad SQL,
+                    # statement timeout) used to skip the close below and
+                    # orphan a backend, which is how ad-hoc analysis could
+                    # exhaust the pool.
+                    with db_conn() as conn_q:
+                        if not conn_q:
+                            self.send_json({"ok": False, "error": "No DB"})
+                        else:
+                            with conn_q.cursor() as cur:
+                                cur.execute("SET statement_timeout = '120s'")
+                                cur.execute(sql)
+                                cols = [d[0] for d in cur.description]
+                                rows = cur.fetchall()
+                                import decimal as _dec
+                                import datetime as _dt
+                                def _ser(v):
+                                    if isinstance(v, _dec.Decimal): return float(v)
+                                    if isinstance(v, (_dt.date, _dt.datetime)): return str(v)
+                                    return v
+                                data = [dict(zip(cols, [_ser(c) for c in r])) for r in rows]
+                            self.send_json({"ok": True, "rows": data, "count": len(data)})
             except Exception as e:
                 self.send_json({"ok": False, "error": str(e)})
         else:
