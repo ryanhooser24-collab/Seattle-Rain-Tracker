@@ -3651,23 +3651,99 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
 
 _DECISION_TABLE_READY = False
 
+_DECISION_DDL = """
+CREATE TABLE IF NOT EXISTS decision_log (
+    id            BIGSERIAL PRIMARY KEY,
+    decided_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    city          TEXT, horizon TEXT, ticker TEXT,
+    target_date   DATE, market_type TEXT, side TEXT,
+    lo_temp       NUMERIC, hi_temp NUMERIC,
+    -- what the model believed
+    mu            NUMERIC, sigma NUMERIC, model_prob NUMERIC,
+    gfs_high      NUMERIC, ecmwf_high NUMERIC,
+    blend_high    NUMERIC, spread_high NUMERIC,
+    best_model    TEXT,
+    -- what the market showed
+    yes_ask       NUMERIC, yes_bid NUMERIC, ask_size INTEGER,
+    spread_c      INTEGER, open_interest INTEGER, volume_24h INTEGER,
+    -- what the grader concluded
+    grade         TEXT, gap_c INTEGER, net_gap_c INTEGER,
+    edge_ratio    NUMERIC, kelly_frac NUMERIC, kelly_size NUMERIC,
+    liq_grade     TEXT, any_model_inside BOOLEAN,
+    spread_exceeds_bracket BOOLEAN, is_tail_bet BOOLEAN,
+    hours_to_cutoff NUMERIC,
+    -- what happened next
+    gate_reason   TEXT,          -- NULL = passed to execution
+    acted         BOOLEAN,
+    is_live       BOOLEAN,
+    min_grade     TEXT, min_ask_c INTEGER
+)
+"""
+
+_DECISION_INSERT = """
+INSERT INTO decision_log (
+    decided_at,
+    city, horizon, ticker, target_date, market_type, side,
+    lo_temp, hi_temp, mu, sigma, model_prob,
+    gfs_high, ecmwf_high, blend_high, spread_high, best_model,
+    yes_ask, yes_bid, ask_size, spread_c, open_interest, volume_24h,
+    grade, gap_c, net_gap_c, edge_ratio, kelly_frac, kelly_size,
+    liq_grade, any_model_inside, spread_exceeds_bracket, is_tail_bet,
+    hours_to_cutoff, gate_reason, acted, is_live, min_grade, min_ask_c
+) VALUES (%s,
+          %s,%s,%s,%s,%s,%s, %s,%s,%s,%s,%s, %s,%s,%s,%s,%s,
+          %s,%s,%s,%s,%s,%s, %s,%s,%s,%s,%s,%s, %s,%s,%s,%s,
+          %s,%s,%s,%s,%s,%s)
+"""
+
+
+_DECISION_BUF = []
+
 
 def _decision_log(city_key, horizon, signal, fc, cfg, gate_reason):
-    """Append-only record of what the trader believed at decision time.
+    """Buffer one decision row. Flushed once per cycle by _decision_flush().
 
-    Written for EVERY graded signal the cycle sees, acted on or not, with the
-    gate that stopped it. This is the substrate every future backtest should
-    score against — it is the only place blend_high and spread_high are kept,
-    and the only record whose grade is by construction the grade the trader
-    used.
+    decided_at is stamped HERE, not at INSERT time, because the batch is
+    flushed at the end of the cycle — a DEFAULT NOW() would record the flush
+    moment and silently misdate every row by up to a cycle.
 
-    Never UPDATE a row here. A settled outcome is joined on
-    (city, target_date) at analysis time, never written back, so the record
-    cannot be contaminated by hindsight the way nb_forecasts' UPSERT was.
-
-    Fails soft and silently-ish: a logging problem must never stop trading.
+    Buffered rather than written inline because a cycle grades ~190 brackets
+    across 17 cities and every get_db() opens a NEW backend — inline writes
+    meant ~55k connections/day, which is the same churn that exhausted
+    Postgres on 2026-09-19. One connection per cycle instead.
     """
-    global _DECISION_TABLE_READY
+    try:
+        import datetime as _dt_now
+        _DECISION_BUF.append((
+            _dt_now.datetime.now(_dt_now.timezone.utc),
+            city_key, horizon, signal.get("ticker"),
+            ticker_target_date(signal.get("ticker") or "") or fc.get("target_date"),
+            signal.get("market_type", "high"), signal.get("side", "yes"),
+            signal.get("lo_temp"), signal.get("hi_temp"),
+            signal.get("mu"), signal.get("sigma"), signal.get("model_prob"),
+            fc.get("gfs_high"), fc.get("ecmwf_high"),
+            fc.get("blend_high"), fc.get("spread_high"), fc.get("best_model"),
+            signal.get("yes_ask"), signal.get("yes_bid"), signal.get("ask_size"),
+            signal.get("spread_c"), signal.get("open_interest"), signal.get("volume_24h"),
+            signal.get("grade"), signal.get("gap_c"), signal.get("net_gap_c"),
+            signal.get("edge_ratio"), signal.get("kelly_frac"), signal.get("kelly_size"),
+            signal.get("liq_grade"), signal.get("any_model_inside"),
+            signal.get("spread_exceeds_bracket"), signal.get("is_tail_bet"),
+            signal.get("hours_to_cutoff"), gate_reason, gate_reason is None,
+            bool(cfg.get("live_mode", False)),
+            cfg.get("min_grade"), cfg.get("min_ask_c"),
+        ))
+    except Exception as e:
+        at_log("WARN", f"decision_log buffer failed for {signal.get('ticker')}: {e}",
+               city=city_key)
+
+
+def _decision_flush():
+    """Write the cycle's buffered decision rows in one batch, one connection."""
+    global _DECISION_BUF, _DECISION_TABLE_READY
+    if not _DECISION_BUF:
+        return
+    rows, _DECISION_BUF = _DECISION_BUF, []
     try:
         with db_conn() as conn:
             if not conn:
@@ -3679,76 +3755,18 @@ def _decision_log(city_key, horizon, signal, fc, cfg, gate_reason):
                         cur.execute("SET lock_timeout = '3s'")
                     except Exception:
                         pass
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS decision_log (
-                            id            BIGSERIAL PRIMARY KEY,
-                            decided_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            city          TEXT, horizon TEXT, ticker TEXT,
-                            target_date   DATE, market_type TEXT, side TEXT,
-                            lo_temp       NUMERIC, hi_temp NUMERIC,
-                            -- what the model believed
-                            mu            NUMERIC, sigma NUMERIC, model_prob NUMERIC,
-                            gfs_high      NUMERIC, ecmwf_high NUMERIC,
-                            blend_high    NUMERIC, spread_high NUMERIC,
-                            best_model    TEXT,
-                            -- what the market showed
-                            yes_ask       NUMERIC, yes_bid NUMERIC, ask_size INTEGER,
-                            spread_c      INTEGER, open_interest INTEGER, volume_24h INTEGER,
-                            -- what the grader concluded
-                            grade         TEXT, gap_c INTEGER, net_gap_c INTEGER,
-                            edge_ratio    NUMERIC, kelly_frac NUMERIC, kelly_size NUMERIC,
-                            liq_grade     TEXT, any_model_inside BOOLEAN,
-                            spread_exceeds_bracket BOOLEAN, is_tail_bet BOOLEAN,
-                            hours_to_cutoff NUMERIC,
-                            -- what happened next
-                            gate_reason   TEXT,          -- NULL = passed to execution
-                            acted         BOOLEAN,
-                            is_live       BOOLEAN,
-                            min_grade     TEXT, min_ask_c INTEGER
-                        )
-                    """)
+                    cur.execute(_DECISION_DDL)
                     cur.execute("CREATE INDEX IF NOT EXISTS decision_log_ct "
                                 "ON decision_log (city, target_date)")
                     cur.execute("CREATE INDEX IF NOT EXISTS decision_log_ts "
                                 "ON decision_log (decided_at)")
                 conn.autocommit = False
                 _DECISION_TABLE_READY = True
-
             with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO decision_log (
-                        city, horizon, ticker, target_date, market_type, side,
-                        lo_temp, hi_temp, mu, sigma, model_prob,
-                        gfs_high, ecmwf_high, blend_high, spread_high, best_model,
-                        yes_ask, yes_bid, ask_size, spread_c, open_interest, volume_24h,
-                        grade, gap_c, net_gap_c, edge_ratio, kelly_frac, kelly_size,
-                        liq_grade, any_model_inside, spread_exceeds_bracket, is_tail_bet,
-                        hours_to_cutoff, gate_reason, acted, is_live, min_grade, min_ask_c
-                    ) VALUES (%s,%s,%s,%s,%s,%s, %s,%s,%s,%s,%s, %s,%s,%s,%s,%s,
-                              %s,%s,%s,%s,%s,%s, %s,%s,%s,%s,%s,%s, %s,%s,%s,%s,
-                              %s,%s,%s,%s,%s,%s)
-                """, (
-                    city_key, horizon, signal.get("ticker"),
-                    ticker_target_date(signal.get("ticker") or "") or fc.get("target_date"),
-                    signal.get("market_type", "high"), signal.get("side", "yes"),
-                    signal.get("lo_temp"), signal.get("hi_temp"),
-                    signal.get("mu"), signal.get("sigma"), signal.get("model_prob"),
-                    fc.get("gfs_high"), fc.get("ecmwf_high"),
-                    fc.get("blend_high"), fc.get("spread_high"), fc.get("best_model"),
-                    signal.get("yes_ask"), signal.get("yes_bid"), signal.get("ask_size"),
-                    signal.get("spread_c"), signal.get("open_interest"), signal.get("volume_24h"),
-                    signal.get("grade"), signal.get("gap_c"), signal.get("net_gap_c"),
-                    signal.get("edge_ratio"), signal.get("kelly_frac"), signal.get("kelly_size"),
-                    signal.get("liq_grade"), signal.get("any_model_inside"),
-                    signal.get("spread_exceeds_bracket"), signal.get("is_tail_bet"),
-                    signal.get("hours_to_cutoff"), gate_reason, gate_reason is None,
-                    bool(cfg.get("live_mode", False)),
-                    cfg.get("min_grade"), cfg.get("min_ask_c"),
-                ))
+                cur.executemany(_DECISION_INSERT, rows)
             conn.commit()
     except Exception as e:
-        at_log("WARN", f"decision_log write failed for {signal.get('ticker')}: {e}",
-               city=city_key)
+        at_log("WARN", f"decision_log flush failed ({len(rows)} rows): {e}")
 
 
 _FC_DD_LAST_ALERT = 0.0
@@ -3911,6 +3929,7 @@ def run_auto_trader_cycle(force=False):
                            f"silent regression")
     else:
         _AT_ALLSKIP_STREAK = 0
+    _decision_flush()     # one connection for the cycle's ~190 decision rows
     at_log("SCAN", f"Cycle complete — {total_fills} fill(s) placed")
     at_flush_log_to_db()  # batch write cycle entries to DB
 
