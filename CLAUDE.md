@@ -186,6 +186,41 @@ explicitly asked. Never arm/disarm without an explicit instruction.
 ## Key learnings (do not relearn these the hard way)
 
 - EV per dollar is the metric, not win rate or raw ROI.
+- **The sleeve is a THRESHOLD-CONTRACT-ONLY trader, by accident, since 2026-09-11.**
+  Every closed Kalshi daily-high bracket is exactly 1.0F wide and `bracket_prob`
+  scores it as the 2.0F integer window P(lo-0.5 < X < hi+0.5). With sigma floored
+  at d0 2.0 / d1 2.2 the ceiling is 2*Phi(1/sigma)-1 = **0.3829 (d0) / 0.3506 (d1)**,
+  while grade A needs prob >= 0.50 (i.e. sigma <= 1.4826F). So no closed bracket in
+  any city at any horizon can grade A: verified 0 B trades in 22,175 ticker-days.
+  "T-only" and "the primary sleeve" are THE SAME 34 tickets. A WARN now fires from
+  `analyze_temp_brackets` when min_grade is unreachable. Nobody chose this — decide
+  it deliberately (accept T-only / min_grade=B / re-derive the bars against the floor).
+- **"T" means an open-ended THRESHOLD contract (shape), NOT a cheap tail.** Different
+  thing from the retired `tail` sleeve. There is no shape edge: blind T at ask>=25c
+  returns **-0.194/$** (date-clustered CI excludes zero on the LOSING side) vs blind
+  B at -0.120/$, so T is priced harder against the buyer than B.
+- **Open-ended model_prob was wrong by EXACTLY 1.0F from 2026-07-11 to 2026-09-09.**
+  Inverting stored model_prob against mu/sigma recovers the cut point the code used:
+  the offset is exactly +/-1.000 every day (150-520 rows/day, exact, not drift) and
+  snaps to 0.000 on 09-10. Open-ended brackets were scored on a cut point 1.0F too
+  generous, inflating model_prob on precisely that shape. **Every pre-09-10 T result
+  is bug-era** — 86 of 90 stored-grade T positions predate it. Re-deriving prob from
+  stored mu/sigma with the correct +/-0.5 is clean (mu and sigma are inputs, unaffected).
+- **`price_history.grade` is NOT the grade the trader acted on** — it matches only
+  **59.6%** of the time at sub-5-minute alignment, because price_history is written by
+  a separate hourly scan with its own forecast fetch, and `blend_high`/`spread_high`
+  were never persisted so no reconstruction can recover them (regrade recall 0.553).
+  Use the `decision_log` table instead: append-only, written at decision time for every
+  graded signal with the gate that stopped it. Never UPDATE it — join settlement at
+  analysis time. Backtests scored before 2026-09-21 overlap the deployed decision by
+  roughly half.
+- **`at_load_config_from_db()` runs ONLY at boot.** Booting while the DB is down leaves
+  the process on code defaults forever, silently diverging from the DB — and the next
+  deploy silently re-arms from the DB. This is why the code defaults must be fail-safe
+  (`exit_enabled`, `momentum_enabled`, `_live_spend_today`), not merely the DB rows.
+- **The whitelist is ignored in SIM.** `live_city_whitelist` is gated on
+  `cfg.get("live_mode")`, so SIM already scans all 17 cities. Setting live_mode=false
+  is all that is needed for a full-coverage shadow run.
 - Sigma was ~65% too narrow globally before per-city calibration (bias +
   sigma factor, shrinkage to global means, clamped) — that fix is core to v2.
 - Combo rows poison calibration SQL (inflate z-std) — always filter them.

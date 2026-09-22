@@ -3649,6 +3649,108 @@ def at_execute_signal(signal, cfg, open_positions, city_counts, ticker_spent):
     return fills
 
 
+_DECISION_TABLE_READY = False
+
+
+def _decision_log(city_key, horizon, signal, fc, cfg, gate_reason):
+    """Append-only record of what the trader believed at decision time.
+
+    Written for EVERY graded signal the cycle sees, acted on or not, with the
+    gate that stopped it. This is the substrate every future backtest should
+    score against — it is the only place blend_high and spread_high are kept,
+    and the only record whose grade is by construction the grade the trader
+    used.
+
+    Never UPDATE a row here. A settled outcome is joined on
+    (city, target_date) at analysis time, never written back, so the record
+    cannot be contaminated by hindsight the way nb_forecasts' UPSERT was.
+
+    Fails soft and silently-ish: a logging problem must never stop trading.
+    """
+    global _DECISION_TABLE_READY
+    try:
+        with db_conn() as conn:
+            if not conn:
+                return
+            if not _DECISION_TABLE_READY:
+                conn.autocommit = True
+                with conn.cursor() as cur:
+                    try:
+                        cur.execute("SET lock_timeout = '3s'")
+                    except Exception:
+                        pass
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS decision_log (
+                            id            BIGSERIAL PRIMARY KEY,
+                            decided_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                            city          TEXT, horizon TEXT, ticker TEXT,
+                            target_date   DATE, market_type TEXT, side TEXT,
+                            lo_temp       NUMERIC, hi_temp NUMERIC,
+                            -- what the model believed
+                            mu            NUMERIC, sigma NUMERIC, model_prob NUMERIC,
+                            gfs_high      NUMERIC, ecmwf_high NUMERIC,
+                            blend_high    NUMERIC, spread_high NUMERIC,
+                            best_model    TEXT,
+                            -- what the market showed
+                            yes_ask       NUMERIC, yes_bid NUMERIC, ask_size INTEGER,
+                            spread_c      INTEGER, open_interest INTEGER, volume_24h INTEGER,
+                            -- what the grader concluded
+                            grade         TEXT, gap_c INTEGER, net_gap_c INTEGER,
+                            edge_ratio    NUMERIC, kelly_frac NUMERIC, kelly_size NUMERIC,
+                            liq_grade     TEXT, any_model_inside BOOLEAN,
+                            spread_exceeds_bracket BOOLEAN, is_tail_bet BOOLEAN,
+                            hours_to_cutoff NUMERIC,
+                            -- what happened next
+                            gate_reason   TEXT,          -- NULL = passed to execution
+                            acted         BOOLEAN,
+                            is_live       BOOLEAN,
+                            min_grade     TEXT, min_ask_c INTEGER
+                        )
+                    """)
+                    cur.execute("CREATE INDEX IF NOT EXISTS decision_log_ct "
+                                "ON decision_log (city, target_date)")
+                    cur.execute("CREATE INDEX IF NOT EXISTS decision_log_ts "
+                                "ON decision_log (decided_at)")
+                conn.autocommit = False
+                _DECISION_TABLE_READY = True
+
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO decision_log (
+                        city, horizon, ticker, target_date, market_type, side,
+                        lo_temp, hi_temp, mu, sigma, model_prob,
+                        gfs_high, ecmwf_high, blend_high, spread_high, best_model,
+                        yes_ask, yes_bid, ask_size, spread_c, open_interest, volume_24h,
+                        grade, gap_c, net_gap_c, edge_ratio, kelly_frac, kelly_size,
+                        liq_grade, any_model_inside, spread_exceeds_bracket, is_tail_bet,
+                        hours_to_cutoff, gate_reason, acted, is_live, min_grade, min_ask_c
+                    ) VALUES (%s,%s,%s,%s,%s,%s, %s,%s,%s,%s,%s, %s,%s,%s,%s,%s,
+                              %s,%s,%s,%s,%s,%s, %s,%s,%s,%s,%s,%s, %s,%s,%s,%s,
+                              %s,%s,%s,%s,%s,%s)
+                """, (
+                    city_key, horizon, signal.get("ticker"),
+                    ticker_target_date(signal.get("ticker") or "") or fc.get("target_date"),
+                    signal.get("market_type", "high"), signal.get("side", "yes"),
+                    signal.get("lo_temp"), signal.get("hi_temp"),
+                    signal.get("mu"), signal.get("sigma"), signal.get("model_prob"),
+                    fc.get("gfs_high"), fc.get("ecmwf_high"),
+                    fc.get("blend_high"), fc.get("spread_high"), fc.get("best_model"),
+                    signal.get("yes_ask"), signal.get("yes_bid"), signal.get("ask_size"),
+                    signal.get("spread_c"), signal.get("open_interest"), signal.get("volume_24h"),
+                    signal.get("grade"), signal.get("gap_c"), signal.get("net_gap_c"),
+                    signal.get("edge_ratio"), signal.get("kelly_frac"), signal.get("kelly_size"),
+                    signal.get("liq_grade"), signal.get("any_model_inside"),
+                    signal.get("spread_exceeds_bracket"), signal.get("is_tail_bet"),
+                    signal.get("hours_to_cutoff"), gate_reason, gate_reason is None,
+                    bool(cfg.get("live_mode", False)),
+                    cfg.get("min_grade"), cfg.get("min_ask_c"),
+                ))
+            conn.commit()
+    except Exception as e:
+        at_log("WARN", f"decision_log write failed for {signal.get('ticker')}: {e}",
+               city=city_key)
+
+
 _FC_DD_LAST_ALERT = 0.0
 
 
@@ -3760,17 +3862,30 @@ def run_auto_trader_cycle(force=False):
 
                 for signal in all_markets:
                     g = signal.get("grade", "skip")
-                    if g == "skip" or not signal.get("actionable"):
-                        continue
-                    # Tier 1: only execute YES-side signals (NO-side calibration deferred)
-                    if signal.get("side") == "no":
-                        continue
 
-                    # Only filter on grade — the execution loop handles
-                    # sizing, book depth, and per-fill grade re-evaluation
-                    grade_rank = {"A": 0, "B": 1, "C": 2}
-                    min_rank   = grade_rank.get(cfg.get("min_grade", "A"), 0)
-                    if grade_rank.get(g, 99) > min_rank:
+                    # ── DECISION RECORD ────────────────────────────────────
+                    # Append-only, written at decision time, BEFORE any gate
+                    # can drop the signal — so the row exists whether or not we
+                    # act. price_history.grade matches the grade the trader
+                    # actually acted on only 59.6% of the time (it is written by
+                    # a separate hourly scan with its own forecast fetch), and
+                    # blend_high / spread_high were never persisted at all, so
+                    # no backtest could reconstruct the decision. Every gate
+                    # records WHY it fired. Never UPDATE these rows: the point
+                    # is what was believed at the moment, not what turned out.
+                    _gate = None
+                    if g == "skip" or not signal.get("actionable"):
+                        _gate = "grade_skip_or_not_actionable"
+                    elif signal.get("side") == "no":
+                        _gate = "no_side"
+                    else:
+                        _gr = {"A": 0, "B": 1, "C": 2}
+                        if _gr.get(g, 99) > _gr.get(cfg.get("min_grade", "A"), 0):
+                            _gate = "below_min_grade"
+                    _decision_log(city_key, horizon, signal,
+                                  result.get("forecast", {}), cfg, _gate)
+
+                    if _gate:
                         continue
 
                     # Enrich signal with forecast for model_forecasts logging
